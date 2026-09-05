@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [0.3.1](https://github.com/suneel944/agent-bridge/compare/v0.3.0...v0.3.1) (2026-09-05)
+
+### Changed
 
 - Enforce PR ownership, change labels, issue references, milestones and titles.
 - Prepare version and changelog PRs automatically; publish verified artifacts
@@ -10,9 +12,6 @@
   releases; adapt the independent integration client to MCP 2 and HTTPX 2.
 - Allow SQLite writers one second for transient contention while retaining the
   bounded failure deadline for locks that remain held.
-
-## [0.3.1](https://github.com/suneel944/agent-bridge/compare/v0.3.0...v0.3.1) (2026-09-05)
-
 
 ### Automation
 
