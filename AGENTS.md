@@ -1,0 +1,18 @@
+# agent-bridge
+
+Shared operating guidance remains authoritative at `~/.claude/CLAUDE.md`.
+
+Follow `CONTRIBUTING.md` for Google Python style guidance, the project's explicit
+tooling adaptations, and coordination invariants. New production APIs require
+type annotations and Google-style documentation; Ruff enforces the configured
+rules. Keep the 80-character formatting target and do not weaken checks.
+
+- This is a Python 3.12+ launcher around MCP Agent Mail and Git worktrees.
+- Keep coordination state outside target repositories. Preserve native CLI
+  authentication and permissions; never add bypass flags.
+- Read the implementation before changing launch, identity, or process handling.
+- Reservations are advisory. Do not describe them as enforced filesystem locks.
+- Use RTK explicitly for development commands when available.
+- Run focused checks while editing. The final gate is `make check`, also used by CI.
+- Integration tests use real local MCP transport and temporary Git repositories.
+  Distinguish those results from verification of live model behavior.

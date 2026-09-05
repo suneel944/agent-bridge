@@ -1,0 +1,651 @@
+import asyncio
+import json
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+import httpx
+import psutil
+import pytest
+from fastmcp import Client
+
+from agent_bridge.checkpoints import checkpoint, mailbox
+from agent_bridge.cli import Bridge, BridgeError, git, lock, write_json
+
+
+@pytest.fixture
+def bridge(tmp_path):
+    instance = Bridge(tmp_path / "state")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    instance.config["port"] = port
+    instance.url = f"http://127.0.0.1:{port}"
+    write_json(instance.home / "config.json", instance.config)
+    yield instance
+    instance.down()
+
+
+@pytest.fixture
+def repo(tmp_path):
+    path = tmp_path / "project with spaces"
+    path.mkdir()
+    git(path, "init")
+    (path / "shared.txt").write_text("original\n")
+    git(path, "add", "shared.txt")
+    git(
+        path,
+        "-c",
+        "user.name=Bridge Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "Initial fixture",
+    )
+    return path
+
+
+def test_isolation_identity_and_idempotent_setup(bridge, repo):
+    data = bridge.setup(repo)
+    claude, codex = (Path(data["lanes"][name]) for name in ("claude", "codex"))
+    (claude / "shared.txt").write_text("Claude change\n")
+    assert (codex / "shared.txt").read_text() == "original\n"
+    assert (repo / "shared.txt").read_text() == "original\n"
+    assert bridge.setup(codex) == data
+    assert bridge.project(claude) == bridge.project(repo)
+    assert (
+        len(git(repo, "worktree", "list", "--porcelain").split("worktree "))
+        == 4
+    )
+
+
+def test_dirty_source_is_not_silently_omitted(bridge, repo):
+    (repo / "shared.txt").write_text("uncommitted work\n")
+    with pytest.raises(BridgeError, match="pending changes"):
+        bridge.setup(repo)
+    assert (repo / "shared.txt").read_text() == "uncommitted work\n"
+
+
+def test_missing_commit_and_existing_branch_preserved(bridge, repo, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    git(empty, "init")
+    with pytest.raises(BridgeError):
+        bridge.setup(empty)
+    _, directory = bridge.project(repo)
+    branch = f"bridge/{directory.name}/codex"
+    git(repo, "branch", branch)
+    with pytest.raises(BridgeError, match="Existing lane"):
+        bridge.setup(repo)
+    assert not (directory / "claude").exists()
+    assert git(repo, "rev-parse", branch) == git(repo, "rev-parse", "HEAD")
+
+
+def test_lock_rejects_second_session(bridge):
+    path = bridge.home / "session.lock"
+    with lock(path), pytest.raises(BridgeError, match="owns"):
+        with lock(path):
+            pass
+
+
+def test_public_state_directory_rejected(tmp_path):
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755)
+    with pytest.raises(BridgeError, match="private"):
+        Bridge(public)
+
+
+def test_occupied_port_fails_without_killing_owner(bridge):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", bridge.config["port"]))
+        sock.listen()
+        with pytest.raises(BridgeError, match="occupied"):
+            bridge.up()
+        assert sock.getsockname()[1] == bridge.config["port"]
+
+
+def test_stale_pid_record_cannot_stop_an_unrelated_process(bridge):
+    current = psutil.Process()
+    write_json(
+        bridge.home / "server.json",
+        {
+            "pid": current.pid,
+            "created": current.create_time(),
+        },
+    )
+    assert bridge.server_process() is None
+    bridge.down()
+    assert current.is_running()
+
+
+def test_changed_lane_branch_is_rejected_without_resetting(bridge, repo):
+    data = bridge.setup(repo)
+    lane = Path(data["lanes"]["codex"])
+    git(lane, "switch", "-c", "personal-work")
+    with pytest.raises(BridgeError, match="changed branch"):
+        bridge.setup(repo)
+    assert git(lane, "branch", "--show-current") == "personal-work"
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+def test_native_launch_preserves_task_and_passes_shared_configuration(
+    bridge, repo, monkeypatch, tmp_path, agent
+):
+    # Execute a native CLI stand-in: verifies argv, cwd and env across a real
+    # subprocess boundary without sending model requests or reading auth files.
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    executable = binary / agent
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CAPTURE'], 'w') as f:\n"
+        " json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(), "
+        "'has_token': bool(os.environ.get('AGENT_BRIDGE_TOKEN'))}, f)\n"
+    )
+    executable.chmod(0o755)
+    capture = tmp_path / "capture.json"
+    monkeypatch.setenv("CAPTURE", str(capture))
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(bridge, "up", lambda: None)
+
+    async def fake_identity(*args):
+        return {}
+
+    monkeypatch.setattr(bridge, "identity", fake_identity)
+    task = 'Fix "login"; $(do-not-execute)\nPreserve this newline.'
+    assert bridge.launch(agent, repo, task) == 0
+    result = json.loads(capture.read_text())
+    assert result["cwd"] == bridge.setup(repo)["lanes"][agent]
+    assert result["has_token"]
+    assert task in result["argv"][-1]
+    assert bridge.config["token"] not in json.dumps(result)
+    assert str(repo) in " ".join(result["argv"])
+    if agent == "claude":
+        config = json.loads(Path(result["argv"][1]).read_text())
+        assert (
+            config["mcpServers"]["agent_bridge"]["url"] == bridge.url + "/mcp/"
+        )
+        settings = json.loads(
+            result["argv"][result["argv"].index("--settings") + 1]
+        )
+        assert "PreToolUse" in settings["hooks"]
+        assert "Stop" in settings["hooks"]
+    else:
+        assert (
+            'mcp_servers.agent_bridge.bearer_token_env_var="AGENT_BRIDGE_TOKEN"'
+            in result["argv"]
+        )
+        overrides = [arg for arg in result["argv"] if arg.startswith("hooks.")]
+        parsed = tomllib.loads("\n".join(overrides))
+        assert "PreToolUse" in parsed["hooks"]
+        assert "SessionEnd" in parsed["hooks"]
+    assert "bypass" not in " ".join(result["argv"])
+
+
+def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
+    data = bridge.setup(repo)
+    bridge.up()
+    pid = bridge.server_process().pid
+    bridge.up()
+    assert bridge.server_process().pid == pid
+    # A real unauthenticated tool request must not receive access on localhost.
+    response = httpx.post(
+        bridge.url + "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        },
+        trust_env=False,
+    )
+    assert response.status_code == 401
+
+    async def exercise():
+        tokens = {}
+        for agent, name in [("claude", "GreenCastle"), ("codex", "BlueLake")]:
+            identity = await bridge.identity(agent, data)
+            tokens[name] = identity["registration_token"]
+
+        async def call(client, tool, arguments):
+            name = arguments.get("agent_name") or arguments.get("sender_name")
+            if name:
+                arguments[
+                    "sender_token"
+                    if tool == "send_message"
+                    else "registration_token"
+                ] = tokens[name]
+            return await client.call_tool(tool, arguments)
+
+        async with Client(
+            bridge.url + "/mcp/", auth=bridge.config["token"]
+        ) as claude:
+            async with Client(
+                bridge.url + "/mcp/", auth=bridge.config["token"]
+            ) as codex:
+                root = data["root"]
+                await claude.call_tool("ensure_project", {"human_key": root})
+                granted = await call(
+                    claude,
+                    "file_reservation_paths",
+                    {
+                        "project_key": root,
+                        "agent_name": "GreenCastle",
+                        "paths": ["shared.txt"],
+                        "ttl_seconds": 300,
+                        "exclusive": True,
+                    },
+                )
+                assert not granted.data["conflicts"]
+                conflict = await call(
+                    codex,
+                    "file_reservation_paths",
+                    {
+                        "project_key": root,
+                        "agent_name": "BlueLake",
+                        "paths": ["shared.txt"],
+                        "ttl_seconds": 300,
+                        "exclusive": True,
+                    },
+                )
+                assert conflict.data["conflicts"]
+                await call(
+                    codex,
+                    "release_file_reservations",
+                    {
+                        "project_key": root,
+                        "agent_name": "BlueLake",
+                    },
+                )
+                await call(
+                    claude,
+                    "send_message",
+                    {
+                        "project_key": root,
+                        "sender_name": "GreenCastle",
+                        "to": ["BlueLake"],
+                        "subject": "Login contract",
+                        "body_md": "Response now includes session_id.",
+                        "thread_id": "login-task",
+                        "ack_required": True,
+                    },
+                )
+                inbox = await call(
+                    codex,
+                    "fetch_inbox",
+                    {
+                        "project_key": root,
+                        "agent_name": "BlueLake",
+                        "include_bodies": True,
+                    },
+                )
+                messages = json.loads(inbox.content[0].text)
+                message = next(
+                    item
+                    for item in messages
+                    if item["subject"] == "Login contract"
+                )
+                assert "session_id" in message["body_md"]
+                directory = Path(data["lanes"]["codex"]).parent
+                payload = {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "codex-test",
+                    "cwd": data["lanes"]["codex"],
+                    "tool_name": "apply_patch",
+                }
+                hook = bridge.hooks("codex", directory)["PreToolUse"][0][
+                    "hooks"
+                ][0]
+                result = subprocess.run(
+                    shlex.split(hook["command"]),
+                    input=json.dumps(payload),
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr
+                delivered = json.loads(result.stdout)["hookSpecificOutput"]
+                assert delivered["permissionDecision"] == "deny"
+                assert "session_id" in delivered["additionalContext"]
+                assert (
+                    checkpoint(bridge.home, directory, "codex", payload) == {}
+                )
+                assert (
+                    mailbox(bridge.home, root, "BlueLake")["pending_ack"] == 1
+                )
+                await call(
+                    codex,
+                    "acknowledge_message",
+                    {
+                        "project_key": root,
+                        "agent_name": "BlueLake",
+                        "message_id": message["id"],
+                    },
+                )
+                assert (
+                    mailbox(bridge.home, root, "BlueLake")["pending_ack"] == 0
+                )
+                await call(
+                    claude,
+                    "release_file_reservations",
+                    {
+                        "project_key": root,
+                        "agent_name": "GreenCastle",
+                    },
+                )
+                acquired = await call(
+                    codex,
+                    "file_reservation_paths",
+                    {
+                        "project_key": root,
+                        "agent_name": "BlueLake",
+                        "paths": ["shared.txt"],
+                        "ttl_seconds": 300,
+                        "exclusive": True,
+                    },
+                )
+                assert not acquired.data["conflicts"]
+                await call(
+                    codex,
+                    "send_message",
+                    {
+                        "project_key": root,
+                        "sender_name": "BlueLake",
+                        "to": ["GreenCastle"],
+                        "subject": "Handoff",
+                        "body_md": (
+                            f"Reviewed commit {data['base']}; "
+                            "shared.txt unchanged."
+                        ),
+                        "thread_id": "login-task",
+                    },
+                )
+                handoff = await call(
+                    claude,
+                    "fetch_inbox",
+                    {
+                        "project_key": root,
+                        "agent_name": "GreenCastle",
+                        "include_bodies": True,
+                    },
+                )
+                assert data["base"] in handoff.content[0].text
+                stop = {
+                    "hook_event_name": "Stop",
+                    "session_id": "claude-test",
+                    "cwd": data["lanes"]["claude"],
+                }
+                assert (
+                    checkpoint(bridge.home, directory, "claude", stop)[
+                        "decision"
+                    ]
+                    == "block"
+                )
+                assert (
+                    checkpoint(
+                        bridge.home,
+                        directory,
+                        "claude",
+                        {
+                            **stop,
+                            "stop_hook_active": True,
+                        },
+                    )
+                    == {}
+                )
+                state = json.loads(
+                    (directory / "claude-activity.json").read_text()
+                )
+                assert state["activity"] == "idle"
+                assert "outcome" not in state
+
+    asyncio.run(exercise())
+    bridge.down()
+    assert bridge.server_process() is None
+    bridge.up()
+
+    async def persisted():
+        identity = await bridge.identity("codex", data)
+        async with Client(
+            bridge.url + "/mcp/", auth=bridge.config["token"]
+        ) as client:
+            result = await client.call_tool(
+                "fetch_inbox",
+                {
+                    "project_key": data["root"],
+                    "agent_name": "BlueLake",
+                    "include_bodies": True,
+                    "registration_token": identity["registration_token"],
+                },
+            )
+            assert "session_id" in result.content[0].text
+
+    asyncio.run(persisted())
+    assert (Path(data["lanes"]["claude"]) / "shared.txt").exists()
+
+
+def test_reports_require_remaining_work_or_verification(bridge, repo):
+    data = bridge.setup(repo)
+    lane = Path(data["lanes"]["claude"])
+    with pytest.raises(BridgeError, match="remaining"):
+        bridge.report(lane, "partial", "Engine built", "", "")
+    with pytest.raises(BridgeError, match="evidence"):
+        bridge.report(lane, "ready", "Engine built", "", "")
+    with pytest.raises(BridgeError, match="worktree"):
+        bridge.report(repo, "ready", "Engine built", "", "pytest: 12 passed")
+    bridge.report(
+        lane,
+        "partial",
+        "Engine built",
+        "CLI integration missing",
+        "12 tests passed",
+    )
+    state = json.loads((lane.parent / "claude-activity.json").read_text())
+    assert state["outcome"] == "partial"
+    assert state["remaining"] == "CLI integration missing"
+
+
+def test_legacy_status_does_not_infer_completion(bridge, repo, capsys):
+    data = bridge.setup(repo)
+    directory = Path(data["lanes"]["claude"]).parent
+    with lock(directory / "claude.session.lock"):
+        bridge.status()
+    output = capsys.readouterr().out
+    assert "running; checkpoints unavailable (relaunch)" in output
+    assert "Reported outcome: unknown" in output
+
+
+def test_hook_failure_pauses_tools_and_foreign_worktree_is_rejected(
+    bridge, repo
+):
+    data = bridge.setup(repo)
+    lane = Path(data["lanes"]["claude"])
+    write_json(lane.parent / "claude-identity.json", {"name": "GreenCastle"})
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(lane),
+        "session_id": "test",
+    }
+    result = checkpoint(bridge.home, lane.parent, "claude", payload)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    with pytest.raises(BridgeError, match="cwd"):
+        checkpoint(
+            bridge.home, lane.parent, "claude", {**payload, "cwd": str(repo)}
+        )
+    assert (
+        checkpoint(
+            bridge.home, lane.parent, "claude", {**payload, "agent_id": "child"}
+        )
+        == {}
+    )
+
+
+def test_issue_claim_race_persistence_and_explicit_handoff(
+    bridge, repo, tmp_path
+):
+    data = bridge.setup(repo)
+    lanes = {name: Path(path) for name, path in data["lanes"].items()}
+    # Real CLI processes contend for one issue from separate worktrees.
+    commands = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "agent_bridge.cli",
+                "--home",
+                str(bridge.home),
+                "issue",
+                "claim",
+                "432",
+            ],
+            cwd=lane,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for lane in lanes.values()
+    ]
+    results = [command.communicate(timeout=10) for command in commands]
+    assert sorted(command.returncode for command in commands) == [0, 1], results
+    restarted = Bridge(bridge.home)
+    record = restarted.issue(repo, "list")["issues"]["432"]
+    owner = record["owner"]
+    peer = "codex" if owner == "claude" else "claude"
+    with pytest.raises(BridgeError, match="owned"):
+        bridge.issue(lanes[peer], "claim", "#432")
+    with pytest.raises(BridgeError, match="Only"):
+        bridge.issue(lanes[peer], "release", "432")
+    offered = bridge.issue(
+        lanes[owner], "offer", "432", to=peer, summary="Review commit abc"
+    )
+    offer_id = offered["offer"]["id"]
+    assert offered["owner"] == owner
+    with pytest.raises(BridgeError, match="recipient"):
+        bridge.issue(lanes[owner], "accept", "432", offer_id=offer_id)
+    bridge.issue(lanes[owner], "cancel", "432")
+    replacement = bridge.issue(
+        lanes[owner], "offer", "432", to=peer, summary="Updated handoff"
+    )
+    with pytest.raises(BridgeError, match="changed"):
+        bridge.issue(lanes[peer], "accept", "432", offer_id=offer_id)
+    accepted = restarted.issue(
+        lanes[peer], "accept", "432", offer_id=replacement["offer"]["id"]
+    )
+    assert accepted["owner"] == peer
+    assert accepted["offer"] is None
+    with pytest.raises(BridgeError, match="Only"):
+        bridge.issue(lanes[owner], "release", "432")
+    bridge.issue(lanes[peer], "release", "432")
+    assert bridge.issue(lanes[owner], "claim", "432")["owner"] == owner
+    assert len(bridge.issue(repo, "list")["issues"]["432"]["history"]) == 7
+
+
+def test_issue_decline_no_timeout_and_worktree_authority(
+    bridge, repo, monkeypatch
+):
+    data = bridge.setup(repo)
+    claude, codex = (Path(data["lanes"][name]) for name in ("claude", "codex"))
+    with pytest.raises(BridgeError, match="worktree"):
+        bridge.issue(repo, "claim", "432")
+    for number in (
+        "0",
+        "-1",
+        "../432",
+        "0432",
+        "https://github.com/a/b/issues/432",
+    ):
+        with pytest.raises(BridgeError, match="positive"):
+            bridge.issue(claude, "claim", number)
+    bridge.issue(claude, "claim", "432")
+    offer = bridge.issue(
+        claude, "offer", "432", to="codex", summary="Waiting for review"
+    )["offer"]
+    monkeypatch.setattr(
+        "agent_bridge.issues.time.time", lambda: offer["created"] + 86400
+    )
+    assert bridge.issue(repo, "list")["issues"]["432"]["owner"] == "claude"
+    declined = bridge.issue(codex, "decline", "432", offer_id=offer["id"])
+    assert declined["owner"] == "claude"
+    assert declined["offer"] is None
+
+
+def test_issue_crash_releases_operation_lock_but_preserves_owner(bridge, repo):
+    data = bridge.setup(repo)
+    claude, codex = (Path(data["lanes"][name]) for name in ("claude", "codex"))
+    bridge.issue(claude, "claim", "432")
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys\nfrom pathlib import Path\n"
+            "from agent_bridge.state import lock\n"
+            "with lock(Path(sys.argv[1])): os._exit(7)",
+            str(claude.parent / "issues.lock"),
+        ],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert crashed.returncode == 7
+    with pytest.raises(BridgeError, match="owned by claude"):
+        Bridge(bridge.home).issue(codex, "claim", "432")
+    bridge.issue(claude, "release", "432")
+    assert bridge.issue(codex, "claim", "432")["owner"] == "codex"
+
+
+def test_issue_notifications_are_once_per_change_and_remind_pending(
+    bridge, repo, monkeypatch
+):
+    data = bridge.setup(repo)
+    claude, codex = (Path(data["lanes"][name]) for name in ("claude", "codex"))
+    directory = claude.parent
+    write_json(directory / "codex-identity.json", {"name": "BlueLake"})
+    monkeypatch.setattr(
+        "agent_bridge.checkpoints.mailbox",
+        lambda *args: {"pending_ack": 0, "messages": []},
+    )
+    bridge.issue(claude, "claim", "432")
+    bridge.issue(
+        claude,
+        "offer",
+        "432",
+        to="codex",
+        summary="Read tests before accepting",
+    )
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "test",
+        "cwd": str(codex),
+    }
+    notice = checkpoint(bridge.home, directory, "codex", payload)[
+        "hookSpecificOutput"
+    ]
+    assert notice["permissionDecision"] == "deny"
+    assert "handoff to codex" in notice["additionalContext"]
+    assert checkpoint(bridge.home, directory, "codex", payload) == {}
+    reminder = checkpoint(
+        bridge.home,
+        directory,
+        "codex",
+        {**payload, "hook_event_name": "UserPromptSubmit"},
+    )
+    assert (
+        "Silence never transfers"
+        in reminder["hookSpecificOutput"]["additionalContext"]
+    )
+    bridge.issue(claude, "cancel", "432")
+    stop = {**payload, "hook_event_name": "Stop", "stop_hook_active": True}
+    assert checkpoint(bridge.home, directory, "codex", stop) == {}
+    assert (
+        checkpoint(bridge.home, directory, "codex", payload)[
+            "hookSpecificOutput"
+        ]["permissionDecision"]
+        == "deny"
+    )
