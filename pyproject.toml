@@ -4,16 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-bridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run Claude Code and Codex in isolated worktrees with shared coordination."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Suneel Kaushik S", email = "suneel944@gmail.com"}]
-dependencies = [
-  "mcp-agent-mail @ git+https://github.com/Dicklesworthstone/mcp_agent_mail.git@08797e0fe4c167dc4ec2206abba12a6d88baf6a0",
-  "fastmcp>=2.10.5,<3",
-  "psutil>=6.1,<8",
-]
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
 
 [project.scripts]
 agent-bridge = "agent_bridge.cli:main"
@@ -25,14 +23,11 @@ Issues = "https://github.com/suneel944/agent-bridge/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["agent_bridge"]
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.hatch.build.targets.sdist]
-include = ["/agent_bridge", "/plugins", "/tests", "/scripts", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
+include = ["/agent_bridge", "/plugins", "/tests", "/scripts", "/docs", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/LICENSE", "/SECURITY.md", "/CODE_OF_CONDUCT.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
 
 [dependency-groups]
-dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<2"]
+dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<2", "mypy>=1.15,<2", "pre-commit>=4,<5"]
 
 [tool.ruff]
 target-version = "py312"
@@ -50,3 +45,9 @@ convention = "google"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+files = ["agent_bridge", "scripts"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true

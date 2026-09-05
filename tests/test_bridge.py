@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -11,45 +12,25 @@ import zipfile
 from pathlib import Path
 
 import httpx
-import psutil
 import pytest
-from fastmcp import Client
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 from agent_bridge.checkpoints import checkpoint, mailbox
 from agent_bridge.cli import Bridge, BridgeError, git, lock, write_json
+from agent_bridge.process import start_ticks
 
 
-@pytest.fixture
-def bridge(tmp_path):
-    instance = Bridge(tmp_path / "state")
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    instance.config["port"] = port
-    instance.url = f"http://127.0.0.1:{port}"
-    write_json(instance.home / "config.json", instance.config)
-    yield instance
-    instance.down()
-
-
-@pytest.fixture
-def repo(tmp_path):
-    path = tmp_path / "project with spaces"
-    path.mkdir()
-    git(path, "init")
-    (path / "shared.txt").write_text("original\n")
-    git(path, "add", "shared.txt")
-    git(
-        path,
-        "-c",
-        "user.name=Bridge Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "-m",
-        "Initial fixture",
-    )
-    return path
+@contextlib.asynccontextmanager
+async def client_session(url, auth):
+    """Connects the independent official SDK to the real HTTP service."""
+    async with httpx.AsyncClient(
+        headers={"Authorization": f"Bearer {auth}"}, trust_env=False
+    ) as http:
+        async with streamable_http_client(url, http_client=http) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                yield session
 
 
 def test_isolation_identity_and_idempotent_setup(bridge, repo):
@@ -112,17 +93,17 @@ def test_occupied_port_fails_without_killing_owner(bridge):
 
 
 def test_stale_pid_record_cannot_stop_an_unrelated_process(bridge):
-    current = psutil.Process()
+    pid = os.getpid()
     write_json(
         bridge.home / "server.json",
         {
-            "pid": current.pid,
-            "created": current.create_time(),
+            "pid": pid,
+            "start_ticks": start_ticks(pid),
         },
     )
     assert bridge.server_process() is None
     bridge.down()
-    assert current.is_running()
+    os.kill(pid, 0)
 
 
 def test_changed_lane_branch_is_rejected_without_resetting(bridge, repo):
@@ -138,8 +119,7 @@ def test_changed_lane_branch_is_rejected_without_resetting(bridge, repo):
 def test_native_launch_preserves_task_and_passes_shared_configuration(
     bridge, repo, monkeypatch, tmp_path, agent
 ):
-    # Execute a native CLI stand-in: verifies argv, cwd and env across a real
-    # subprocess boundary without sending model requests or reading auth files.
+    """Exercises native argv, cwd and environment without a model call."""
     binary = tmp_path / "bin"
     binary.mkdir()
     executable = binary / agent
@@ -157,7 +137,7 @@ def test_native_launch_preserves_task_and_passes_shared_configuration(
     monkeypatch.setattr(bridge, "up", lambda: None)
 
     async def fake_identity(*args):
-        return {}
+        return {"registration_token": "test-scoped-credential"}
 
     monkeypatch.setattr(bridge, "identity", fake_identity)
     task = 'Fix "login"; $(do-not-execute)\nPreserve this newline.'
@@ -196,7 +176,6 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
     pid = bridge.server_process().pid
     bridge.up()
     assert bridge.server_process().pid == pid
-    # A real unauthenticated tool request must not receive access on localhost.
     response = httpx.post(
         bridge.url + "/mcp/",
         json={
@@ -216,23 +195,23 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
             tokens[name] = identity["registration_token"]
 
         async def call(client, tool, arguments):
-            name = arguments.get("agent_name") or arguments.get("sender_name")
-            if name:
-                arguments[
-                    "sender_token"
-                    if tool == "send_message"
-                    else "registration_token"
-                ] = tokens[name]
-            return await client.call_tool(tool, arguments)
+            arguments.pop("project_key", None)
+            arguments.pop("agent_name", None)
+            arguments.pop("sender_name", None)
+            if tool == "send_message":
+                arguments["idempotency_key"] = arguments["subject"]
+            result = await client.call_tool(tool, arguments)
+            assert not result.isError, result.content
+            return result
 
-        async with Client(
-            bridge.url + "/mcp/", auth=bridge.config["token"]
+        async with client_session(
+            bridge.url + "/mcp/", auth=tokens["GreenCastle"]
         ) as claude:
-            async with Client(
-                bridge.url + "/mcp/", auth=bridge.config["token"]
+            async with client_session(
+                bridge.url + "/mcp/", auth=tokens["BlueLake"]
             ) as codex:
                 root = data["root"]
-                await claude.call_tool("ensure_project", {"human_key": root})
+                assert len((await claude.list_tools()).tools) == 6
                 granted = await call(
                     claude,
                     "file_reservation_paths",
@@ -244,7 +223,7 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
                         "exclusive": True,
                     },
                 )
-                assert not granted.data["conflicts"]
+                assert not json.loads(granted.content[0].text)["conflicts"]
                 conflict = await call(
                     codex,
                     "file_reservation_paths",
@@ -256,7 +235,7 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
                         "exclusive": True,
                     },
                 )
-                assert conflict.data["conflicts"]
+                assert json.loads(conflict.content[0].text)["conflicts"]
                 await call(
                     codex,
                     "release_file_reservations",
@@ -287,7 +266,7 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
                         "include_bodies": True,
                     },
                 )
-                messages = json.loads(inbox.content[0].text)
+                messages = json.loads(inbox.content[0].text)["messages"]
                 message = next(
                     item
                     for item in messages
@@ -353,7 +332,7 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
                         "exclusive": True,
                     },
                 )
-                assert not acquired.data["conflicts"]
+                assert not json.loads(acquired.content[0].text)["conflicts"]
                 await call(
                     codex,
                     "send_message",
@@ -415,16 +394,13 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
 
     async def persisted():
         identity = await bridge.identity("codex", data)
-        async with Client(
-            bridge.url + "/mcp/", auth=bridge.config["token"]
+        async with client_session(
+            bridge.url + "/mcp/", auth=identity["registration_token"]
         ) as client:
             result = await client.call_tool(
                 "fetch_inbox",
                 {
-                    "project_key": data["root"],
-                    "agent_name": "BlueLake",
                     "include_bodies": True,
-                    "registration_token": identity["registration_token"],
                 },
             )
             assert "session_id" in result.content[0].text
@@ -494,7 +470,6 @@ def test_issue_claim_race_persistence_and_explicit_handoff(
 ):
     data = bridge.setup(repo)
     lanes = {name: Path(path) for name, path in data["lanes"].items()}
-    # Real CLI processes contend for one issue from separate worktrees.
     commands = [
         subprocess.Popen(
             [
@@ -602,7 +577,7 @@ def test_issue_crash_releases_operation_lock_but_preserves_owner(bridge, repo):
     assert bridge.issue(codex, "claim", "432")["owner"] == "codex"
 
 
-def test_issue_notifications_are_once_per_change_and_remind_pending(
+def test_issue_notifications_are_once_per_change_without_empty_reminders(
     bridge, repo, monkeypatch
 ):
     data = bridge.setup(repo)
@@ -638,10 +613,7 @@ def test_issue_notifications_are_once_per_change_and_remind_pending(
         "codex",
         {**payload, "hook_event_name": "UserPromptSubmit"},
     )
-    assert (
-        "Silence never transfers"
-        in reminder["hookSpecificOutput"]["additionalContext"]
-    )
+    assert reminder == {}
     bridge.issue(claude, "cancel", "432")
     stop = {**payload, "hook_event_name": "Stop", "stop_hook_active": True}
     assert checkpoint(bridge.home, directory, "codex", stop) == {}
@@ -664,7 +636,7 @@ def test_built_wheel_installs_and_coordinates_outside_checkout(tmp_path, repo):
         package_metadata = archive.read(
             f"agent_bridge-{version}.dist-info/METADATA"
         ).decode()
-        assert "08797e0fe4c167dc4ec2206abba12a6d88baf6a0" in package_metadata
+        assert "Requires-Dist:" not in package_metadata
         assert not any(name.startswith("src/") for name in archive.namelist())
     with tarfile.open(
         project / "dist" / f"agent_bridge-{version}.tar.gz"
@@ -711,6 +683,9 @@ def test_built_wheel_installs_and_coordinates_outside_checkout(tmp_path, repo):
         "UV_TOOL_BIN_DIR": str(tmp_path / "bin"),
         "AGENT_BRIDGE_HOME": str(tmp_path / "installed-state"),
     }
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        environment["AGENT_BRIDGE_PORT"] = str(sock.getsockname()[1])
     environment.pop("PYTHONPATH", None)
     subprocess.run(
         [
@@ -731,6 +706,36 @@ def test_built_wheel_installs_and_coordinates_outside_checkout(tmp_path, repo):
         timeout=120,
     )
     executable = tmp_path / "bin" / "agent-bridge"
+    try:
+        subprocess.run(
+            [str(executable), "up"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        health = subprocess.run(
+            [str(executable), "status"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        assert "Server: ready" in health.stdout
+    finally:
+        subprocess.run(
+            [str(executable), "down"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
     result = subprocess.run(
         [str(executable), "setup", str(repo)],
         cwd=tmp_path,

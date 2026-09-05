@@ -6,7 +6,7 @@
       "name": "agent-bridge",
       "source": "./plugins/agent-bridge",
       "description": "Shared issue ownership and handoffs for Claude Code and Codex.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }

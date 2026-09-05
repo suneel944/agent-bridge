@@ -7,7 +7,9 @@ tooling adaptations, and coordination invariants. New production APIs require
 type annotations and Google-style documentation; Ruff enforces the configured
 rules. Keep the 80-character formatting target and do not weaken checks.
 
-- This is a Python 3.12+ launcher around MCP Agent Mail and Git worktrees.
+- Python 3.12+; coordination runtime uses only the standard library.
+- Follow module boundaries in docs/architecture.md. Document behavior and
+  rationale in docstrings or docs; do not add Python inline comments.
 - Keep coordination state outside target repositories. Preserve native CLI
   authentication and permissions; never add bypass flags.
 - Read the implementation before changing launch, identity, or process handling.

@@ -1,0 +1,338 @@
+"""Tests transactional coordination, transport isolation and context budgets."""
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import httpx
+import pytest
+
+from agent_bridge import store
+from agent_bridge.checkpoints import MAX_CONTEXT_BYTES, checkpoint, mailbox
+from agent_bridge.server import MAX_REQUEST_BYTES, TOOLS
+from agent_bridge.state import BridgeError
+
+
+@pytest.fixture
+def actors(bridge):
+    """Registers two independent scopes in an initialized local database."""
+    store.initialize(bridge.home)
+    identities = [
+        store.register(bridge.home, "/project", name)
+        for name in ("GreenCastle", "BlueLake")
+    ]
+    return [
+        store.authenticate(bridge.home, row["registration_token"])
+        for row in identities
+    ]
+
+
+def message(**overrides):
+    """Builds a valid small message for mutation-focused tests."""
+    return {
+        "to": ["BlueLake"],
+        "subject": "Contract",
+        "body_md": "Changed",
+        "idempotency_key": "contract-1",
+        **overrides,
+    }
+
+
+def test_concurrent_sends_are_idempotent_and_changed_retries_fail(
+    bridge, actors
+):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda _: store.call(
+                    bridge.home, actors[0], "send_message", message()
+                ),
+                range(16),
+            )
+        )
+    assert len({row["id"] for row in results}) == 1
+    with pytest.raises(BridgeError, match="another message"):
+        store.call(
+            bridge.home, actors[0], "send_message", message(body_md="Different")
+        )
+    inbox = store.call(bridge.home, actors[1], "fetch_inbox", {})
+    assert len(inbox["messages"]) == 1
+    assert "body_md" not in inbox["messages"][0]
+
+
+def test_reservations_serialize_conflicts_renew_and_expire(bridge, actors):
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda actor: store.call(
+                    bridge.home,
+                    actor,
+                    "file_reservation_paths",
+                    {"paths": ["./src/**"], "ttl_seconds": 30},
+                ),
+                actors,
+            )
+        )
+    assert sum(bool(row["granted"]) for row in results) == 1
+    loser = actors[next(i for i, row in enumerate(results) if row["conflicts"])]
+    denied = store.call(
+        bridge.home,
+        loser,
+        "file_reservation_paths",
+        {"paths": ["safe.py", "src/api.py"]},
+    )
+    assert denied["conflicts"] and denied["granted"] == []
+    with store.connect(bridge.home, write=True) as db:
+        db.execute("UPDATE file_reservations SET expires_ts='2000-01-01'")
+    assert store.call(
+        bridge.home, loser, "file_reservation_paths", {"paths": ["src/api.py"]}
+    )["granted"]
+    assert store.call(
+        bridge.home, loser, "file_reservation_paths", {"paths": ["src/api.py"]}
+    )["granted"]
+    with store.connect(bridge.home) as db:
+        assert (
+            db.execute(
+                "SELECT count(*) FROM file_reservations WHERE "
+                "expires_ts>CURRENT_TIMESTAMP AND released_ts IS NULL"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("file_reservation_paths", {"paths": ["../peer/file"]}),
+        ("file_reservation_paths", {"paths": ["/tmp/file"]}),
+        ("file_reservation_paths", {"paths": ["."]}),
+        ("file_reservation_paths", {"paths": ["a"], "ttl_seconds": True}),
+        ("file_reservation_paths", {"paths": ["a"], "exclusive": "false"}),
+        ("send_message", message(body_md="x" * 4097)),
+        ("send_message", message(body_md="😀" * 1025)),
+        ("send_message", message(body_md="\ud800")),
+        ("send_message", message(to=["Foreign"])),
+        ("send_message", message(ack_required=1)),
+        ("fetch_inbox", {"after_id": -1}),
+        ("fetch_inbox", {"limit": 100}),
+        ("acknowledge_message", {"message_id": 999}),
+    ],
+)
+def test_invalid_input_has_no_side_effects(bridge, actors, tool, args):
+    with pytest.raises(BridgeError):
+        store.call(bridge.home, actors[0], tool, args)
+    with store.connect(bridge.home) as db:
+        assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        assert (
+            db.execute("SELECT count(*) FROM file_reservations").fetchone()[0]
+            == 0
+        )
+
+
+def test_transport_scopes_identity_and_rejects_foreign_origins(bridge, actors):
+    bridge.up()
+    identity = store.register(bridge.home, "/project", "BlueLake")
+    token = identity["registration_token"]
+    stranger = store.register(bridge.home, "/other", "BlueLake")
+    sent = store.call(bridge.home, actors[0], "send_message", message())
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "acknowledge_message",
+            "arguments": {"message_id": sent["id"]},
+        },
+    }
+    with httpx.Client(base_url=bridge.url, trust_env=False) as client:
+        foreign = client.post(
+            "/mcp/",
+            json=request,
+            headers={
+                "Authorization": f"Bearer {stranger['registration_token']}"
+            },
+        )
+        assert foreign.json()["result"]["isError"]
+        headers = {"Authorization": f"Bearer {token}"}
+        assert (
+            client.post(
+                "/mcp/",
+                json=request,
+                headers={**headers, "Origin": "https://evil.example"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/mcp/",
+                json=request,
+                headers={**headers, "Host": "evil.example"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/mcp/",
+                json=request,
+                headers={**headers, "MCP-Protocol-Version": "1900-01-01"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/mcp/",
+                content=b"x" * (MAX_REQUEST_BYTES + 1),
+                headers={**headers, "Content-Type": "application/json"},
+            ).status_code
+            == 413
+        )
+        request["params"]["arguments"]["agent_name"] = "GreenCastle"
+        assert client.post("/mcp/", json=request, headers=headers).json()[
+            "result"
+        ]["isError"]
+        request["params"]["arguments"].pop("agent_name")
+        assert (
+            not client.post("/mcp/", json=request, headers=headers)
+            .json()["result"]
+            .get("isError")
+        )
+        assert client.get("/mcp/", headers=headers).status_code == 405
+
+
+def test_context_is_bounded_incremental_and_never_auto_acknowledges(
+    bridge, repo
+):
+    data = bridge.setup(repo)
+    bridge.up()
+    for lane in ("claude", "codex"):
+        asyncio.run(bridge.identity(lane, data))
+    directory = Path(data["lanes"]["codex"]).parent
+    identity = json.loads((directory / "claude-identity.json").read_text())
+    actor = store.authenticate(bridge.home, identity["registration_token"])
+    for index in range(9):
+        store.call(
+            bridge.home,
+            actor,
+            "send_message",
+            message(
+                subject="新" * 50,
+                body_md="😀" * 1000,
+                ack_required=True,
+                idempotency_key=str(index),
+            ),
+        )
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "budget",
+        "cwd": data["lanes"]["codex"],
+        "tool_name": "apply_patch",
+    }
+    seen = []
+    for _ in range(3):
+        result = checkpoint(bridge.home, directory, "codex", payload)
+        text = result["hookSpecificOutput"]["additionalContext"]
+        assert len(text.encode()) <= MAX_CONTEXT_BYTES
+        seen.append(text)
+    assert len(set(seen)) == 3
+    for _ in range(20):
+        assert checkpoint(bridge.home, directory, "codex", payload) == {}
+    assert mailbox(bridge.home, data["root"], "BlueLake")["pending_ack"] == 9
+    state = json.loads((directory / "codex-activity.json").read_text())
+    assert state["injections"] == 3
+    assert state["injected_bytes"] == sum(len(text.encode()) for text in seen)
+    assert len(json.dumps(TOOLS).encode()) < 5000
+
+
+def test_body_paging_preserves_unicode_and_read_is_not_ack(bridge, actors):
+    body = "😀" * 1024
+    sent = store.call(
+        bridge.home,
+        actors[0],
+        "send_message",
+        message(body_md=body, ack_required=True),
+    )
+    read = store.call(
+        bridge.home, actors[1], "fetch_inbox", {"include_bodies": True}
+    )
+    assert read["messages"][0]["body_md"] == body
+    assert (
+        len(json.dumps(read, ensure_ascii=False).encode())
+        <= store.MAX_RESULT_BYTES
+    )
+    store.call(
+        bridge.home, actors[1], "mark_message_read", {"message_id": sent["id"]}
+    )
+    assert mailbox(bridge.home, "/project", "BlueLake")["pending_ack"] == 1
+    with store.connect(bridge.home, write=True) as db:
+        db.execute("UPDATE messages SET body_md=?", ("abcdefgh" * 1000,))
+    pieces = []
+    offset = 0
+    while True:
+        page = store.call(
+            bridge.home,
+            actors[1],
+            "fetch_inbox",
+            {"limit": 1, "include_bodies": True, "body_offset": offset},
+        )["messages"][0]
+        pieces.append(page["body_md"])
+        if "next_body_offset" not in page:
+            break
+        offset = page["next_body_offset"]
+    assert "".join(pieces) == "abcdefgh" * 1000
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_legacy_import_preserves_source_and_retries_atomically(
+    bridge, actors, corrupt
+):
+    store.call(
+        bridge.home, actors[0], "send_message", message(ack_required=True)
+    )
+    legacy = bridge.home / "mail.sqlite3"
+    with contextlib.closing(sqlite3.connect(legacy)) as destination:
+        with store.connect(bridge.home) as source:
+            source.backup(destination)
+    original = hashlib.sha256(legacy.read_bytes()).hexdigest()
+    (bridge.home / store.DATABASE).unlink()
+    if corrupt:
+        with contextlib.closing(sqlite3.connect(legacy)) as db:
+            db.execute(
+                "INSERT INTO message_recipients(message_id,agent_id) "
+                "VALUES (999,999)"
+            )
+            db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            store.initialize(bridge.home)
+        with store.connect(bridge.home) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+            assert (
+                db.execute("SELECT count(*) FROM projects").fetchone()[0] == 0
+            )
+        with contextlib.closing(sqlite3.connect(legacy)) as db:
+            db.execute("DELETE FROM message_recipients WHERE message_id=999")
+            db.commit()
+        original = hashlib.sha256(legacy.read_bytes()).hexdigest()
+    store.initialize(bridge.home)
+    store.initialize(bridge.home)
+    assert hashlib.sha256(legacy.read_bytes()).hexdigest() == original
+    assert mailbox(bridge.home, "/project", "BlueLake")["pending_ack"] == 1
+    with store.connect(bridge.home) as db:
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+        assert (
+            db.execute("SELECT token_digest FROM agents LIMIT 1").fetchone()[0]
+            is None
+        )
+
+
+def test_locked_store_fails_within_a_bounded_deadline(bridge, actors):
+    with store.connect(bridge.home, write=True):
+        started = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            store.call(bridge.home, actors[0], "send_message", message())
+        assert time.monotonic() - started < 2
