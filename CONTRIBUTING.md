@@ -66,8 +66,14 @@ Open a focused issue before proposing a substantial behavior change. Branch from
 current `main`, keep commits reviewable, and use the PR template. Explain the
 problem, final behavior, exact verification, and compatibility risks. Every PR
 must pass the required checks and resolve review conversations. Protected `main`
-requires an approving reviewer and rejects force pushes and deletion. Maintainers
-follow the same gate; do not use administrator bypasses.
+requires a PR and rejects force pushes and deletion. CI, secret scanning,
+PR hygiene, current-base checks and resolved conversations apply to everyone,
+including administrators, without exemptions.
+
+A separate ruleset requires independent approval. While the repository has one
+maintainer, `@suneel944` has a named exception to that review-only ruleset when
+merging a PR. It does not exempt the account from any required check or permit
+direct pushes. Revisit the review exception when additional maintainers join.
 
 Use Conventional Commit PR titles, such as `fix: preserve pending messages` or
 `ci: validate release metadata`; squash merges retain that title for automated
