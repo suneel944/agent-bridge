@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Enforce PR ownership, change labels, issue references, milestones and titles.
+- Prepare version and changelog PRs automatically; publish verified artifacts
+  after their merge, with retry support for interrupted draft publication.
+- Display the PNG logo in the README.
+- Update development dependencies and pinned GitHub Actions to current stable
+  releases; adapt the independent integration client to MCP 2 and HTTPX 2.
+- Allow SQLite writers one second for transient contention while retaining the
+  bounded failure deadline for locks that remain held.
+
 ## [0.3.0] - 2026-09-05
 
 ### Changed

@@ -69,6 +69,24 @@ must pass the required checks and resolve review conversations. Protected `main`
 requires an approving reviewer and rejects force pushes and deletion. Maintainers
 follow the same gate; do not use administrator bypasses.
 
+Use Conventional Commit PR titles, such as `fix: preserve pending messages` or
+`ci: validate release metadata`; squash merges retain that title for automated
+changelogs. Assign an owner, add a change-type label, and reference an existing
+local issue with `Refs #N` or a closing keyword. Match linked issue milestones
+when present. Release PRs always require a milestone. Bot-generated descriptions
+retain their native format, but ownership and issue rules still apply.
+
+Release Please prepares a version and changelog PR after merges to `main`.
+Package, plugin, marketplace and lockfile versions move together. The generated
+PR gets an owner, release issue and milestone, and explicitly dispatched checks
+because GitHub's workflow token does not trigger workflows on its own PR writes.
+Review and merge it through the normal protected-branch gate. Publication creates
+a draft, runs `make check` and the history secret scan, attaches release bundles,
+downloads and verifies their checksums, then publishes. Failed publication keeps
+the release draft; rerun Release with its existing tag to retry. Published assets
+are never overwritten. The release workflow can also publish a manually pushed
+version tag, provided its commit belongs to `main` history.
+
 Contributions are accepted under the repository's MIT license. Submit only work
 you have the right to contribute. Follow CODE_OF_CONDUCT.md and report security
 issues using SECURITY.md rather than public issue templates.

@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 import httpx
+import httpx2
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -24,7 +25,7 @@ from agent_bridge.process import start_ticks
 @contextlib.asynccontextmanager
 async def client_session(url, auth):
     """Connects the independent official SDK to the real HTTP service."""
-    async with httpx.AsyncClient(
+    async with httpx2.AsyncClient(
         headers={"Authorization": f"Bearer {auth}"}, trust_env=False
     ) as http:
         async with streamable_http_client(url, http_client=http) as streams:
@@ -201,7 +202,7 @@ def test_mcp_two_clients_conflict_handoff_auth_and_restart(bridge, repo):
             if tool == "send_message":
                 arguments["idempotency_key"] = arguments["subject"]
             result = await client.call_tool(tool, arguments)
-            assert not result.isError, result.content
+            assert not result.is_error, result.content
             return result
 
         async with client_session(

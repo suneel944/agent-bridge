@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "include-component-in-tag": false,
+      "draft": true,
+      "force-tag-creation": true,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        "plugins/agent-bridge/.claude-plugin/plugin.json",
+        "plugins/agent-bridge/.codex-plugin/plugin.json",
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "jsonpath": "$.plugins[0].version"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='agent-bridge')].version"
+        }
+      ],
+      "changelog-sections": [
+        {"type": "feat", "section": "Features"},
+        {"type": "fix", "section": "Bug fixes"},
+        {"type": "perf", "section": "Performance"},
+        {"type": "docs", "section": "Documentation"},
+        {"type": "chore", "section": "Maintenance"},
+        {"type": "ci", "section": "Automation"},
+        {"type": "build", "section": "Build"},
+        {"type": "refactor", "section": "Refactoring"},
+        {"type": "test", "section": "Tests"},
+        {"type": "revert", "section": "Reverts"}
+      ]
+    }
+  }
+}
