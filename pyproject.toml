@@ -27,7 +27,7 @@ packages = ["agent_bridge"]
 include = ["/agent_bridge", "/plugins", "/tests", "/scripts", "/docs", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/LICENSE", "/SECURITY.md", "/CODE_OF_CONDUCT.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
 
 [dependency-groups]
-dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<2", "mypy>=1.15,<2", "pre-commit>=4,<5"]
+dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<3", "mypy>=1.15,<2", "pre-commit>=4,<5"]
 
 [tool.ruff]
 target-version = "py312"
