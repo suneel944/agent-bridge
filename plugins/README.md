@@ -5,7 +5,7 @@ skill. Install the Agent Bridge executable first. Given the wheel and locked
 requirements from the same release:
 
 ```sh
-uv tool install ./agent_bridge-0.2.0-py3-none-any.whl \
+uv tool install ./agent_bridge-0.3.0-py3-none-any.whl \
   --with-requirements ./requirements.txt
 ```
 

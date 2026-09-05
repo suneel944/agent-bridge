@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.0] - 2026-09-05
+
+### Changed
+
+- Replaced the mail backend with an in-house SQLite WAL engine and six scoped
+  MCP tools. The installed package has no third-party runtime dependencies.
+- Bound identity to the MCP connection, removing credentials and repeated
+  project/agent arguments from model context.
+- Made conflicting reservation batches atomic: conflicts grant no paths.
+- Added idempotent sends, bounded inbox/body pagination, and explicit byte limits.
+- Capped checkpoint notices at 1,536 UTF-8 bytes and suppressed unchanged notices.
+- Added injected-byte counters without claiming tokenizer or billing savings.
+- Added read-only legacy migration into a separate database and Linux pidfd
+  process identity checks. Stop 0.2 services and sessions before upgrading.
+- Shortened the README and separated architecture and operational documentation.
+
+### Added
+
+- Concurrency, authentication, migration, retry and context-budget tests using
+  an independent MCP client and temporary local state.
+- Static type and documentation-policy gates, secret scanning, pinned CI actions,
+  contributor and security policies, issue/PR templates, and the MIT license.
+- A repeatable local benchmark for storage latency and protocol size.
+
+### Compatibility
+
+- Linux with pidfd support is required; macOS is not supported by this version.
+- Native sessions must be relaunched after upgrading. No live session is replaced
+  automatically. Existing mail, worktrees and the original database are preserved.
+- Public directory submissions remain separate from repository releases.
+
 ## [0.2.0] - 2026-09-05
 
 First published release of Agent Bridge.
@@ -27,8 +58,6 @@ First published release of Agent Bridge.
 - Moved runtime code to the top-level `agent_bridge/` package.
 - Made `make install` install a package snapshot; editable installation is now
   explicitly available through `make install-dev`.
-- Kept project documentation focused on Agent Bridge and removed the earlier
-  competitor evaluation document.
 
 ### Requirements and limitations
 
@@ -45,3 +74,4 @@ First published release of Agent Bridge.
   compliance requires a separate two-terminal trial.
 
 [0.2.0]: https://github.com/suneel944/agent-bridge/releases/tag/v0.2.0
+[0.3.0]: https://github.com/suneel944/agent-bridge/releases/tag/v0.3.0

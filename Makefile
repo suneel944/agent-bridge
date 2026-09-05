@@ -1,4 +1,4 @@
-.PHONY: install install-dev install-system build check release-artifacts
+.PHONY: install install-dev install-system build check release-artifacts benchmark
 install:
 	@set -eu; \
 	bridge_requirements=$$(mktemp); \
@@ -24,9 +24,14 @@ build:
 release-artifacts: build
 	uv run --locked python scripts/release_artifacts.py
 
+benchmark:
+	uv run --locked python scripts/benchmark.py
+
 check:
 	uv sync --locked
 	uv run --locked ruff check .
 	uv run --locked ruff format --check .
+	uv run --locked mypy
+	uv run --locked python scripts/check_policy.py
 	$(MAKE) build
 	uv run --locked pytest -q

@@ -17,6 +17,11 @@ passing lint is not a claim of complete style or correctness compliance.
 - Keep functions focused. Separate CLI orchestration, issue transitions,
   checkpoint observation, and persistence. Prefer the standard library and
   existing helpers before adding a dependency or abstraction.
+- Runtime imports must remain within Python's standard library and this package.
+  Development tools do not belong in installed runtime dependencies.
+- Put contracts and rationale in docstrings and focused documentation, not inline
+  Python comments. The policy gate checks every production and script function,
+  including private helpers. Descriptive test names document scenarios.
 - Validate operational input with real conditionals, not assertions. Catch
   expected failures at the appropriate boundary and preserve diagnostic context.
 - Close files and sockets with context managers. Pass subprocess arguments as
@@ -45,13 +50,39 @@ import preference. Do not describe the repository as Google-certified.
 
 ## Verification and review
 
+Install the local hooks after cloning:
+
+```sh
+uv sync --locked
+uv run --locked pre-commit install
+uv run --locked pre-commit run --all-files
+```
+
+`.pre-commit-config.yaml` runs Ruff lint/format checks, type checking and the
+repository policy gate using locked tools. It does not rewrite files on commit.
+CI runs the complete gate independently of local hook installation.
+
+Open a focused issue before proposing a substantial behavior change. Branch from
+current `main`, keep commits reviewable, and use the PR template. Explain the
+problem, final behavior, exact verification, and compatibility risks. Every PR
+must pass the required checks and resolve review conversations. Protected `main`
+requires an approving reviewer and rejects force pushes and deletion. Maintainers
+follow the same gate; do not use administrator bypasses.
+
+Contributions are accepted under the repository's MIT license. Submit only work
+you have the right to contribute. Follow CODE_OF_CONDUCT.md and report security
+issues using SECURITY.md rather than public issue templates.
+
 Run focused checks while editing. Before submitting implementation changes, run:
 
 ```sh
 make check
 ```
 
-CI runs the same locked dependency, lint, formatting, build, and test gate.
+CI runs the same locked dependency, lint, formatting, typing, policy, build, and
+test gate. A separate secret scan examines Git history. Actions are pinned to
+commit IDs and receive read-only permissions unless release publication needs
+write access. Dependency updates are proposed through Dependabot PRs.
 Do not weaken
 checks to make a change pass. Explain any narrowly justified rule exception.
 Tests should exercise behavior, especially concurrency, persistence, cancellation,

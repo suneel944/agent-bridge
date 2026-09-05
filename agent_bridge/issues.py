@@ -46,7 +46,6 @@ def change(
     Raises:
         BridgeError: If validation, ownership, offer, or lock checks fail.
     """
-    # Numbers are scoped to the common Git repository, never to a worktree.
     if not re.fullmatch(r"#?[1-9][0-9]{0,17}", issue):
         raise BridgeError(
             "Issue must be a positive number of up to 18 digits, "
