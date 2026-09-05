@@ -1,4 +1,4 @@
-.PHONY: install install-dev install-system build check
+.PHONY: install install-dev install-system build check release-artifacts
 install:
 	@set -eu; \
 	bridge_requirements=$$(mktemp); \
@@ -20,6 +20,9 @@ install-system:
 
 build:
 	uv build --no-sources
+
+release-artifacts: build
+	uv run --locked python scripts/release_artifacts.py
 
 check:
 	uv sync --locked

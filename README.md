@@ -384,6 +384,43 @@ a different port, set `AGENT_BRIDGE_PORT` before that directory is first initial
 The server binds to 127.0.0.1 and requires a local bearer token. Coordination does
 not make LLM calls (`LLM_ENABLED=false`); native model usage follows your CLI login.
 
+## Releases and distribution
+
+Download versioned assets from [GitHub Releases](https://github.com/suneel944/agent-bridge/releases).
+Each release includes the wheel, source archive, plugin ZIP, locked runtime
+requirements, changelog, release notes, and `SHA256SUMS`. Verify downloaded assets
+from their directory with `sha256sum --check SHA256SUMS`.
+
+The repository is a private marketplace source for authorized collaborators:
+
+```sh
+claude plugin marketplace add suneel944/agent-bridge
+claude plugin install agent-bridge@agent-bridge-local
+codex plugin marketplace add suneel944/agent-bridge
+codex plugin add agent-bridge@agent-bridge-local
+```
+
+These are repository marketplace installations, not official catalog listings.
+Public catalog submission is separate from GitHub release automation and requires
+the provider's review. The plugins have not been submitted to either catalog.
+
+For Claude, validate `plugins/agent-bridge` with `claude plugin validate`, then
+use the [plugin submission form](https://platform.claude.com/plugins/submit).
+Approved submissions enter the community marketplace; the official marketplace
+is curated separately. See [Claude's publishing guide](https://code.claude.com/docs/en/plugins#submit-your-plugin-to-the-community-marketplace).
+
+For Codex, follow [OpenAI's submission guide](https://developers.openai.com/plugins/deploy/submission)
+and select a skills-only submission for this plugin. Public submission requires
+a verified publisher, listing and policy URLs, a skill bundle, and review test
+cases. After approval, publish through the portal. GitHub CI packages our plugin;
+it does not submit review forms or grant marketplace approval.
+
+Maintainers update package/plugin versions and `CHANGELOG.md`, run `make check`,
+and preview assets with `make release-artifacts`. An annotated `vVERSION` tag
+triggers the release workflow: rerun the gate, build assets, create a draft,
+download and verify uploaded checksums, then publish. Failed verification leaves
+the release unpublished. The ordinary check workflow runs on pushes and PRs.
+
 ## Verification
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the Google Python style baseline,

@@ -29,7 +29,7 @@ packages = ["agent_bridge"]
 allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
-include = ["/agent_bridge", "/plugins", "/tests", "/README.md", "/CONTRIBUTING.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
+include = ["/agent_bridge", "/plugins", "/tests", "/scripts", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<2"]
