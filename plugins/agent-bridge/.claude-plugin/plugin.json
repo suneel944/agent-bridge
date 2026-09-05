@@ -1,0 +1,11 @@
+{
+  "name": "agent-bridge",
+  "version": "0.2.0",
+  "description": "Coordinate Claude Code and Codex issue ownership and handoffs with Agent Bridge.",
+  "author": {
+    "name": "Suneel Kaushik S",
+    "email": "suneel944@gmail.com"
+  },
+  "homepage": "https://github.com/suneel944/agent-bridge",
+  "repository": "https://github.com/suneel944/agent-bridge"
+}

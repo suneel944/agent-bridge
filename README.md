@@ -3,10 +3,28 @@
 Claude Code and Codex in separate terminals, sharing task ownership, decisions,
 and handoffs through MCP Agent Mail. Each agent edits its own Git worktree.
 
-This first version packages existing coordination tooling. Agent Bridge owns
-workspace setup and launch configuration; MCP Agent Mail owns messaging and
-advisory file reservations. Native CLI authentication and permissions stay in place.
-Agent Bridge also maintains atomic issue claims and explicit ownership handoffs.
+Agent Bridge manages workspace setup, native CLI launch configuration, atomic
+issue claims, and explicit handoffs. Its mail backend handles messaging and
+advisory file reservations. Native authentication and permissions stay in place.
+
+## Package structure
+
+```text
+agent-bridge/
+├── agent_bridge/          # Installable Python package and CLI
+│   ├── __main__.py        # python -m agent_bridge
+│   ├── cli.py            # Launch, setup, status, issue and report commands
+│   ├── issues.py         # Atomic ownership and handoffs
+│   ├── checkpoints.py    # Native lifecycle observations
+│   └── state.py          # Private persistence and operation locks
+├── plugins/agent-bridge/ # Shared coordination skill, two native manifests
+├── .agents/plugins/      # Codex marketplace metadata
+├── .claude-plugin/       # Claude Code marketplace metadata
+├── tests/                # Behavior, transport and installed-package tests
+├── pyproject.toml        # Package metadata, entry point and coding checks
+├── uv.lock               # Locked dependency set
+└── Makefile              # Install, build and verification commands
+```
 
 ## Architecture
 
@@ -64,10 +82,10 @@ workflow boundaries. They do not make model calls or acknowledge messages.
 
 | Component | Responsibility | Implementation |
 | --- | --- | --- |
-| Launcher and CLI | Worktrees, common project identity, native configuration, status and reports | [cli.py](src/agent_bridge/cli.py) |
-| Issue coordination | Exclusive issue claims, offer IDs, explicit acceptance, transition history | [issues.py](src/agent_bridge/issues.py) |
-| Native checkpoints | Activity observations, bounded mail and issue notices, delivery cursors | [checkpoints.py](src/agent_bridge/checkpoints.py) |
-| Local persistence | Nonblocking operation locks and atomic private JSON writes | [state.py](src/agent_bridge/state.py) |
+| Launcher and CLI | Worktrees, common project identity, native configuration, status and reports | [cli.py](agent_bridge/cli.py) |
+| Issue coordination | Exclusive issue claims, offer IDs, explicit acceptance, transition history | [issues.py](agent_bridge/issues.py) |
+| Native checkpoints | Activity observations, bounded mail and issue notices, delivery cursors | [checkpoints.py](agent_bridge/checkpoints.py) |
+| Local persistence | Nonblocking operation locks and atomic private JSON writes | [state.py](agent_bridge/state.py) |
 | MCP Agent Mail | Authenticated messaging, acknowledgements and advisory file reservations | [Pinned upstream](#upstream) |
 
 An issue claim prevents a second participating agent from claiming the same issue.
@@ -116,8 +134,59 @@ make install
 This installs `agent-bridge` into uv's executable directory (usually
 `~/.local/bin`) with runtime dependencies exported from `uv.lock`, including the
 pinned Agent Mail source. If the command is not on PATH, run `uv tool update-shell`
-and open a new terminal. The editable installation follows this source checkout;
-keep it in place and rerun `make install` after dependency changes.
+and open a new terminal. This installs a package snapshot: source edits take
+effect only after reinstalling. Use `make install-dev` for an editable development
+installation instead. The command works from any directory.
+
+For an all-user installation on Linux, run from this checkout:
+
+```sh
+sudo env "PATH=$PATH" make install-system
+```
+
+This installs the executable in `/usr/local/bin` with its tool environment under
+`/opt/agent-bridge`. It requires administrator access. Runtime state remains
+private to each user; installing the command system-wide does not create a shared
+cross-user bridge or start a system daemon. If a user installation appears earlier
+on PATH, use `/usr/local/bin/agent-bridge` to select the system installation.
+
+Build distributable artifacts with `make build`: a wheel and source archive are
+written to `dist/`. The wheel includes the pinned mail dependency reference;
+`make install` additionally uses `uv.lock` for the full dependency set.
+
+## Claude Code and Codex plugins
+
+The plugin supplies the `coordinate` skill for status checks, issue claims,
+reports, and explicit handoffs. Install the CLI first. The plugin uses the existing
+launcher for MCP configuration and lifecycle hooks; it adds no duplicate hooks,
+credential copies, or permission overrides.
+
+From this checkout, install for Claude Code:
+
+```sh
+claude plugin marketplace add .
+claude plugin install agent-bridge@agent-bridge-local --scope user
+```
+
+For Codex:
+
+```sh
+codex plugin marketplace add .
+codex plugin add agent-bridge@agent-bridge-local
+```
+
+Start a new session after installation. In Claude Code, invoke
+`/agent-bridge:coordinate`; in Codex, select the plugin's `coordinate` skill or
+ask Agent Bridge to coordinate the assigned issue. The current machine's personal
+Codex marketplace can also expose it as `agent-bridge@personal`; install from one
+marketplace per client to avoid duplicate skills.
+
+Continue launching working sessions with `agent-bridge run claude` and
+`agent-bridge run codex`. Installing a skill does not move an already-running
+session into a worktree or wake an idle agent. Local marketplace sources require
+the checkout to remain available for plugin updates. Native formats follow the
+[Codex plugin specification](https://developers.openai.com/plugins/build/plugins)
+and [Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference).
 
 ## Start two terminals
 
@@ -327,7 +396,7 @@ make check
 ```
 
 CI runs that exact gate: locked dependency installation, Ruff lint, Ruff format
-validation, and pytest. Tests cover real Git worktree isolation, source preservation,
+validation, package build, and pytest. Tests cover real Git worktree isolation, source preservation,
 session exclusion, launch argument/environment forwarding, and two real MCP clients
 exchanging a message, acknowledging it, detecting an overlapping reservation,
 releasing/reacquiring ownership, and recovering state after server restart.

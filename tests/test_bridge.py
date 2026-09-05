@@ -5,7 +5,9 @@ import shlex
 import socket
 import subprocess
 import sys
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -648,4 +650,128 @@ def test_issue_notifications_are_once_per_change_and_remind_pending(
             "hookSpecificOutput"
         ]["permissionDecision"]
         == "deny"
+    )
+
+
+def test_built_wheel_installs_and_coordinates_outside_checkout(tmp_path, repo):
+    project = Path(__file__).resolve().parents[1]
+    metadata = tomllib.loads((project / "pyproject.toml").read_text())
+    version = metadata["project"]["version"]
+    wheel = project / "dist" / f"agent_bridge-{version}-py3-none-any.whl"
+    assert wheel.exists(), "Run make build before the installed-package test."
+    with zipfile.ZipFile(wheel) as archive:
+        assert "agent_bridge/__main__.py" in archive.namelist()
+        package_metadata = archive.read(
+            f"agent_bridge-{version}.dist-info/METADATA"
+        ).decode()
+        assert "08797e0fe4c167dc4ec2206abba12a6d88baf6a0" in package_metadata
+        assert not any(name.startswith("src/") for name in archive.namelist())
+    with tarfile.open(
+        project / "dist" / f"agent_bridge-{version}.tar.gz"
+    ) as archive:
+        root = f"agent_bridge-{version}"
+        for client in ("codex", "claude"):
+            manifest_path = (
+                f"{root}/plugins/agent-bridge/.{client}-plugin/plugin.json"
+            )
+            with archive.extractfile(manifest_path) as stream:
+                manifest = json.load(stream)
+            assert manifest["name"] == "agent-bridge"
+            assert manifest["version"] == version
+        assert archive.getmember(
+            f"{root}/plugins/agent-bridge/skills/coordinate/SKILL.md"
+        ).isfile()
+        assert archive.getmember(
+            f"{root}/.agents/plugins/marketplace.json"
+        ).isfile()
+        assert archive.getmember(
+            f"{root}/.claude-plugin/marketplace.json"
+        ).isfile()
+    requirements = tmp_path / "requirements.txt"
+    subprocess.run(
+        [
+            "uv",
+            "export",
+            "--locked",
+            "--no-dev",
+            "--no-emit-project",
+            "--no-hashes",
+            "--output-file",
+            str(requirements),
+        ],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    environment = {
+        **os.environ,
+        "UV_TOOL_DIR": str(tmp_path / "tools"),
+        "UV_TOOL_BIN_DIR": str(tmp_path / "bin"),
+        "AGENT_BRIDGE_HOME": str(tmp_path / "installed-state"),
+    }
+    environment.pop("PYTHONPATH", None)
+    subprocess.run(
+        [
+            "uv",
+            "tool",
+            "install",
+            "--python",
+            sys.executable,
+            str(wheel),
+            "--with-requirements",
+            str(requirements),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    executable = tmp_path / "bin" / "agent-bridge"
+    result = subprocess.run(
+        [str(executable), "setup", str(repo)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    lanes = json.loads(result.stdout)["lanes"]
+    for agent, expected in (("claude", 0), ("codex", 1)):
+        result = subprocess.run(
+            [str(executable), "issue", "claim", "432"],
+            cwd=lanes[agent],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == expected, result.stderr
+    installed_python = tmp_path / "tools" / "agent-bridge" / "bin" / "python"
+    location = subprocess.run(
+        [
+            str(installed_python),
+            "-I",
+            "-c",
+            "import agent_bridge; print(agent_bridge.__file__)",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert Path(location.stdout.strip()).is_relative_to(tmp_path / "tools")
+    subprocess.run(
+        [str(installed_python), "-I", "-m", "agent_bridge", "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
     )

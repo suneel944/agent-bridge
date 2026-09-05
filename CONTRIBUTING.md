@@ -51,12 +51,17 @@ Run focused checks while editing. Before submitting implementation changes, run:
 make check
 ```
 
-CI runs the same locked dependency, lint, formatting, and test gate. Do not weaken
+CI runs the same locked dependency, lint, formatting, build, and test gate.
+Do not weaken
 checks to make a change pass. Explain any narrowly justified rule exception.
 Tests should exercise behavior, especially concurrency, persistence, cancellation,
 and permission boundaries. Distinguish real MCP transport tests from native model
 behavior; the latter requires an explicit two-terminal trial.
 
 Update the README and architecture diagrams when responsibilities or flows change.
+Keep runtime code in the top-level `agent_bridge/` package. `make build` must
+produce an installable wheel and a source archive containing both native plugin
+manifests and the shared skill. The installed-package test uses a temporary tool
+environment outside the checkout to catch accidental source-tree imports.
 Keep changes scoped and review the final diff for accidental credentials, runtime
 artifacts, and unrelated edits. Publish the commands actually run and their results.

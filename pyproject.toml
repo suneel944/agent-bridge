@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run Claude Code and Codex in isolated worktrees with shared coordination."
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{name = "Suneel Kaushik S", email = "suneel944@gmail.com"}]
 dependencies = [
-  "mcp-agent-mail",
+  "mcp-agent-mail @ git+https://github.com/Dicklesworthstone/mcp_agent_mail.git@08797e0fe4c167dc4ec2206abba12a6d88baf6a0",
   "fastmcp>=2.10.5,<3",
   "psutil>=6.1,<8",
 ]
@@ -17,8 +18,18 @@ dependencies = [
 [project.scripts]
 agent-bridge = "agent_bridge.cli:main"
 
-[tool.uv.sources]
-mcp-agent-mail = { git = "https://github.com/Dicklesworthstone/mcp_agent_mail.git", rev = "08797e0fe4c167dc4ec2206abba12a6d88baf6a0" }
+[project.urls]
+Repository = "https://github.com/suneel944/agent-bridge"
+Issues = "https://github.com/suneel944/agent-bridge/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_bridge"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = ["/agent_bridge", "/plugins", "/tests", "/README.md", "/CONTRIBUTING.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents"]
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.14,<1", "mcp>=1.20,<2"]
