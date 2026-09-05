@@ -11,6 +11,13 @@
 - Allow SQLite writers one second for transient contention while retaining the
   bounded failure deadline for locks that remain held.
 
+## [0.3.1](https://github.com/suneel944/agent-bridge/compare/v0.3.0...v0.3.1) (2026-09-05)
+
+
+### Automation
+
+* enforce PR hygiene, automate releases and refresh dependencies ([#9](https://github.com/suneel944/agent-bridge/issues/9)) ([5566366](https://github.com/suneel944/agent-bridge/commit/55663669789e9fff75b8e3f2559e05990c301738))
+
 ## [0.3.0] - 2026-09-05
 
 ### Changed
