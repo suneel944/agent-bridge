@@ -1,0 +1,90 @@
+name: Prepare release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+        id: release
+      - name: Assign release ownership and trigger required checks
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        with:
+          script: |
+            const repo = context.repo;
+            for (const pr of JSON.parse(process.env.RELEASE_PRS)) {
+              const version = pr.title.match(/\b\d+\.\d+\.\d+\b/)[0];
+              const title = `v${version}`;
+              const milestones = await github.paginate(
+                github.rest.issues.listMilestones, {...repo, state: 'open'});
+              const milestone = milestones.find(m => m.title === title) ||
+                (await github.rest.issues.createMilestone(
+                  {...repo, title})).data;
+              const issues = await github.paginate(
+                github.rest.issues.listForRepo,
+                {...repo, state: 'open', labels: 'release'});
+              const issueTitle = `Release ${title}`;
+              const issue = issues.find(i => !i.pull_request &&
+                i.title === issueTitle) ||
+                (await github.rest.issues.create({
+                  ...repo, title: issueTitle,
+                  body: 'Track generated changelog, version alignment and ' +
+                    'verified release artifacts.',
+                  assignees: ['suneel944'], labels: ['release'],
+                  milestone: milestone.number,
+                })).data;
+              const current = (await github.rest.pulls.get({
+                ...repo, pull_number: pr.number})).data;
+              const reference = `Refs #${issue.number}`;
+              if (!current.body.includes(reference)) {
+                await github.rest.pulls.update({
+                  ...repo, pull_number: pr.number,
+                  body: `${current.body}\n\n${reference}\n`,
+                });
+              }
+              await github.rest.issues.update({
+                ...repo, issue_number: pr.number,
+                assignees: ['suneel944'], milestone: milestone.number,
+              });
+              await github.rest.issues.addLabels({
+                ...repo, issue_number: pr.number, labels: ['release'],
+              });
+              for (const workflow_id of ['check.yml', 'pr-hygiene.yml']) {
+                await github.rest.actions.createWorkflowDispatch({
+                  ...repo, workflow_id, ref: current.head.ref,
+                  inputs: workflow_id === 'pr-hygiene.yml' ?
+                    {pr_number: String(pr.number)} : {},
+                });
+              }
+            }
+  publish:
+    needs: prepare
+    if: needs.prepare.outputs.created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}

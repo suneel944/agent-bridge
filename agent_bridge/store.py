@@ -49,8 +49,13 @@ CREATE INDEX IF NOT EXISTS leases ON file_reservations(project_id,expires_ts)
 
 @contextlib.contextmanager
 def connect(home: Path, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-    """Opens a bounded transaction and always closes its connection."""
-    db = sqlite3.connect(home / DATABASE, timeout=0.3)
+    """Opens a bounded transaction and always closes its connection.
+
+    Writers allow one second for another transaction to commit. The former
+    300 ms ceiling rejected ordinary contention on loaded CI workers. SQLite
+    acquires uncontended locks immediately; this budget adds no fixed delay.
+    """
+    db = sqlite3.connect(home / DATABASE, timeout=1.0)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     try:

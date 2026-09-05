@@ -3,11 +3,41 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tomllib
 import zipfile
 from pathlib import Path
+
+
+def release_notes(changelog: str, version: str) -> str:
+    """Extracts a version section from manual or Release Please changelogs.
+
+    Args:
+        changelog: Complete Markdown changelog.
+        version: Exact package version to extract.
+
+    Returns:
+        Version heading and its release notes, excluding adjacent versions.
+
+    Raises:
+        ValueError: If there is no matching nonempty version section.
+    """
+    heading = re.compile(
+        rf"^## \[{re.escape(version)}\]"
+        r"(?:\([^\n]*\))?(?: - | \()[^\n]+\n",
+        re.MULTILINE,
+    )
+    match = heading.search(changelog)
+    if not match:
+        raise ValueError("Add this version to CHANGELOG.md before releasing.")
+    section = re.split(
+        r"^## ", changelog[match.end() :], maxsplit=1, flags=re.MULTILINE
+    )[0].strip()
+    if not section:
+        raise ValueError("Release notes must not be empty.")
+    return f"## Agent Bridge {version}\n\n{section}\n"
 
 
 def main() -> None:
@@ -32,11 +62,7 @@ def main() -> None:
         if manifest["version"] != version:
             raise ValueError(f"{client} plugin version differs from package.")
     changelog = (root / "CHANGELOG.md").read_text()
-    heading = f"## [{version}] - "
-    if heading not in changelog:
-        raise ValueError("Add this version to CHANGELOG.md before releasing.")
-    section = changelog.split(heading, 1)[1].split("\n## ", 1)[0]
-    notes = f"## Agent Bridge {version}\n\n" + section.split("\n", 1)[1]
+    notes = release_notes(changelog, version)
     output = root / "dist" / "release"
     output.mkdir(parents=True, exist_ok=True)
     assets = []

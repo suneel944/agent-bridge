@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -336,3 +337,29 @@ def test_locked_store_fails_within_a_bounded_deadline(bridge, actors):
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             store.call(bridge.home, actors[0], "send_message", message())
         assert time.monotonic() - started < 2
+
+
+def test_writer_waits_for_a_short_lived_competing_transaction(
+    bridge, actors, monkeypatch
+):
+    attempted = threading.Event()
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.set_trace_callback(
+            lambda statement: (
+                attempted.set() if statement == "BEGIN IMMEDIATE" else None
+            )
+        )
+        return db
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store.connect(bridge.home, write=True):
+            monkeypatch.setattr(sqlite3, "connect", traced_connect)
+            pending = pool.submit(
+                store.call, bridge.home, actors[0], "send_message", message()
+            )
+            assert attempted.wait(timeout=2)
+            time.sleep(0.45)
+        assert pending.result(timeout=2)["id"] > 0
