@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/agent-bridge.svg" width="560" alt="Agent Bridge — separate work, shared context">
+  <img src="docs/assets/agent-bridge.png" width="560" alt="Agent Bridge — separate work, shared context">
 </p>
 
 # Agent Bridge
