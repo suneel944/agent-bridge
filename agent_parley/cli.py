@@ -1328,6 +1328,55 @@ def confirmed(proposal: str, assume_yes: bool) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def ignored_paths(lane: Path) -> list[str]:
+    """Names the ignored files and folders removing a worktree deletes.
+
+    Args:
+        lane: Existing worktree to inspect.
+
+    Returns:
+        Worktree-relative ignored paths, a wholly ignored folder named once
+        with its trailing slash.
+    """
+    listing = git(
+        lane,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
+    return listing.splitlines()
+
+
+def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
+    """Retires one lane after confirming the ignored files it deletes.
+
+    Args:
+        bridge: Launcher holding the private coordination state.
+        repo: Repository the command was given.
+        args: Parsed `participant retire` arguments.
+
+    Returns:
+        The account the retirement produced.
+
+    Raises:
+        BridgeError: If the operator declines or leaves the confirmation
+            unanswered, or if the retirement is refused.
+    """
+    _, data = lane_roster(bridge, repo)
+    participant = data["participants"].get(args.name)
+    lane = Path(participant["lane"]) if participant else None
+    ignored = ignored_paths(lane) if lane and lane.exists() else []
+    if ignored and not confirmed(
+        f"Retiring {args.name} deletes these ignored files:\n"
+        + "\n".join(f"- {path}" for path in ignored),
+        args.yes,
+    ):
+        raise BridgeError("Declined: nothing was retired.")
+    return bridge.retire(repo, args.name, discard=ignored)
+
+
 def bulk_lanes(
     action: str,
     names: Sequence[str],
@@ -1924,22 +1973,26 @@ class Bridge(
             git(lane, "switch", branch)
             return f"{name} restored to {branch} from {actual}."
 
-    def retire(self, repo: Path, name: str) -> str:
+    def retire(self, repo: Path, name: str, discard: Sequence[str] = ()) -> str:
         """Removes a participant's lane while preserving any work it holds.
 
         Deliveries still unread or unacknowledged by the lane are marked
         superseded, because a lane that left answers nothing; the messages
-        themselves stay readable.
+        themselves stay readable. Removing the worktree deletes its ignored
+        files, which `git status` never reports, so they are deleted only
+        when every one of them was named in ``discard``.
 
         Args:
             repo: Any checkout of the target repository.
             name: Participant whose lane is retired.
+            discard: Ignored paths the operator agreed to delete.
 
         Returns:
             An account of what was removed and what was kept.
 
         Raises:
-            BridgeError: If the lane is busy or holds uncommitted changes.
+            BridgeError: If the lane is busy, holds uncommitted changes, or
+                holds an ignored file ``discard`` does not name.
         """
         root, directory = self.project(repo, create=False)
         roster.read(directory)
@@ -1962,6 +2015,18 @@ class Bridge(
                         raise BridgeError(
                             f"{name} has uncommitted changes. Commit or "
                             "preserve them first; retire never discards work."
+                        )
+                    kept = [
+                        path
+                        for path in ignored_paths(lane)
+                        if path not in discard
+                    ]
+                    if kept:
+                        raise BridgeError(
+                            f"{name}'s worktree holds ignored files that "
+                            f"removing it deletes: {', '.join(kept)}. Move "
+                            "them first, or run `agent-parley participant "
+                            f"retire {name}` to confirm deleting them."
                         )
                     git(root, "worktree", "remove", str(lane))
                 git(root, "worktree", "prune")
@@ -4112,6 +4177,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             add_selector(command)
         if action == "restart":
             command.add_argument("--task", default="")
+        if action == "retire":
+            command.add_argument(
+                "--yes",
+                action="store_true",
+                help=(
+                    "Delete the ignored files the lane's worktree holds "
+                    "without asking first."
+                ),
+            )
     limiting = roles.add_parser(
         "budget",
         help=(
@@ -4972,7 +5046,7 @@ def main() -> int:
             elif args.action == "restore":
                 print(bridge.restore(repository, args.name))
             elif args.action == "retire":
-                print(bridge.retire(repository, args.name))
+                print(retired_lane(bridge, repository, args))
             elif args.action == "merge":
                 print(merged_lanes(bridge, repository, args, preview))
             elif args.action == "pr":
