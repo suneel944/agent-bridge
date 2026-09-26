@@ -233,7 +233,7 @@ class IntegrationMixin(MailMixin):
         data: dict,
         state: dict,
         group: str,
-        lanes: Sequence[str],
+        lanes: Sequence[str] | None,
     ) -> tuple[str, dict[str, list[str]]]:
         """Names the lanes one bulk merge considers and what it reports under.
 
@@ -242,7 +242,8 @@ class IntegrationMixin(MailMixin):
             data: Project manifest holding the roster.
             state: Published issue ledger.
             group: Group of the applied plan; every ready lane when empty.
-            lanes: Lanes a selector matched; unrestricted when empty.
+            lanes: Lanes a selector matched; unrestricted when None. An empty
+                selection admits no lane.
 
         Returns:
             The subject the run reports under and the candidate lanes mapped
@@ -258,7 +259,7 @@ class IntegrationMixin(MailMixin):
                 data, state, group, plan.members(directory, group)
             )
         ready = ready_lanes(directory, data, state)
-        if not lanes:
+        if lanes is None:
             return "Ready lanes", ready
         chosen = set(lanes)
         return "Selected ready lanes", {
@@ -266,7 +267,10 @@ class IntegrationMixin(MailMixin):
         }
 
     def integration_plan(
-        self, repo: Path, group: str = "", lanes: Sequence[str] = ()
+        self,
+        repo: Path,
+        group: str = "",
+        lanes: Sequence[str] | None = None,
     ) -> dict:
         """Orders the lanes a bulk merge would attempt and names its waits.
 
@@ -279,7 +283,7 @@ class IntegrationMixin(MailMixin):
         Args:
             repo: Any checkout of the target repository.
             group: Group of the applied plan; every ready lane when empty.
-            lanes: Lanes a selector matched; unrestricted when empty.
+            lanes: Lanes a selector matched; unrestricted when None.
 
         Returns:
             The subject the run reports under, the candidate lanes in
@@ -316,7 +320,9 @@ class IntegrationMixin(MailMixin):
         repo: Path,
         group: str = "",
         preview: bool = False,
-        lanes: Sequence[str] = (),
+        lanes: Sequence[str] | None = None,
+        *,
+        confirmed: Sequence[str] | None = None,
     ) -> str:
         """Integrates several lanes in the order their dependencies imply.
 
@@ -346,7 +352,11 @@ class IntegrationMixin(MailMixin):
             preview: Whether to report the plan and every candidate's preview
                 without merging anything.
             lanes: Lanes a selector matched, narrowing the ready lanes an
-                ungrouped run considers; unrestricted when empty.
+                ungrouped run considers; unrestricted when None. An empty
+                selection integrates nothing.
+            confirmed: Lanes of the plan the operator confirmed, so a lane
+                that became a candidate afterwards is never merged under
+                that confirmation; unrestricted when None.
 
         Returns:
             The ordered plan when previewing, otherwise an account of every
@@ -354,8 +364,9 @@ class IntegrationMixin(MailMixin):
 
         Raises:
             BridgeError: If the candidates cannot be ordered, if a group is
-                refused, or if the run stops on a refusal or a failure, whose
-                report names everything already integrated.
+                refused or gained a lane after its plan was confirmed, or if
+                the run stops on a refusal or a failure, whose report names
+                everything already integrated.
         """
         from agent_parley.cli import (
             group_refusal,
@@ -375,9 +386,23 @@ class IntegrationMixin(MailMixin):
                 subject, candidates = self._integration_candidates(
                     directory, data, state, group, lanes
                 )
+                skipped: list[str] = []
+                if confirmed is not None:
+                    skipped = [
+                        f"- {name} no longer ready, skipped."
+                        for name in confirmed
+                        if name not in candidates
+                    ]
+                    candidates = self._confirmed_candidates(
+                        group, candidates, confirmed
+                    )
                 if not candidates:
-                    return (
-                        f"{subject}: no lane to integrate, so nothing merged."
+                    return "\n".join(
+                        [
+                            f"{subject}: no lane to integrate, "
+                            "so nothing merged.",
+                            *skipped,
+                        ]
                     )
                 waits = lane_dependencies(state, candidates)
                 sequence = plan.order(waits, "Lane dependencies")
@@ -394,8 +419,51 @@ class IntegrationMixin(MailMixin):
             if group and any(refusals.values()):
                 raise BridgeError(group_refusal(group, sequence, refusals))
             return self._integrate_sequence(
-                root, directory, data, subject, sequence, waits, refusals
+                root,
+                directory,
+                data,
+                subject,
+                sequence,
+                waits,
+                refusals,
+                skipped,
             )
+
+    def _confirmed_candidates(
+        self,
+        group: str,
+        candidates: dict[str, list[str]],
+        confirmed: Sequence[str],
+    ) -> dict[str, list[str]]:
+        """Keeps only the candidates the operator's confirmed plan named.
+
+        A ready lane that appeared after the confirmation is left out of an
+        ungrouped run. A group is admitted whole, so a group that gained a
+        lane since its plan was confirmed is refused instead of being merged
+        in part.
+
+        Args:
+            group: Group of the applied plan; empty for an ungrouped run.
+            candidates: Current candidate lanes mapped to the issues they hold.
+            confirmed: Lanes of the plan the operator confirmed.
+
+        Returns:
+            The current candidates that the confirmed plan named.
+
+        Raises:
+            BridgeError: If a group gained a lane after its plan was confirmed.
+        """
+        kept = set(confirmed)
+        added = sorted(name for name in candidates if name not in kept)
+        if group and added:
+            raise BridgeError(
+                f"Group {group} gained {', '.join(added)} after its plan was "
+                "confirmed; nothing was merged. Run the merge again to "
+                "confirm the current plan."
+            )
+        return {
+            name: issues for name, issues in candidates.items() if name in kept
+        }
 
     def _integration_preview(
         self,
@@ -437,14 +505,34 @@ class IntegrationMixin(MailMixin):
         sequence: list[str],
         waits: dict[str, list[str]],
         refusals: dict[str, list[str]],
+        skipped: Sequence[str] = (),
     ) -> str:
-        """Merges an ordered run and reports how far it got."""
+        """Merges an ordered run and reports how far it got.
+
+        Args:
+            root: Common repository root, which is always the base checkout.
+            directory: Private state directory for the common repository.
+            data: Project manifest holding the roster and the gate command.
+            subject: What the run reports under.
+            sequence: Candidate lanes in dependency order.
+            waits: Each candidate mapped to the candidates it waits on.
+            refusals: Each candidate mapped to its preflight refusals.
+            skipped: Report lines naming confirmed lanes no longer ready.
+
+        Returns:
+            An account of every lane that was integrated.
+
+        Raises:
+            BridgeError: If the run stops on a refusal or a failure, whose
+                report names everything already integrated.
+        """
         from agent_parley.cli import unattempted
 
         report = [
             f"{subject}: {len(sequence)} lanes in dependency order: "
             + ", ".join(sequence)
-            + "."
+            + ".",
+            *skipped,
         ]
         merged: list[str] = []
         stopped = ""

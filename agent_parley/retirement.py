@@ -79,9 +79,12 @@ def _prune(root: str, lane: Path) -> dict:
 
     Returns:
         The state of the worktree as `PRUNED`, `KEPT` or `GONE`, and the
-        repository-relative paths that kept it, empty when none did. A
-        worktree Git could not inspect or could not remove is kept, so a
-        retirement never destroys an uninspected checkout.
+        repository-relative paths that kept it, empty when none did.
+        Ignored files keep it too: `git status` never lists them, and
+        `git worktree remove` deletes them, so a lane's `.env` or local
+        build output would otherwise vanish without a word. A worktree Git
+        could not inspect or could not remove is kept, so a retirement
+        never destroys an uninspected checkout.
     """
     if not lane.exists():
         _git(root, "worktree", "prune")
@@ -99,6 +102,19 @@ def _prune(root: str, lane: Path) -> dict:
         dirty.append(entry.rstrip("/"))
     if dirty:
         return {"worktree": KEPT, "dirty": sorted(dirty)}
+    readable, listing = _git(
+        str(lane),
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
+    if not readable:
+        return {"worktree": KEPT, "dirty": []}
+    ignored = [line.rstrip("/") for line in listing.splitlines() if line]
+    if ignored:
+        return {"worktree": KEPT, "dirty": sorted(ignored)}
     removed, _ = _git(root, "worktree", "remove", str(lane))
     _git(root, "worktree", "prune")
     return {"worktree": PRUNED if removed else KEPT, "dirty": []}

@@ -532,7 +532,9 @@ lane.
 
 Every bulk run prints the lanes it matched and what will happen to each, then
 asks once for the whole set. `--yes` answers that one question in advance.
-A selector matching nothing does nothing and says so.
+A declined or unanswered confirmation, including a closed standard input, does
+nothing and exits non-zero, so a script without `--yes` cannot mistake it for
+success. A selector matching nothing does nothing and says so.
 
 Non-integration operations are independent, so a lane's refusal is printed
 beside that lane and the remaining lanes are still attempted. The closing tally
@@ -546,7 +548,9 @@ narrows that set rather than widening it, and its plan names every prerequisite
 that lies outside the selected set: held by a lane that is not selected, and so
 not satisfied here, or released and held by nobody. Narrowing a selection never
 lifts a recorded dependency and never admits a lane on easier terms than the
-single-lane merge would.
+single-lane merge would. `participant merge --group NAME` integrates the whole
+group, so it refuses `--provider`, `--outcome`, `--drifted`, `--idle` and
+`--over-budget` rather than silently ignoring them.
 
 One issue carries one offer, so `issue assign` accepts a selector only while it
 matches a single lane. A wider match is refused and names every lane it matched,
@@ -2472,7 +2476,12 @@ and authentication is still the native `gh` CLI's own, with no added flag.
 
 `participant retire` removes one lane: it refuses while a session is running or
 the worktree is dirty, removes the worktree, invalidates that participant's
-coordination credential, and drops its manifest entry. The branch is deleted
+coordination credential, and drops its manifest entry. Removing the worktree
+deletes its ignored files, such as a local `.env` or build output, so retire
+lists them and asks first; `--yes` answers in advance, and a declined or
+unanswered question retires nothing and exits non-zero. `gc --apply` reclaims
+only lanes whose work has already landed, so it removes their ignored files
+without asking. The branch is deleted
 only when it adds no commits to the project base; otherwise the branch is kept
 and named in the output. Message history is always preserved, so past handoffs
 still resolve their sender.
