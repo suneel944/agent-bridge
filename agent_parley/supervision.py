@@ -2059,6 +2059,17 @@ def _continue_text(
         return (
             f"No held claim can move now.{said} Next work, in order: {listed}."
         )
+    if any(
+        lifecycle.state(ledger["issues"].get(number) or {})["state"]
+        == lifecycle.READY
+        for number in held or []
+    ):
+        return (
+            f"No held claim can move now.{said} Nothing else needs this lane, "
+            "but ready work stays claimed through verified integration, so "
+            "retire would be refused. End the turn; a change to that work "
+            "wakes this lane again."
+        )
     return (
         f"No held claim can move now.{said} Nothing else needs this lane: "
         "no peer mail asks for an answer, agent-parley issue next has no "

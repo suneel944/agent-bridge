@@ -1631,9 +1631,22 @@ def test_a_lane_whose_claims_all_wait_is_told_what_each_waits_on():
 
 
 def test_a_lane_with_nothing_left_is_told_to_retire():
-    text = waiting_offer(WAITING, NO_LEADS)["text"]
+    ledger = {
+        "issues": {
+            "3": held("running", blocked_by=["9"]),
+            "9": {"owner": None, "execution": {"state": "queued"}},
+        }
+    }
+    text = waiting_offer(ledger, NO_LEADS)["text"]
     assert "Nothing else needs this lane" in text
     assert "retire MCP tool" in text
+
+
+def test_a_lane_holding_ready_work_is_not_told_to_retire():
+    text = waiting_offer(WAITING, NO_LEADS)["text"]
+    assert "Nothing else needs this lane" in text
+    assert "retire MCP tool" not in text
+    assert "retire would be refused" in text
 
 
 def test_a_waiting_lane_answers_peer_mail_before_new_work():
