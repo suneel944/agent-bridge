@@ -888,6 +888,10 @@ def quiesce_exhausted(
     terminates that exact process identity, captures its work, then publishes
     an orphan marker. Silence or elapsed time cannot enter this path.
 
+    The process stop and capture run outside `issues.lock`, so claims,
+    releases and reports proceed while Git works. Publication retakes the
+    lock and revalidates the claim generation and approval first.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -982,65 +986,79 @@ def quiesce_exhausted(
                 "created": time.time(),
             }
             write_json(transition_path, transition)
-        with lock(directory / f"{owner}-checkpoint.lock", timeout=1):
-            try:
-                activity = json.loads(activity_path.read_text())
-            except (OSError, ValueError):
-                raise BridgeError(
-                    "Capacity owner has no session identity."
-                ) from None
-            if activity.get("session_id") != candidate.get("session_id"):
-                raise BridgeError("Capacity observation names a stale session.")
-            if manifest["participants"][owner].get("paused", False):
-                raise BridgeError(
-                    "Capacity owner is paused; resume it before live recovery."
-                )
-            from agent_parley import dialogs
-
-            reading = str(activity.get("activity", ""))
-            if reading == "idle" or reading.startswith(dialogs.APPROVAL):
-                raise BridgeError(
-                    "Capacity owner is waiting for operator input; resolve "
-                    "that native wait before live recovery."
-                )
-            pid = activity.get("session_pid")
-            ticks = activity.get("session_ticks")
-            if pid != authorization.get(
-                "session_pid"
-            ) or ticks != authorization.get("session_ticks"):
-                raise BridgeError(
-                    "Operator approval names a stale process generation."
-                )
-            alive = process.alive(pid, ticks)
-            if not alive and transition.get("phase") not in (
-                "authorized",
-                "stopped",
-                "captured",
-            ):
-                raise BridgeError("Capacity recovery process evidence changed.")
-            if alive:
-                process.ServerProcess(int(pid), str(ticks)).stop()
-            if process.alive(pid, ticks):
-                raise BridgeError("Capacity owner process did not stop.")
-            transition["phase"] = "stopped"
-            transition["stopped_at"] = time.time()
-            write_json(transition_path, transition)
-            activity["activity"] = "stopped for recovery"
-            activity["quiesced"] = {
-                "issue": issue,
-                "claim_id": claim_id,
-                "observation_id": str(candidate["observation_id"]),
-                "stopped_at": time.time(),
-            }
-            write_json(activity_path, activity)
-            saved = next(
-                value
-                for value in capture(directory, manifest, owner)
-                if value["issue"] == issue
+    with lock(directory / f"{owner}-checkpoint.lock", timeout=1):
+        current = issues.snapshot(directory)["issues"].get(issue) or {}
+        if current.get("owner") != owner or current.get("claim_id") != claim_id:
+            raise BridgeError("Capacity observation no longer owns this issue.")
+        try:
+            activity = json.loads(activity_path.read_text())
+        except (OSError, ValueError):
+            raise BridgeError(
+                "Capacity owner has no session identity."
+            ) from None
+        if activity.get("session_id") != candidate.get("session_id"):
+            raise BridgeError("Capacity observation names a stale session.")
+        if manifest["participants"][owner].get("paused", False):
+            raise BridgeError(
+                "Capacity owner is paused; resume it before live recovery."
             )
-            transition["phase"] = "captured"
-            transition["checkpoint"] = saved["id"]
-            write_json(transition_path, transition)
+        from agent_parley import dialogs
+
+        reading = str(activity.get("activity", ""))
+        if reading == "idle" or reading.startswith(dialogs.APPROVAL):
+            raise BridgeError(
+                "Capacity owner is waiting for operator input; resolve "
+                "that native wait before live recovery."
+            )
+        pid = activity.get("session_pid")
+        ticks = activity.get("session_ticks")
+        if pid != authorization.get(
+            "session_pid"
+        ) or ticks != authorization.get("session_ticks"):
+            raise BridgeError(
+                "Operator approval names a stale process generation."
+            )
+        alive = process.alive(pid, ticks)
+        if not alive and transition.get("phase") not in (
+            "authorized",
+            "stopped",
+            "captured",
+        ):
+            raise BridgeError("Capacity recovery process evidence changed.")
+        if alive:
+            process.ServerProcess(int(pid), str(ticks)).stop()
+        if process.alive(pid, ticks):
+            raise BridgeError("Capacity owner process did not stop.")
+        transition["phase"] = "stopped"
+        transition["stopped_at"] = time.time()
+        write_json(transition_path, transition)
+        activity["activity"] = "stopped for recovery"
+        activity["quiesced"] = {
+            "issue": issue,
+            "claim_id": claim_id,
+            "observation_id": str(candidate["observation_id"]),
+            "stopped_at": time.time(),
+        }
+        write_json(activity_path, activity)
+        saved = next(
+            value
+            for value in capture(directory, manifest, owner)
+            if value["issue"] == issue
+        )
+        transition["phase"] = "captured"
+        transition["checkpoint"] = saved["id"]
+        write_json(transition_path, transition)
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        current = ledger["issues"].get(issue) or {}
+        if current.get("owner") != owner or current.get("claim_id") != claim_id:
+            raise BridgeError("Capacity observation no longer owns this issue.")
+        latest = approval(directory, issue, claim_id) or {}
+        if latest.get("id") != authorization["id"]:
+            raise BridgeError(
+                "Live recovery requires operator approval for this claim "
+                "session."
+            )
         marker: dict = {
             "id": (
                 f"capacity:{claim_id}:{str(candidate['observation_id'])[:64]}"

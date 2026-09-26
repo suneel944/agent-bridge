@@ -334,6 +334,28 @@ def test_a_second_sweep_reclaims_nothing_and_writes_no_second_notice(
     assert len(inbox(bridge, holder)) == 1
 
 
+def test_an_expired_lease_of_a_retired_lane_is_freed_without_a_notice(
+    bridge, repo, paired
+):
+    holder = actor(bridge, paired["root"], "claude")
+    peer = actor(bridge, paired["root"], "codex")
+    reserve(bridge, holder, "src/engine.py", ttl_seconds=30)
+    assert store.revoke(bridge.home, paired["root"], "claude") == 1
+    expire(bridge, holder, 60)
+    unreachable(bridge, holder)
+    granted = reserve(bridge, peer, "src/engine.py")["granted"]
+    assert [lease["path"] for lease in granted] == ["src/engine.py"]
+    assert store.active_reservations(bridge.home, paired["root"]) == {
+        "codex": ["src/engine.py"]
+    }
+    with store.connect(bridge.home) as db:
+        told = db.execute(
+            "SELECT count(*) FROM message_recipients WHERE agent_id=?",
+            (holder["id"],),
+        ).fetchone()[0]
+    assert told == 0
+
+
 def test_a_live_holder_renews_its_expired_lease_at_the_next_checkpoint(
     bridge, repo, paired
 ):
