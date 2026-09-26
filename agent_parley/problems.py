@@ -930,8 +930,8 @@ def _root_rows(directory: Path, root: str, now: float) -> list[dict]:
         return []
     live = [str(name) for name in recorded.get("live") or []]
     detail = (
-        f"project root is gone; {len(live)} live lanes kept from "
-        f"retirement: {', '.join(live)}"
+        f"project root is gone; live lanes kept from retirement: "
+        f"{', '.join(live)}"
         if live
         else "project root is gone; lanes retire one interval after it went"
     )

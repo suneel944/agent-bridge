@@ -521,7 +521,7 @@ def test_a_missing_root_names_the_live_lanes_it_keeps(
     assert row["project"] == paired["root"]
     assert row["seconds"] >= 600
     assert row["detail"] == (
-        "project root is gone; 1 live lanes kept from retirement: claude"
+        "project root is gone; live lanes kept from retirement: claude"
     )
 
 

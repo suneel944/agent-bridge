@@ -1916,8 +1916,8 @@ lane still registered is captured for recovery, retired and has its
 reservations revoked. The marker names, per lane, the claims released and the
 checkpoint each one left, and the state directory for the operator to remove.
 A lane whose session is still live is kept, and `agent-parley problems` names
-it under `root missing` until its session ends. The project then leaves `status`, `top` and `metrics`; a root that
-returns clears the marker on the next poll. When the service starts, it
+it under `root missing` until its session ends. The project then leaves
+`status`, `top` and `metrics`; a root that returns clears the marker on the next poll. When the service starts, it
 removes every wake socket in its home that no launcher is listening on.
 
 ## Other agent CLIs
