@@ -896,6 +896,10 @@ def test_a_refused_recovery_leaves_other_lanes_their_work(bridge, repo, paired):
         record = issues.snapshot(directory)["issues"]["42"]
         assert "orphan" not in record
         assert recovery.approval(directory, "42", record["claim_id"])
+
+        write_json(directory / "claude-activity.json", activity)
+        assert recovery.quiesce_authorized(directory, manifest)
+        assert recovery.refusal(directory, "42") is None
     finally:
         if child.poll() is None:
             child.kill()

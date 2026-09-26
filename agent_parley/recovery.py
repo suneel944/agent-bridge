@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -643,7 +644,12 @@ def _consume_approval(
     claim_id: str,
     authorization_id: str,
 ) -> None:
-    """Durably consumes the exact approval behind a completed transition."""
+    """Durably consumes the exact approval behind a completed transition.
+
+    A consumed approval means the recovery went through, so any refusal
+    `_refuse` recorded for the issue on an earlier pass is withdrawn and
+    `refusal` no longer reports a problem that has been resolved.
+    """
     path = _folder(directory) / f"{_identifier(issue, claim_id)}-approval.json"
     try:
         value = json.loads(path.read_text())
@@ -658,6 +664,11 @@ def _consume_approval(
     if not value.get("used_at"):
         value["used_at"] = time.time()
         write_json(path, value)
+    if re.fullmatch(r"[1-9][0-9]{0,17}", issue):
+        with contextlib.suppress(OSError):
+            (_folder(directory) / f"issue-{issue}-refusal.json").unlink(
+                missing_ok=True
+            )
 
 
 def _capacity_candidate(directory: Path, issue: str) -> dict:
