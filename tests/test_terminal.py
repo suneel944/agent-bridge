@@ -14,8 +14,18 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import terminal
+from agent_parley import process, terminal
 from agent_parley.state import write_json
+
+
+def _idle(updated: float) -> dict:
+    """Returns an idle record naming this live test process as its session."""
+    return {
+        "activity": "idle",
+        "updated": updated,
+        "session_pid": os.getpid(),
+        "session_ticks": process.start_ticks(os.getpid()),
+    }
 
 
 def test_control_socket_names_fit_valid_long_participants():
@@ -151,10 +161,7 @@ def test_attached_launcher_admits_a_wake_after_a_cursor_report():
         directory = Path(temporary)
         lane = directory / "lane"
         lane.mkdir()
-        write_json(
-            directory / "lane-activity.json",
-            {"activity": "idle", "updated": 1},
-        )
+        write_json(directory / "lane-activity.json", _idle(1))
         script = (
             "import sys\nprint('READY', flush=True)\n"
             "for line in sys.stdin:\n"
@@ -181,10 +188,7 @@ def test_attached_launcher_admits_a_wake_after_a_cursor_report():
             assert terminal.PROMPT.encode() in received.split(b"RECEIVED:")[1]
             os.write(master, b"typed")
             time.sleep(0.5)
-            write_json(
-                directory / "lane-activity.json",
-                {"activity": "idle", "updated": 2},
-            )
+            write_json(directory / "lane-activity.json", _idle(2))
             assert terminal.request(directory, "lane") == "busy:input"
         finally:
             os.kill(pid, signal.SIGKILL)
@@ -215,7 +219,7 @@ def test_wake_transport_respects_native_activity(activity, expected):
         lane.mkdir()
         write_json(
             directory / "lane-activity.json",
-            {"activity": activity, "updated": 1},
+            {**_idle(1), "activity": activity},
         )
         script = (
             "import sys\nprint('READY', flush=True)\n"
@@ -244,10 +248,7 @@ def test_wake_transport_respects_native_activity(activity, expected):
                     (directory / "lane-activity.json").read_text()
                 )
                 assert state["activity"] == "waiting for approval"
-                write_json(
-                    directory / "lane-activity.json",
-                    {"activity": "idle", "updated": 2},
-                )
+                write_json(directory / "lane-activity.json", _idle(2))
                 assert terminal.request(directory, "lane") == "accepted"
             output, error = child.communicate(timeout=10)
             assert child.returncode == 0, error
@@ -264,10 +265,7 @@ def test_an_admitted_prompt_submits_after_its_text():
         directory = Path(temporary)
         lane = directory / "lane"
         lane.mkdir()
-        write_json(
-            directory / "lane-activity.json",
-            {"activity": "idle", "updated": 1},
-        )
+        write_json(directory / "lane-activity.json", _idle(1))
         script = (
             "import os, sys, tty\ntty.setraw(0)\n"
             "print('READY', flush=True)\nseen = b''\n"
@@ -314,10 +312,7 @@ def test_latched_checkpoint_admits_one_retry_then_requires_attention():
         directory = Path(temporary)
         lane = directory / "lane"
         lane.mkdir()
-        write_json(
-            directory / "lane-activity.json",
-            {"activity": "idle", "updated": 1},
-        )
+        write_json(directory / "lane-activity.json", _idle(1))
         script = (
             "import sys\nprint('READY', flush=True)\n"
             "for line in sys.stdin:\n"
@@ -357,15 +352,52 @@ def test_latched_checkpoint_admits_one_retry_then_requires_attention():
             child.communicate(timeout=10)
 
 
-def test_stale_selected_work_is_refused_without_terminal_injection():
+def test_recent_terminal_output_keeps_a_stale_working_lane_busy():
     with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
         directory = Path(temporary)
         lane = directory / "lane"
         lane.mkdir()
         write_json(
             directory / "lane-activity.json",
-            {"activity": "idle", "updated": 1},
+            {**_idle(time.time() - 500), "activity": "working"},
         )
+        script = (
+            "import sys\nprint('READY', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    print('RECEIVED:' + line.rstrip(), flush=True)\n"
+        )
+        harness = (
+            "import os, sys\nfrom pathlib import Path\n"
+            "from agent_parley.terminal import run\n"
+            "raise SystemExit(run([sys.executable, '-c', sys.argv[2]], "
+            "Path(sys.argv[1]), dict(os.environ), 'lane', attached=False, "
+            "inactive_after=1))"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", harness, str(lane), script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            assert select.select([child.stdout], [], [], 10)[0]
+            assert b"READY" in child.stdout.readline()
+            assert terminal.request(directory, "lane") == "busy:turn"
+            time.sleep(1.2)
+            assert terminal.request(directory, "lane") == "accepted"
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
+
+
+def test_stale_selected_work_is_refused_without_terminal_injection():
+    with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
+        directory = Path(temporary)
+        lane = directory / "lane"
+        lane.mkdir()
+        write_json(directory / "lane-activity.json", _idle(1))
         write_json(directory / "lane-wake-work.json", {})
         script = (
             "import sys\nprint('READY', flush=True)\n"
@@ -564,10 +596,7 @@ def test_a_failing_log_write_keeps_the_session():
         lane = directory / "lane"
         lane.mkdir()
         received = directory / "received"
-        write_json(
-            directory / "lane-activity.json",
-            {"activity": "idle", "updated": 1},
-        )
+        write_json(directory / "lane-activity.json", _idle(1))
         script = (
             "import os\nos.write(1, b'output\\n' * 100)\n"
             "line = input()\n"

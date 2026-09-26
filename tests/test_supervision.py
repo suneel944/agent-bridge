@@ -13,6 +13,7 @@ import pytest
 
 from agent_parley import (
     cli,
+    dialogs,
     issues,
     lanes,
     process,
@@ -406,12 +407,49 @@ def test_stale_working_lane_exhausts_its_wake_budget(
 
 
 def test_launcher_reads_a_fresh_working_label_as_busy():
-    fresh = {"activity": "working", "updated": time.time()}
+    fresh = {
+        "activity": "working",
+        "updated": time.time(),
+        "session_pid": os.getpid(),
+        "session_ticks": process.start_ticks(os.getpid()),
+    }
     stale = {**fresh, "updated": time.time() - 500}
     assert terminal.turn_busy(fresh, 300)
     assert not terminal.turn_busy(stale, 300)
     assert not terminal.turn_busy({**stale, "activity": "idle"}, 300)
     assert terminal.turn_busy({**stale, "updated": "x"}, 300)
+
+
+def test_launcher_types_a_wake_only_into_an_idle_lane():
+    idle = {
+        "activity": "idle",
+        "updated": time.time(),
+        "session_pid": os.getpid(),
+        "session_ticks": process.start_ticks(os.getpid()),
+    }
+    question = {
+        **idle,
+        "activity": f"{dialogs.MARKER}asks the operator",
+        "updated": time.time() - 500,
+    }
+    unknown = {"activity": "idle", "updated": time.time()}
+    assert not terminal.turn_busy(idle, 300)
+    assert supervision.lane_state(question, 300)["state"] == supervision.WAITING
+    assert terminal.turn_busy(question, 300)
+    assert supervision.lane_state(unknown, 300)["state"] == supervision.UNKNOWN
+    assert terminal.turn_busy(unknown, 300)
+
+
+def test_launcher_reads_recent_terminal_output_as_a_turn():
+    stale = {
+        "activity": "working",
+        "updated": time.time() - 500,
+        "session_pid": os.getpid(),
+        "session_ticks": process.start_ticks(os.getpid()),
+    }
+    assert terminal.turn_busy(stale, 300, 10)
+    assert not terminal.turn_busy(stale, 300, 400)
+    assert not terminal.turn_busy(stale, 300, None)
 
 
 @pytest.mark.parametrize(
