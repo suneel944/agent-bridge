@@ -1911,6 +1911,44 @@ def test_a_new_session_in_the_recorded_process_is_adopted(bridge, repo, paired):
     )
 
 
+def test_an_untraced_new_session_keeps_a_live_launcher_identity(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    own = process.ServerProcess(os.getpid(), process.start_ticks(os.getpid()))
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "session_id": "",
+            "session_pid": own.pid,
+            "session_ticks": own.ticks,
+            "launcher_pid": own.pid,
+            "launcher_ticks": own.ticks,
+            "activity": "starting",
+            "updated": time.time() - 60,
+        },
+    )
+
+    checkpoints.checkpoint(
+        bridge.home,
+        directory,
+        "codex",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "s2",
+            "cwd": str(lane),
+        },
+        None,
+        record_only=True,
+    )
+
+    state = json.loads((directory / "codex-activity.json").read_text())
+    assert state["session_id"] == "s2"
+    assert state["session_pid"] == own.pid
+    assert state["session_ticks"] == own.ticks
+
+
 def test_a_foreign_process_editing_as_the_lane_is_denied(bridge, repo, paired):
     lane = Path(paired["lanes"]["codex"])
     directory = lane.parent
