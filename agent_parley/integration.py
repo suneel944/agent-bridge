@@ -366,12 +366,23 @@ class IntegrationMixin(MailMixin):
             subject, candidates = self._integration_candidates(
                 directory, data, state, group, lanes
             )
+            skipped: list[str] = []
             if confirmed is not None:
+                skipped = [
+                    f"- {name} no longer ready, skipped."
+                    for name in confirmed
+                    if name not in candidates
+                ]
                 candidates = self._confirmed_candidates(
                     group, candidates, confirmed
                 )
             if not candidates:
-                return f"{subject}: no lane to integrate, so nothing merged."
+                return "\n".join(
+                    [
+                        f"{subject}: no lane to integrate, so nothing merged.",
+                        *skipped,
+                    ]
+                )
             waits = lane_dependencies(state, candidates)
             sequence = plan.order(waits, "Lane dependencies")
             refusals = {
@@ -387,7 +398,14 @@ class IntegrationMixin(MailMixin):
             if group and any(refusals.values()):
                 raise BridgeError(group_refusal(group, sequence, refusals))
             return self._integrate_sequence(
-                root, directory, data, subject, sequence, waits, refusals
+                root,
+                directory,
+                data,
+                subject,
+                sequence,
+                waits,
+                refusals,
+                skipped,
             )
 
     def _confirmed_candidates(
@@ -466,14 +484,34 @@ class IntegrationMixin(MailMixin):
         sequence: list[str],
         waits: dict[str, list[str]],
         refusals: dict[str, list[str]],
+        skipped: Sequence[str] = (),
     ) -> str:
-        """Merges an ordered run and reports how far it got."""
+        """Merges an ordered run and reports how far it got.
+
+        Args:
+            root: Common repository root, which is always the base checkout.
+            directory: Private state directory for the common repository.
+            data: Project manifest holding the roster and the gate command.
+            subject: What the run reports under.
+            sequence: Candidate lanes in dependency order.
+            waits: Each candidate mapped to the candidates it waits on.
+            refusals: Each candidate mapped to its preflight refusals.
+            skipped: Report lines naming confirmed lanes no longer ready.
+
+        Returns:
+            An account of every lane that was integrated.
+
+        Raises:
+            BridgeError: If the run stops on a refusal or a failure, whose
+                report names everything already integrated.
+        """
         from agent_parley.cli import unattempted
 
         report = [
             f"{subject}: {len(sequence)} lanes in dependency order: "
             + ", ".join(sequence)
-            + "."
+            + ".",
+            *skipped,
         ]
         merged: list[str] = []
         stopped = ""

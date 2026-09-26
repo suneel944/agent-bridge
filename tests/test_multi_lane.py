@@ -386,6 +386,22 @@ def test_a_lane_ready_after_confirmation_is_not_merged(
     assert not (repo / "second.txt").exists()
 
 
+def test_a_confirmed_lane_no_longer_ready_is_named_as_skipped(
+    bridge, repo, paired
+):
+    git(repo, "config", "user.name", "Bridge Test")
+    git(repo, "config", "user.email", "test@example.com")
+    worked(bridge, paired, "claude", "42", "first.txt")
+    codex = worked(bridge, paired, "codex", "43", "second.txt")
+    bridge.report(codex, "partial", "Reopened", "Fix the parser", "")
+
+    report = bridge.integrate(repo, confirmed=["claude", "codex"])
+
+    assert "- codex no longer ready, skipped." in report
+    assert "Integrated 1 of 1 lanes: claude." in report
+    assert not (repo / "second.txt").exists()
+
+
 def test_a_group_that_gained_a_lane_after_confirmation_is_refused(
     bridge, repo, paired
 ):
