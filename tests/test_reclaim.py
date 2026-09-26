@@ -119,6 +119,25 @@ def test_a_merged_lane_is_reclaimed_with_its_worktree_and_branch(
     assert "claude" not in roster.read(landed["directory"])["participants"]
 
 
+def test_a_merged_lane_holding_ignored_folders_is_reclaimed(
+    bridge, repo, landed, monkeypatch
+):
+    completion(monkeypatch, "MERGED")
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text("__pycache__/\n.venv/\n")
+    for folder in ("__pycache__", ".venv"):
+        (landed["lane"] / folder).mkdir()
+        (landed["lane"] / folder / "cached").write_text("build output\n")
+
+    swept = bridge.reclaim(repo, apply=True)
+
+    assert row_of(swept, "claude")["removed"] is True
+    assert not landed["lane"].exists()
+
+
 def test_a_lane_still_at_the_project_base_is_kept(
     bridge, repo, landed, monkeypatch
 ):

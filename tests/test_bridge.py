@@ -25,6 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agent_parley import (
     checkpoints,
+    cli,
     dashboard,
     evidence,
     forge,
@@ -2536,6 +2537,99 @@ def test_retire_keeps_a_branch_that_still_holds_commits(bridge, repo, paired):
     readded = bridge.add_participant(repo, "codex", "codex")
     assert Path(readded["lanes"]["codex"]).exists()
     assert "kept.txt" in git(repo, "show", "--name-only", "kept-codex")
+
+
+def ignored_lane(repo, paired):
+    """Leaves one ignored file in the codex lane and returns the lane."""
+    lane = Path(paired["lanes"]["codex"])
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text(".env\n")
+    (lane / ".env").write_text("TOKEN=local\n")
+    return lane
+
+
+def retire_command(bridge, repo, monkeypatch, *flags):
+    """Runs `participant retire codex` and returns its exit status."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "participant",
+            "retire",
+            "codex",
+            "--repo",
+            str(repo),
+            *flags,
+        ],
+    )
+    return cli.main()
+
+
+def test_retire_refuses_an_ignored_file_it_was_not_told_to_delete(
+    bridge, repo, paired
+):
+    lane = ignored_lane(repo, paired)
+
+    with pytest.raises(BridgeError, match=r"ignored files .*\.env"):
+        bridge.retire(repo, "codex")
+
+    assert (lane / ".env").read_text() == "TOKEN=local\n"
+
+
+def test_retire_lists_ignored_files_and_keeps_them_when_unanswered(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+
+    def closed(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", closed)
+
+    assert retire_command(bridge, repo, monkeypatch) == 1
+    printed = capsys.readouterr()
+    assert "- .env" in printed.out
+    assert "Declined: nothing was retired." in printed.err
+    assert (lane / ".env").exists()
+
+
+def test_retire_with_yes_deletes_the_listed_ignored_files(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+
+    assert retire_command(bridge, repo, monkeypatch, "--yes") == 0
+    assert "- .env" in capsys.readouterr().out
+    assert not lane.exists()
+
+
+def test_retire_bounds_the_ignored_files_it_lists(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info" / "exclude").write_text(".env\n*.log\n")
+    for index in range(25):
+        (lane / f"run-{index:02}.log").write_text("output\n")
+
+    with pytest.raises(BridgeError) as refusal:
+        bridge.retire(repo, "codex")
+    assert ", and 6 more." in str(refusal.value)
+    assert "run-20.log" not in str(refusal.value)
+
+    assert retire_command(bridge, repo, monkeypatch, "--yes") == 0
+    printed = capsys.readouterr().out
+    assert "- and 6 more" in printed
+    assert "run-20.log" not in printed
+    assert not lane.exists()
 
 
 @pytest.mark.parametrize("dirty", [False, True])
