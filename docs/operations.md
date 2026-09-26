@@ -544,7 +544,9 @@ narrows that set rather than widening it, and its plan names every prerequisite
 that lies outside the selected set: held by a lane that is not selected, and so
 not satisfied here, or released and held by nobody. Narrowing a selection never
 lifts a recorded dependency and never admits a lane on easier terms than the
-single-lane merge would.
+single-lane merge would. `participant merge --group NAME` integrates the whole
+group, so it refuses `--provider`, `--outcome`, `--drifted`, `--idle` and
+`--over-budget` rather than silently ignoring them.
 
 One issue carries one offer, so `issue assign` accepts a selector only while it
 matches a single lane. A wider match is refused and names every lane it matched,

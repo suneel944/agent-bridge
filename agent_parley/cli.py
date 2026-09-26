@@ -1609,6 +1609,12 @@ def merged_lanes(
                 "lane with --all, a selected set, or one group with --group "
                 "NAME. Drop the participant name to integrate a set."
             )
+        if args.group and narrowing:
+            raise BridgeError(
+                "`participant merge --group NAME` integrates the whole group, "
+                "so it takes no lane selector. Drop --provider, --outcome, "
+                "--drifted, --idle and --over-budget, or drop --group."
+            )
         names: list[str] | None = None
         if narrowing:
             directory, data = lane_roster(bridge, repo)
