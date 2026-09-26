@@ -515,6 +515,30 @@ def _read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def turn_busy(state: dict, inactive_after: float) -> bool:
+    """Reports whether a lane's published activity shows a turn in progress.
+
+    The launcher answers a wake from the same derived lane state the
+    supervision poll decided to wake on, `supervision.lane_state`. A label
+    other than `idle` whose evidence has gone stale is no longer a turn in
+    progress: supervision reads that lane as idle and asks it for a turn, so
+    refusing it as busy would leave the request uncounted and the lane
+    woken forever without ever reaching its attempt bound.
+
+    Args:
+        state: Activity record the lane published.
+        inactive_after: Checkpoint age after which the evidence is stale.
+
+    Returns:
+        True when the lane is taking a turn and the wake must wait.
+    """
+    from agent_parley import supervision
+
+    if state.get("activity") == "idle":
+        return False
+    return not supervision.lane_state(state, inactive_after)["stale"]
+
+
 def lane_summary(start: Path) -> str:
     """Summarizes the lane containing a directory for a native status line.
 
@@ -878,7 +902,7 @@ def _session(
                             dialogs.APPROVAL
                         ):
                             result = "busy:approval"
-                        elif state.get("activity") != "idle":
+                        elif turn_busy(state, inactive_after):
                             result = "busy:turn"
                         elif pending_input or pending_control:
                             result = "busy:input"

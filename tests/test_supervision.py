@@ -371,6 +371,48 @@ def test_a_busy_refusal_does_not_consume_a_bounded_attempt(
     assert rewake(bridge, paired, lane.parent, "codex")["attempts"] == 5
 
 
+def test_stale_working_lane_exhausts_its_wake_budget(
+    bridge, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["codex"])
+    activity = lane.parent / "codex-activity.json"
+    write_json(
+        activity,
+        {
+            "activity": "working",
+            "updated": time.time() - 500,
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+        },
+    )
+    send(bridge, actors["claude"], "codex")
+
+    def request(*args):
+        state = json.loads(activity.read_text())
+        return "busy:turn" if terminal.turn_busy(state, 1) else "accepted"
+
+    monkeypatch.setattr(terminal, "request", request)
+    config = {**supervision.DEFAULTS, "inactive_after": 1}
+    observed = sampled(bridge, paired, lane.parent, "codex")
+    for _ in range(supervision.WORK_WAKE_ATTEMPTS):
+        supervision.wake(
+            bridge.home, lane.parent, paired, "codex", observed, config
+        )
+        record = rewake(bridge, paired, lane.parent, "codex", at=0)
+    assert record["result"] == "accepted"
+    assert record["attempts"] == supervision.WORK_WAKE_ATTEMPTS
+    assert record["exhausted_at"]
+
+
+def test_launcher_reads_a_fresh_working_label_as_busy():
+    fresh = {"activity": "working", "updated": time.time()}
+    stale = {**fresh, "updated": time.time() - 500}
+    assert terminal.turn_busy(fresh, 300)
+    assert not terminal.turn_busy(stale, 300)
+    assert not terminal.turn_busy({**stale, "activity": "idle"}, 300)
+
+
 def test_permission_prompt_is_never_woken(bridge, paired, monkeypatch):
     actors = registered(bridge, paired)
     directory = Path(paired["lanes"]["codex"]).parent
