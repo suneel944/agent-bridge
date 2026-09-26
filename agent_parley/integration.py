@@ -214,7 +214,7 @@ class IntegrationMixin(MailMixin):
         data: dict,
         state: dict,
         group: str,
-        lanes: Sequence[str],
+        lanes: Sequence[str] | None,
     ) -> tuple[str, dict[str, list[str]]]:
         """Names the lanes one bulk merge considers and what it reports under.
 
@@ -223,7 +223,8 @@ class IntegrationMixin(MailMixin):
             data: Project manifest holding the roster.
             state: Published issue ledger.
             group: Group of the applied plan; every ready lane when empty.
-            lanes: Lanes a selector matched; unrestricted when empty.
+            lanes: Lanes a selector matched; unrestricted when None. An empty
+                selection admits no lane.
 
         Returns:
             The subject the run reports under and the candidate lanes mapped
@@ -239,7 +240,7 @@ class IntegrationMixin(MailMixin):
                 data, state, group, plan.members(directory, group)
             )
         ready = ready_lanes(directory, data, state)
-        if not lanes:
+        if lanes is None:
             return "Ready lanes", ready
         chosen = set(lanes)
         return "Selected ready lanes", {
@@ -247,7 +248,10 @@ class IntegrationMixin(MailMixin):
         }
 
     def integration_plan(
-        self, repo: Path, group: str = "", lanes: Sequence[str] = ()
+        self,
+        repo: Path,
+        group: str = "",
+        lanes: Sequence[str] | None = None,
     ) -> dict:
         """Orders the lanes a bulk merge would attempt and names its waits.
 
@@ -260,7 +264,7 @@ class IntegrationMixin(MailMixin):
         Args:
             repo: Any checkout of the target repository.
             group: Group of the applied plan; every ready lane when empty.
-            lanes: Lanes a selector matched; unrestricted when empty.
+            lanes: Lanes a selector matched; unrestricted when None.
 
         Returns:
             The subject the run reports under, the candidate lanes in
@@ -297,7 +301,7 @@ class IntegrationMixin(MailMixin):
         repo: Path,
         group: str = "",
         preview: bool = False,
-        lanes: Sequence[str] = (),
+        lanes: Sequence[str] | None = None,
     ) -> str:
         """Integrates several lanes in the order their dependencies imply.
 
@@ -327,7 +331,8 @@ class IntegrationMixin(MailMixin):
             preview: Whether to report the plan and every candidate's preview
                 without merging anything.
             lanes: Lanes a selector matched, narrowing the ready lanes an
-                ungrouped run considers; unrestricted when empty.
+                ungrouped run considers; unrestricted when None. An empty
+                selection integrates nothing.
 
         Returns:
             The ordered plan when previewing, otherwise an account of every

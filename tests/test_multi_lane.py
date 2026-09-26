@@ -313,6 +313,44 @@ def test_a_selected_merge_integrates_only_the_matched_lanes(
     assert not (repo / "second.txt").exists()
 
 
+def test_an_empty_selection_integrates_nothing(bridge, repo, paired):
+    git(repo, "config", "user.name", "Bridge Test")
+    git(repo, "config", "user.email", "test@example.com")
+    worked(bridge, paired, "claude", "42", "first.txt")
+
+    report = bridge.integrate(repo, lanes=[])
+
+    assert report == (
+        "Selected ready lanes: no lane to integrate, so nothing merged."
+    )
+    assert not (repo / "first.txt").exists()
+
+
+def test_a_merge_selector_matching_nothing_merges_nothing(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    git(repo, "config", "user.name", "Bridge Test")
+    git(repo, "config", "user.email", "test@example.com")
+    worked(bridge, paired, "claude", "42", "first.txt")
+    worked(bridge, paired, "codex", "43", "second.txt")
+
+    printed = run(
+        bridge,
+        monkeypatch,
+        capsys,
+        "participant",
+        "merge",
+        "--repo",
+        str(repo),
+        "--drifted",
+        "--yes",
+    )
+
+    assert "Selector matched no lane, so nothing merged." in printed
+    assert not (repo / "first.txt").exists()
+    assert not (repo / "second.txt").exists()
+
+
 def test_a_declined_merge_plan_merges_nothing(
     bridge, repo, paired, monkeypatch, capsys
 ):

@@ -1609,10 +1609,12 @@ def merged_lanes(
                 "lane with --all, a selected set, or one group with --group "
                 "NAME. Drop the participant name to integrate a set."
             )
-        names: list[str] = []
+        names: list[str] | None = None
         if narrowing:
             directory, data = lane_roster(bridge, repo)
             names = matching_lanes(bridge.home, directory, data, args)
+            if not names:
+                return "Selector matched no lane, so nothing merged."
         if preview:
             return bridge.integrate(
                 repo, group=args.group, preview=True, lanes=names
