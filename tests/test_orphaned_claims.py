@@ -1133,6 +1133,60 @@ def test_a_lane_with_no_recorded_session_end_is_never_orphaned(
     assert not inbox(bridge, paired, "codex")
 
 
+def test_a_lane_with_a_corrupt_activity_record_is_orphaned_once_it_dies(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "working",
+                "updated": time.time(),
+                "session_id": "claude-session",
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        running(directory, "codex")
+        supervision.poll(bridge.home, directory)
+        (directory / "claude-activity.json").write_text("{")
+
+        supervision.poll(bridge.home, directory)
+
+        reading = supervision.presence(directory, "claude")
+        assert reading["state"] == supervision.UNKNOWN
+        assert reading["process_alive"] is None
+        assert "orphan" not in issues.snapshot(directory)["issues"]["42"]
+    finally:
+        child.kill()
+        child.wait()
+
+    assert supervision.presence(directory, "claude")["process_alive"] is False
+    supervision.poll(bridge.home, directory)
+    later = time.time() + STALLED + 100
+    monkeypatch.setattr(
+        supervision.lanes, "time", types.SimpleNamespace(time=lambda: later)
+    )
+    supervision.poll(bridge.home, directory)
+
+    record = issues.snapshot(directory)["issues"]["42"]
+    assert record["owner"] == "claude"
+    assert record["orphan"]["owner"] == "claude"
+    assert inbox(bridge, paired, "codex")[0][0] == (
+        "Orphaned claims held by claude"
+    )
+
+
 def test_a_cleanly_ended_lane_that_starts_again_loses_the_marker(
     bridge, repo, paired
 ):
