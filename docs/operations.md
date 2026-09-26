@@ -1638,6 +1638,24 @@ longer owns the issue, whether it released, handed off, was reclaimed or was
 resolved, so the former holder is not woken, sent or listed a reminder for
 work it no longer holds.
 
+A lane that opens a pull request and ends its turn to wait is woken when that
+pull request changes. At most once a minute the service reads up to 30 open
+pull requests with their head commit, checks, latest reviews, merge state and
+the issues they close, and keeps the last reading in `pull-requests.json` in
+the project state directory. A pull request belongs to the lane whose branch
+is its head, else to the one lane holding every claimed issue it closes, else
+to the lane whose worktree alone checked out its head branch. Its lane gets
+one supervisor message, and so a wake, when the checks finish green or red on
+a head commit not yet reported, when a review is submitted, or when the merge
+state moves between mergeable and conflicting. The message names the pull
+request, the full head SHA and the new state; a red run lists every failing
+check by name. The verdict waits until every check finished, so a run is
+reported once rather than job by job. A pull request first seen with finished
+checks or reviews is reported once too. Nothing is merged, rerun or answered
+for the lane. Only the GitHub forge is read; `beads` and `null` read nothing,
+and a forge that is missing, offline or unreadable keeps the last reading and
+wakes nobody without stopping the poll.
+
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
 complete. The reminder is written once and a silent lane is asked

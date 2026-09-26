@@ -25,6 +25,17 @@ from pathlib import Path
 MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
+MAX_PULL_REQUESTS = 30
+FAILED_CHECKS = frozenset(
+    {
+        "FAILURE",
+        "ERROR",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+    }
+)
 PROVIDER_LABEL = "provider:"
 FORGES = ("github", "beads", "null")
 DEFAULT_FORGE = "github"
@@ -294,6 +305,127 @@ def issue_completion(repo: Path, number: str) -> dict | None:
     except (ValueError, TypeError, AttributeError):
         reading["pull_request"] = max(linked)
     return reading
+
+
+def open_pull_requests(repo: Path) -> list[dict] | None:
+    """Reports the check, review and merge state of open pull requests.
+
+    One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests
+    with their head commit, the checks reported on it, the latest review of
+    each reviewer, whether the forge can merge it and the issues it closes.
+    The caller decides which lane a pull request belongs to and what changed
+    since its last reading. Only the GitHub forge opens pull requests, so
+    every other forge reports None.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+
+    Returns:
+        One reading per open pull request: its number, URL, head branch and
+        head commit, the checks verdict (`pending`, `green`, `red`, or
+        `none` when nothing reported), the sorted names of failing checks,
+        the latest reviews as author, state and submission time, the merge
+        state the forge reports and the bare numbers of the issues it
+        closes. None when the forge is unavailable or the response cannot
+        be read.
+    """
+    if _implementation(repo) != "github":
+        return None
+    project = _reachable(repo)
+    if not project:
+        return None
+    output = _run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            project,
+            "--state",
+            "open",
+            "--limit",
+            str(MAX_PULL_REQUESTS),
+            "--json",
+            "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
+            "latestReviews,closingIssuesReferences",
+        ],
+        15,
+    )
+    try:
+        records = json.loads(output or "null")
+        if not isinstance(records, list):
+            return None
+        readings: list[dict] = []
+        for record in records:
+            checks, failing = _checks(record.get("statusCheckRollup"))
+            readings.append(
+                {
+                    "number": int(record["number"]),
+                    "url": str(record.get("url") or ""),
+                    "branch": str(record.get("headRefName") or ""),
+                    "sha": str(record.get("headRefOid") or ""),
+                    "checks": checks,
+                    "failing": failing,
+                    "reviews": [
+                        {
+                            "author": str(
+                                (review.get("author") or {}).get("login") or ""
+                            ),
+                            "state": str(review.get("state") or ""),
+                            "at": str(review.get("submittedAt") or ""),
+                        }
+                        for review in record.get("latestReviews") or []
+                    ],
+                    "mergeable": str(record.get("mergeable") or "UNKNOWN"),
+                    "issues": [
+                        str(entry["number"])
+                        for entry in record.get("closingIssuesReferences") or []
+                        if entry.get("number")
+                    ],
+                }
+            )
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+    return readings
+
+
+def _checks(rollup: list | None) -> tuple[str, list[str]]:
+    """Reduces a pull request's reported checks to one verdict.
+
+    A check run is pending until its status reads completed, and a commit
+    status is pending while its state reads pending or expected. The verdict
+    is `red` only once every check finished, so a lane is told once about a
+    finished run rather than about each job as it fails.
+
+    Args:
+        rollup: The forge's `statusCheckRollup` entries, check runs and
+            commit statuses mixed.
+
+    Returns:
+        The verdict and the sorted names of the failing checks, empty
+        unless the verdict is `red`.
+    """
+    failing: set[str] = set()
+    pending = False
+    for entry in rollup or []:
+        name = str(entry.get("name") or entry.get("context") or "unnamed")
+        if "status" in entry:
+            if str(entry.get("status") or "").upper() != "COMPLETED":
+                pending = True
+                continue
+            outcome = str(entry.get("conclusion") or "").upper()
+        else:
+            outcome = str(entry.get("state") or "").upper()
+            if outcome in {"", "PENDING", "EXPECTED"}:
+                pending = True
+                continue
+        if outcome in FAILED_CHECKS:
+            failing.add(name)
+    if pending:
+        return "pending", []
+    if failing:
+        return "red", sorted(failing)
+    return ("green" if rollup else "none"), []
 
 
 def _epoch(value: str) -> float:
