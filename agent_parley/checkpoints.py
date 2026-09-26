@@ -2253,6 +2253,15 @@ def checkpoint(
     reads as unknown rather than stopped, which is the state an operator is
     told to return to a terminal for instead of relaunching.
 
+    A new session drops the recorded identity unless it is the one the
+    launcher seeded and that launcher is still alive. An event attributed
+    to a live process replaces it either way. An event no process can be
+    traced for keeps the launcher's identity, because the launcher runs as
+    long as the client it started: dropping it would read the running lane
+    as unknown, and a lane that is not idle refuses every wake as a busy
+    turn. Any other recorded process is unrelated to the new session and
+    is dropped, and a recorded process that is gone is always dropped.
+
     An event from a session other than the recorded one is discarded unless
     it opens a session. It used to be discarded until the next session
     start even when the recorded session's process had exited, so a lane
@@ -2461,10 +2470,12 @@ def checkpoint(
             state.pop("feed_cursor", None)
             state.pop("roster", None)
             state.pop("work_offer", None)
-            state.pop("session_pid", None)
-            state.pop("session_ticks", None)
             state.pop("foreign_session", None)
-        elif event == "SessionStart" and ended:
+        seeded = not ended and (
+            state.get("session_pid"),
+            state.get("session_ticks"),
+        ) == (state.get("launcher_pid"), state.get("launcher_ticks"))
+        if (new_session and not seeded) or (event == "SessionStart" and ended):
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
         state.update(session_id=session, updated=time.time(), event=event)
