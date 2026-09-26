@@ -4872,8 +4872,13 @@ def _write_work_dispatch(
 
 
 def _wake_flags(home: Path, directory: Path, name: str) -> dict:
-    """Reads the persisted wake gates used to fence prompt admission."""
-    with lock(directory / "setup.lock"):
+    """Reads the persisted wake gates used to fence prompt admission.
+
+    The read waits up to one second for the setup lock, as the terminal's
+    own gate read does, because lanes take that lock briefly all the time
+    and refusing the wake on any holder logs a fault for a routine overlap.
+    """
+    with lock(directory / "setup.lock", timeout=1):
         manifest = roster.read(directory)
         participants = manifest.get("participants", {})
         participant = participants.get(name) or {}

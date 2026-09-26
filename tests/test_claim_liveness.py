@@ -2,13 +2,14 @@
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from agent_parley import issues, lifecycle, process, store, supervision
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, lock, write_json
 
 WINDOW = 300
 IDLE_AFTER = 3600
@@ -244,6 +245,24 @@ def test_a_delivered_claim_does_not_count_toward_the_cap(bridge, paired):
     assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
     with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
         bridge.issue(lane, "claim", "10")
+
+
+def test_a_wake_waits_out_a_brief_setup_lock_holder(bridge, paired):
+    registered(bridge, paired)
+    directory = Path(paired["lanes"]["claude"]).parent
+    held = threading.Event()
+
+    def hold():
+        with lock(directory / "setup.lock"):
+            held.set()
+            time.sleep(0.3)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait()
+    flags = supervision._wake_flags(bridge.home, directory, "claude")
+    holder.join()
+    assert flags["present"]
 
 
 def blocking_an_idle_claim(bridge, paired, monkeypatch):
