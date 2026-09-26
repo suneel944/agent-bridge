@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS scheduled_deliveries (
  ack_within REAL, not_before REAL, condition TEXT NOT NULL DEFAULT '',
  unless_reported INTEGER NOT NULL DEFAULT 0, every_seconds REAL,
  repeats_left INTEGER NOT NULL DEFAULT 1, created_ts REAL NOT NULL,
- delivered_ts REAL, cancelled_ts REAL);
+ delivered_ts REAL, cancelled_ts REAL, cancelled_reason TEXT);
 CREATE INDEX IF NOT EXISTS undelivered ON scheduled_deliveries(project_id)
  WHERE delivered_ts IS NULL AND cancelled_ts IS NULL;
 """
@@ -364,6 +364,7 @@ def initialize(home: Path) -> None:
                 _add_supersession(db)
                 _add_topic(db)
                 _add_message_search(db)
+                _add_schedule_cancellation(db)
                 if version == SCHEMA_VERSION:
                     return
                 legacy = home / "mail.sqlite3"
@@ -511,6 +512,24 @@ def _add_topic(db: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS feed ON messages(project_id,id) "
         "WHERE feed=1"
     )
+
+
+def _add_schedule_cancellation(db: sqlite3.Connection) -> None:
+    """Adds the reason a scheduled item was cancelled to an older store.
+
+    The column is additive and nullable, so an item cancelled before the
+    upgrade keeps its cancellation time and simply records no reason.
+
+    Args:
+        db: Open upgrade transaction owned by the caller.
+    """
+    columns = {
+        row[1] for row in db.execute("PRAGMA table_info(scheduled_deliveries)")
+    }
+    if "cancelled_reason" not in columns:
+        db.execute(
+            "ALTER TABLE scheduled_deliveries ADD COLUMN cancelled_reason TEXT"
+        )
 
 
 def _add_reservation_created(db: sqlite3.Connection) -> None:
@@ -4364,6 +4383,11 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
     a bounded repeat commit together in one write transaction, so an
     interrupted poll either delivers the occurrence once or leaves it waiting.
 
+    A send the store refuses, such as one to a retired lane that holds no
+    credential or one whose key already names a different message, would be
+    refused the same way on every later poll. The item is cancelled instead,
+    with the refusal recorded as its reason, rather than retried forever.
+
     Args:
         home: Private bridge state root.
         root: Canonical project key registered with the store.
@@ -4371,12 +4395,13 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
         name: Registered identity of the addressed participant.
 
     Returns:
-        Whether the item was delivered and the message identifier it produced.
+        Whether the item was delivered and the message identifier it produced,
+        with the recorded reason under ``cancelled`` when the send was refused.
         A participant that has not registered with the store yet leaves the
         item waiting rather than losing it.
 
     Raises:
-        BridgeError: If the project is not registered or the send is invalid.
+        BridgeError: If the project is not registered.
     """
     if not (home / DATABASE).exists():
         raise BridgeError(NO_PROJECT)
@@ -4404,18 +4429,35 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
         key = row["dedup_key"]
         if row["sequence"]:
             key = f"{key}-{row['sequence']}"
-        sent = _send(
-            db,
-            dict(actor),
-            {
-                "to": [name],
-                "subject": row["subject"],
-                "body_md": row["body_md"],
-                "idempotency_key": key,
-                "ack_required": bool(row["ack_required"]),
-                "ack_within": row["ack_within"],
-            },
-        )
+        db.execute("SAVEPOINT delivery")
+        try:
+            sent = _send(
+                db,
+                dict(actor),
+                {
+                    "to": [name],
+                    "subject": row["subject"],
+                    "body_md": row["body_md"],
+                    "idempotency_key": key,
+                    "ack_required": bool(row["ack_required"]),
+                    "ack_within": row["ack_within"],
+                },
+            )
+        except BridgeError as exc:
+            db.execute("ROLLBACK TO delivery")
+            db.execute("RELEASE delivery")
+            db.execute(
+                "UPDATE scheduled_deliveries SET cancelled_ts=?,"
+                "cancelled_reason=? WHERE id=?",
+                (time.time(), str(exc)[:MAX_SUPERSEDE_REASON], identifier),
+            )
+            return {
+                "id": identifier,
+                "delivered": False,
+                "message_id": None,
+                "cancelled": str(exc),
+            }
+        db.execute("RELEASE delivery")
         _advance_schedule(db, row, time.time())
         return {
             "id": identifier,

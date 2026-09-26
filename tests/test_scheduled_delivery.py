@@ -79,6 +79,41 @@ def test_a_whole_float_ack_window_is_accepted_and_a_fraction_refused(
             )
 
 
+def cancelled(bridge, identifier):
+    """Returns the recorded cancellation reason of one scheduled item."""
+    with store.connect(bridge.home) as db:
+        return db.execute(
+            "SELECT cancelled_reason FROM scheduled_deliveries WHERE id=?",
+            (identifier,),
+        ).fetchone()[0]
+
+
+def test_a_message_to_a_retired_lane_is_cancelled_with_its_reason(
+    bridge, repo, paired
+):
+    name = ready(bridge, paired)
+    directory = bridge.project(repo)[1]
+    recorded = bridge.say(repo, "claude", "Rebase.", at=time.time() - 1)
+    assert store.revoke(bridge.home, paired["root"], name) == 1
+    supervision.poll(bridge.home, directory)
+    assert store.schedules(bridge.home, paired["root"]) == []
+    assert "cannot receive mail" in cancelled(bridge, recorded["id"])
+
+
+def test_a_message_whose_key_names_another_is_cancelled_with_its_reason(
+    bridge, repo, paired
+):
+    ready(bridge, paired)
+    directory = bridge.project(repo)[1]
+    bridge.say(repo, "claude", "Rebase.", key="rebase")
+    recorded = bridge.say(
+        repo, "claude", "Rebase.", key="rebase", at=time.time() - 1, ack=True
+    )
+    supervision.poll(bridge.home, directory)
+    assert store.schedules(bridge.home, paired["root"]) == []
+    assert "Idempotency key" in cancelled(bridge, recorded["id"])
+
+
 def test_a_message_waits_until_its_time_arrives(bridge, repo, paired):
     name = ready(bridge, paired)
     directory = bridge.project(repo)[1]
