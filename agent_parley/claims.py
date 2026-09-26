@@ -46,7 +46,8 @@ class ClaimsMixin(ReportsMixin):
 
         _, directory = self.project(repo)
         data = roster.read(directory)
-        if repo.resolve() != Path(data["root"]).resolve():
+        root = Path(data["root"]).resolve()
+        if repo.resolve() != root or roster.caller_lane(data):
             raise BridgeError(
                 "Live recovery approval must be recorded from the project "
                 "base checkout."
@@ -148,7 +149,11 @@ class ClaimsMixin(ReportsMixin):
         if action == "list":
             return snapshot(directory)
         lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-        if action == "unblock" and lane == Path(data["root"]).resolve():
+        if (
+            action == "unblock"
+            and lane == Path(data["root"]).resolve()
+            and not roster.caller_lane(data)
+        ):
             agent = roster.OPERATOR
         else:
             agent = roster.resolve(data, lane)
