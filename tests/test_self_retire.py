@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -119,6 +120,36 @@ def test_a_dirty_worktree_is_kept_and_its_changes_reported(
     assert result["worktree"] == retirement.KEPT
     assert result["dirty"] == ["notes.md", "shared.txt"]
     assert worktree.exists()
+
+
+def test_an_ignored_file_keeps_the_worktree(bridge, repo, paired):
+    lane = actor(bridge, paired["root"], "claude")
+    worktree = Path(paired["lanes"]["claude"])
+    exclude = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "rev-parse",
+            "--git-path",
+            "info/exclude",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    exclude_path = Path(exclude)
+    if not exclude_path.is_absolute():
+        exclude_path = worktree / exclude_path
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_path.write_text(".env\n")
+    (worktree / ".env").write_text("TOKEN=local\n")
+
+    result = retire(bridge, lane)
+
+    assert result["worktree"] == retirement.KEPT
+    assert result["dirty"] == [".env"]
+    assert (worktree / ".env").read_text() == "TOKEN=local\n"
 
 
 def test_a_handed_off_issue_returns_to_the_pool_and_tells_its_sender(
