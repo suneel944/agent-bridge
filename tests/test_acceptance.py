@@ -117,6 +117,25 @@ def test_seeding_refuses_a_directory_that_holds_a_repository(tmp_path):
         acceptance.workspace(tmp_path, 2)
 
 
+def test_a_lane_worktree_is_not_stranded_by_a_matching_issue(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        [*git, "commit", "--allow-empty", "-m", "seed"], cwd=repo, check=True
+    )
+    for name in ("claude-5", "issue-5"):
+        subprocess.run(
+            [*git, "worktree", "add", "-b", name, str(tmp_path / name)],
+            cwd=repo,
+            check=True,
+        )
+    endings = {"5": {"state": "ready"}}
+    stranded = acceptance._worktrees(repo, endings, ["claude-5:claude"])
+    assert stranded == [str(tmp_path / "issue-5")]
+
+
 def test_seeding_writes_one_task_per_backlog_issue(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-identity"))
     acceptance.workspace(tmp_path, 3)

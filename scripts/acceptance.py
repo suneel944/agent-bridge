@@ -749,16 +749,20 @@ def _log_faults(home: Path, repo: Path) -> dict:
     }
 
 
-def _worktrees(repo: Path, endings: dict) -> list[str]:
+def _worktrees(repo: Path, endings: dict, lanes: list[str]) -> list[str]:
     """Lists worktrees still held for an issue that already reported.
 
     Args:
         repo: Throwaway project the lanes coordinate over.
         endings: Each issue's last recorded report.
+        lanes: Lane specifications as ``name:provider[:credentials]``.
 
     Returns:
         The worktree paths that outlived the claim they were created for.
+        A lane's own worktree is not an issue worktree, even when its name
+        ends in a number, as ``claude-5`` does, that an issue shares.
     """
+    names = {lane.split(":", 1)[0] for lane in lanes}
     result = _run(["git", "worktree", "list", "--porcelain"], cwd=repo)
     held = [
         line.split(" ", 1)[1]
@@ -770,7 +774,12 @@ def _worktrees(repo: Path, endings: dict) -> list[str]:
         for number, ending in endings.items()
         if ending["state"] in ("ready", "merged")
     }
-    return [path for path in held if Path(path).name.rsplit("-", 1)[-1] in done]
+    return [
+        path
+        for path in held
+        if Path(path).name not in names
+        and Path(path).name.rsplit("-", 1)[-1] in done
+    ]
 
 
 def samples(frames: Path) -> list[dict]:
@@ -986,7 +995,7 @@ def verdict(
     if "error" in final:
         unattended.append({"condition": "unreadable", "detail": final})
     faults = _log_faults(home, repo)
-    stranded = _worktrees(repo, endings)
+    stranded = _worktrees(repo, endings, lanes)
     counters = lane_counters(home, repo, lanes)
     taken = samples(frames)
     idled = _idle_claims(taken)
