@@ -1099,6 +1099,18 @@ lane whose situation has not changed sees nothing new. Nothing is claimed for a
 lane, `issue offer` remains the only transfer path, and the recipient still
 accepts or declines.
 
+**A lane whose claims all wait is told what to do next.** A lane holding
+claims that are ready and waiting on CI and review, blocked on a recorded
+condition, or waiting on an unfinished dependency has nothing to resume. Its
+continue offer names each waiting claim and what it waits on, so the lane does
+not re-check them, and then the next work in order: peer mail that asks for an
+acknowledgement, the top `agent-parley issue next` candidate to claim, and a
+peer claim with no progress past the stall interval to ask for with
+`agent-parley issue request`. When none of those exists, the offer tells the
+lane to call the `retire` MCP tool rather than answer with a status line. A
+lane that can still resume a claim is told to resume it, and the claims that
+wait are listed after it.
+
 **An idle holder offers the split itself.** A claim held by a lane that has
 gone quiet on it is a defect that reads as healthy: the claim is held, the
 remaining work is untouched, and no row says anything is wrong. The runtime
