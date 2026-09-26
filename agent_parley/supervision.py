@@ -4115,6 +4115,13 @@ def missing_root(
     nothing here deletes it. A root that reappears clears the record on the
     next poll.
 
+    A lane whose session process is still alive is never retired here: a
+    moved repository or a dropped mount leaves its client running, and
+    releasing its claims and revoking its credential could not be undone
+    when the root returns. The publication names such lanes under `live`
+    and the project is not recorded retired, so each later poll retires
+    only the lanes whose process has since gone.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -4138,9 +4145,14 @@ def missing_root(
         return
     if recorded.get("retired") or now - since < config["interval"]:
         return
-    lanes = []
+    lanes = list(recorded.get("lanes") or [])
+    live = []
     for name, participant in manifest["participants"].items():
         if roster.retired(participant):
+            continue
+        reading = presence(directory, name, config["inactive_after"])
+        if reading["process_alive"] is True:
+            live.append(name)
             continue
         with contextlib.suppress(BridgeError, OSError, ValueError):
             recovery.capture(directory, manifest, name)
@@ -4169,9 +4181,10 @@ def missing_root(
         path,
         {
             "since": since,
-            "retired": now,
+            "retired": None if live else now,
             "state_directory": str(directory),
             "lanes": lanes,
+            "live": live,
         },
     )
 
