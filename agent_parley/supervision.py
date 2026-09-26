@@ -69,6 +69,7 @@ NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
+UNREADABLE = "unknown; activity record unreadable"
 DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
@@ -411,7 +412,7 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
             "last_active": None,
             "age_seconds": None,
             "activity": UNKNOWN,
-            "evidence": "unknown; activity record unreadable",
+            "evidence": UNREADABLE,
             "stale": False,
             "ended": False,
         }
@@ -4142,7 +4143,9 @@ def missing_root(
     releasing its claims and revoking its credential could not be undone
     when the root returns. The publication names such lanes under `live`
     and the project is not recorded retired, so each later poll retires
-    only the lanes whose process has since gone.
+    only the lanes whose process has since gone. A lane whose activity
+    record cannot be read has no process evidence either way, so it is
+    counted as live rather than retired on an unreadable file.
 
     Args:
         home: Private bridge state root.
@@ -4173,7 +4176,10 @@ def missing_root(
         if roster.retired(participant):
             continue
         reading = presence(directory, name, config["inactive_after"])
-        if reading["process_alive"] is True:
+        if (
+            reading["process_alive"] is True
+            or reading["evidence"] == UNREADABLE
+        ):
             live.append(name)
             continue
         with contextlib.suppress(BridgeError, OSError, ValueError):

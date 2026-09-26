@@ -811,6 +811,28 @@ def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     assert [lane["participant"] for lane in published["lanes"]] == ["codex"]
 
 
+def test_a_missing_root_never_retires_an_unreadable_lane(bridge, repo, paired):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    (directory / "claude-activity.json").write_text("{")
+    shutil.rmtree(repo)
+
+    supervision.poll(bridge.home, directory)
+    marker = directory / supervision.ROOT_PUBLICATION
+    recorded = json.loads(marker.read_text())
+    recorded["since"] -= supervision.DEFAULTS["interval"]
+    marker.write_text(json.dumps(recorded))
+    supervision.poll(bridge.home, directory)
+
+    assert not supervision.root_retired(directory)
+    participants = roster.read(directory)["participants"]
+    assert not roster.retired(participants["claude"])
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+    published = json.loads(marker.read_text())
+    assert published["live"] == ["claude"]
+
+
 def test_service_start_removes_wake_sockets_nobody_listens_on():
     with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
         home = Path(temporary)
