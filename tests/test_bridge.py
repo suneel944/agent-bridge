@@ -2609,6 +2609,29 @@ def test_retire_with_yes_deletes_the_listed_ignored_files(
     assert not lane.exists()
 
 
+def test_retire_bounds_the_ignored_files_it_lists(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info" / "exclude").write_text(".env\n*.log\n")
+    for index in range(25):
+        (lane / f"run-{index:02}.log").write_text("output\n")
+
+    with pytest.raises(BridgeError) as refusal:
+        bridge.retire(repo, "codex")
+    assert ", and 6 more." in str(refusal.value)
+    assert "run-20.log" not in str(refusal.value)
+
+    assert retire_command(bridge, repo, monkeypatch, "--yes") == 0
+    printed = capsys.readouterr().out
+    assert "- and 6 more" in printed
+    assert "run-20.log" not in printed
+    assert not lane.exists()
+
+
 @pytest.mark.parametrize("dirty", [False, True])
 @pytest.mark.parametrize("operation", ["show", "set", "retire", "merge"])
 def test_unregistered_commands_leave_repository_and_state_untouched(

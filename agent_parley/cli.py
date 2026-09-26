@@ -1349,6 +1349,25 @@ def ignored_paths(lane: Path) -> list[str]:
     return listing.splitlines()
 
 
+SHOWN_PATHS = 20
+
+
+def shown_paths(paths: Sequence[str]) -> list[str]:
+    """Bounds a path list an operator reads to its first entries.
+
+    Args:
+        paths: Every path the caller acts on.
+
+    Returns:
+        The first `SHOWN_PATHS` paths, followed by a count of the rest when
+        any were left out.
+    """
+    shown = list(paths[:SHOWN_PATHS])
+    if len(paths) > SHOWN_PATHS:
+        shown.append(f"and {len(paths) - SHOWN_PATHS} more")
+    return shown
+
+
 def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
     """Retires one lane after confirming the ignored files it deletes.
 
@@ -1370,7 +1389,7 @@ def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
     ignored = ignored_paths(lane) if lane and lane.exists() else []
     if ignored and not confirmed(
         f"Retiring {args.name} deletes these ignored files:\n"
-        + "\n".join(f"- {path}" for path in ignored),
+        + "\n".join(f"- {path}" for path in shown_paths(ignored)),
         args.yes,
     ):
         raise BridgeError("Declined: nothing was retired.")
@@ -2024,7 +2043,8 @@ class Bridge(
                     if kept:
                         raise BridgeError(
                             f"{name}'s worktree holds ignored files that "
-                            f"removing it deletes: {', '.join(kept)}. Move "
+                            f"removing it deletes: "
+                            f"{', '.join(shown_paths(kept))}. Move "
                             "them first, or run `agent-parley participant "
                             f"retire {name}` to confirm deleting them."
                         )
