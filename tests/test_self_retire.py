@@ -151,6 +151,40 @@ def test_a_handed_off_issue_returns_to_the_pool_and_tells_its_sender(
     assert "unclaimed again" in delivered[0]["body_md"]
 
 
+def test_a_readmitted_lane_that_retires_again_tells_its_sender_again(
+    bridge, repo, paired
+):
+    peer = actor(bridge, paired["root"], "codex")
+    told = []
+    for number in ("7", "9"):
+        bridge.add_participant(repo, "claude")
+        lane = actor(bridge, paired["root"], "claude")
+        bridge.issue(paired["lanes"]["codex"], "claim", number)
+        offered = bridge.issue(
+            paired["lanes"]["codex"],
+            "offer",
+            number,
+            to="claude",
+            summary="Parser",
+        )
+        bridge.issue(
+            paired["lanes"]["claude"],
+            "accept",
+            number,
+            offer_id=offered["offer"]["id"],
+        )
+        result = retire(bridge, lane)
+        assert result["released"] == [number]
+        assert result["notices"][0]["issues"] == [number]
+        assert result["credentials_invalidated"] == 1
+        told.append(result["notices"][0]["message_id"])
+    assert told[0] != told[1]
+    delivered = store.call(
+        bridge.home, peer, "fetch_inbox", {"include_bodies": True}
+    )["messages"]
+    assert sorted(message["id"] for message in delivered) == sorted(told)
+
+
 def test_an_offer_awaiting_a_retiring_lane_returns_to_its_owner(
     bridge, repo, paired
 ):

@@ -3056,6 +3056,11 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
     that had handed it work where that work went, and invalidates the
     credential the call itself authenticated with.
 
+    Each retirement keys its notices afresh. A re-admitted lane keeps its
+    identity, so a key derived from the peer alone would name the notice of
+    an earlier retirement and refuse or swallow this one after its work had
+    already been released.
+
     Args:
         home: Private bridge state root.
         actor: Authenticated project and lane.
@@ -3092,6 +3097,7 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
         for sender, numbers in report.pop("senders", {}).items()
         if sender in participants
     }
+    retiring = secrets.token_hex(8)
     with connect(home, write=True) as db:
         leases = _release(db, actor)
         notices = []
@@ -3104,7 +3110,7 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
                     "to": [sender],
                     "subject": subject,
                     "body_md": body,
-                    "idempotency_key": f"retired-{sender}"[:80],
+                    "idempotency_key": f"retired-{retiring}-{sender}"[:80],
                 },
             )
             notices.append(
