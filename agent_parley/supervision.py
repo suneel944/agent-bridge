@@ -70,6 +70,7 @@ WORK_WAKE_ATTEMPTS = 3
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
 UNREADABLE = "unknown; activity record unreadable"
+UNREADABLE_STOPPED = "stopped; activity record unreadable"
 DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
@@ -393,9 +394,15 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         is a known stop rather than an unknown process. An activity file
         that cannot be read, is not an object or records a non-numeric
         `updated` reads as `UNKNOWN` with no liveness, so one malformed
-        record never stops the poll for every other lane.
+        record never stops the poll for every other lane. The session
+        process identity of the last readable record is kept in
+        `<name>-session-process.json`, so a lane whose record is unreadable
+        and whose last known session process has exited reads as `STOPPED`
+        and moves through the stop, dead and orphan path like any other gone
+        lane, while one whose process still runs stays `UNKNOWN`.
     """
     path = directory / f"{name}-activity.json"
+    known = directory / f"{name}-session-process.json"
     try:
         value = json.loads(path.read_text()) if path.exists() else {}
     except (OSError, ValueError):
@@ -406,16 +413,18 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         float,
         type(None),
     ):
+        gone = _known_process_gone(known)
         return {
-            "state": UNKNOWN,
-            "process_alive": None,
+            "state": STOPPED if gone else UNKNOWN,
+            "process_alive": False if gone else None,
             "last_active": None,
             "age_seconds": None,
-            "activity": UNKNOWN,
-            "evidence": UNREADABLE,
+            "activity": STOPPED if gone else UNKNOWN,
+            "evidence": UNREADABLE_STOPPED if gone else UNREADABLE,
             "stale": False,
             "ended": False,
         }
+    _remember_process(known, value)
     derived = lane_state(value, inactive_after)
     current = derived["state"] == IDLE and not derived["stale"]
     return {
@@ -429,6 +438,53 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         "ended": value.get("event") == "SessionEnd"
         and derived["process_alive"] is None,
     }
+
+
+def _remember_process(path: Path, published: dict) -> None:
+    """Keeps the session process identity a readable record names.
+
+    Args:
+        path: The lane's `-session-process.json` record.
+        published: Readable activity record of the lane.
+    """
+    identity = {
+        "session_pid": published.get("session_pid"),
+        "session_ticks": published.get("session_ticks"),
+    }
+    with contextlib.suppress(OSError):
+        if identity["session_pid"] is None:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            kept = json.loads(path.read_text())
+        except (OSError, ValueError):
+            kept = None
+        if kept != identity:
+            write_json(path, identity)
+
+
+def _known_process_gone(path: Path) -> bool:
+    """Reports whether the last known session process of a lane has exited.
+
+    Args:
+        path: The lane's `-session-process.json` record.
+
+    Returns:
+        Whether the record names a process identity that no longer runs.
+        A missing, unreadable or incomplete record proves nothing and reads
+        as False.
+    """
+    try:
+        kept = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(kept, dict):
+        return False
+    pid = kept.get("session_pid")
+    ticks = kept.get("session_ticks")
+    if type(pid) is not int or pid <= 1 or not isinstance(ticks, str):
+        return False
+    return bool(ticks) and not process.alive(pid, ticks)
 
 
 def recorded_presence(record: dict | None, observed: dict) -> dict:
