@@ -1151,7 +1151,9 @@ the runtime stops the process, captures its committed, staged, unstaged and
 non-ignored untracked content, and marks the claim recoverable. A refusal from
 the provider, elapsed time, or the approval alone cannot transfer ownership.
 Recovery also refuses while the owner is paused, waiting for a native approval,
-or waiting for more operator input.
+or waiting for more operator input. The command itself refuses inside an
+assigned worktree, even with `--repo` pointing at the base checkout, so a lane
+cannot approve recovery of its own or a peer's claim.
 The receiving lane still runs `issue claim 42 --take-orphaned`. That claim
 revalidates the stopped process and ownership generation, moves only the old
 claim's reservations, fast-forwards to the captured committed HEAD, and restores

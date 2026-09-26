@@ -28,8 +28,8 @@ on standard output and export to a file.
 | `completion SHELL` | Print a `bash`, `zsh` or `fish` completion script generated from the installed command tree. |
 | `status` | Show server health, whether the running service is behind the installed code, and one table per project, each lane's condition read from its authoritative state record; `NAME` reports one lane in full, and `--repo`, `--provider`, `--outcome`, `--drifted`, `--pending`, `--idle`, `--since`, `--over-budget` and `--issue` narrow the rows. |
 | `setup PATH` | Register a repository from committed HEAD. |
-| `run NAME` | Launch a lane; supports `--provider`, `--credentials`, `--repo`, and `--task`. |
-| `top` | The dashboard of live lanes; `--once` prints a snapshot, `--interval` sets refresh seconds, `--provider`, `--repo`, `--participant` and `--since` filter it, `--sort`, `--reverse` and `--columns` shape it; `--all` also shows stopped lanes holding nothing and projects whose root is gone, which the header otherwise only counts. |
+| `run NAME` | Launch a lane; supports `--provider`, `--credentials`, `--repo`, and `--task`; `--resume` reopens the lane's recorded native session. |
+| `top` | The dashboard of live lanes; `--once` prints a snapshot, `--interval` sets refresh seconds, `--provider`, `--repo`, `--participant` and `--since` filter it, `--sort`, `--reverse` and `--columns` shape it; `--no-operator-edits` skips reading a base checkout that is always dirty for operator edits on reserved paths; `--all` also shows stopped lanes holding nothing and projects whose root is gone, which the header otherwise only counts. |
 | `title` | Print the current lane's name, state and claim progress for a native status line; prints nothing outside a lane. |
 | `metrics` | Export the live counters and gauges as Prometheus text or `--json`; `--output` writes a file atomically and `--every` rewrites it. |
 | `report` | Record `--state`, `--summary`, and required `--remaining` or `--evidence`; `--backlog COUNT` states the work units left on the claim, which is what lets the supervisor offer a split once the lane goes idle on it; `--idempotency-key` makes a retry safe. |
@@ -48,8 +48,9 @@ on standard output and export to a file.
 | `issue accept NUMBER --offer-id ID` | Accept the current offer addressed to this lane; the offered reservations move with the issue. |
 | `issue decline NUMBER --offer-id ID` | Decline the current offer addressed to this lane. |
 | `issue cancel NUMBER` | Cancel this lane's pending handoff offer. |
+| `issue request NUMBER` | Ask the holder to hand an issue to this lane, with `--summary` saying why; a holder that neither answers nor records progress within `takeover_grace` has the request granted as an offer. |
 | `issue assign NUMBER NAME` | Offer an issue to a lane as `operator`; `--reason` travels with the offer and `--unassign` withdraws one no lane accepted. |
-| `issue recover NUMBER --reason TEXT` | As `operator`, approve stopping the live owner of a claim once a matching exhausted-capacity observation is published; the approval alone moves nothing. |
+| `issue recover NUMBER --reason TEXT` | As `operator`, approve stopping the live owner of a claim once a matching exhausted-capacity observation is published; the approval alone moves nothing. Refused inside an assigned worktree. |
 | `issue resolve NUMBER` | End a claim whose holder never filed the completion its pull request already landed, as `operator` and never as the lane. The forge is read at that moment: the issue must have closed inside the current claim, with its closing pull request recorded whichever branch it came from, or, when the forge cannot say, the lane branch pull request must have been opened inside it, and the supervisor must already have escalated the claim as an unresolved completion, so an answering holder is never resolved out from under it. `--reason` is kept beside the recorded evidence, and `--release` returns the work to the queue instead, which a pull request closed without merging requires. |
 | `issue block NUMBER --on NUMBER` | Record an advisory issue dependency. |
 | `issue unblock NUMBER --on NUMBER` | Remove a recorded dependency. |
