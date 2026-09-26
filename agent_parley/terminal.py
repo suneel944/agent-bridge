@@ -515,6 +515,51 @@ def _read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def turn_busy(
+    state: dict, inactive_after: float, output_age: float | None = None
+) -> bool:
+    """Reports whether a lane's published activity shows a turn in progress.
+
+    The launcher answers a wake from the same derived lane state the
+    supervision poll decided to wake on, `supervision.lane_state`, and
+    types a wake only into a lane that state reads as `IDLE`. A lane parked
+    on an operator dialog reads as `WAITING` and a lane whose session
+    process is unidentified reads as `UNKNOWN`; typing into either would
+    answer a dialog or a stranger, so both are busy.
+
+    A label other than `idle` whose evidence has gone stale reads as idle,
+    because supervision asks that lane for a turn and refusing it would
+    leave the request uncounted forever. A long turn can still publish no
+    hook event for longer than the stale threshold, so the launcher's own
+    observation of recent terminal output keeps such a lane busy.
+
+    Args:
+        state: Activity record the lane published.
+        inactive_after: Checkpoint age after which the evidence is stale.
+        output_age: Seconds since the native client last wrote to its
+            terminal, or None when it has written nothing yet.
+
+    Returns:
+        True when the lane is taking a turn or holding a screen and the
+        wake must wait. A record without a numeric `updated` has no age to
+        go stale by, so a label other than `idle` stays busy as it says.
+    """
+    from agent_parley import supervision
+
+    record = state
+    if type(state.get("updated")) not in (int, float):
+        record = {key: state[key] for key in state if key != "updated"}
+    if supervision.lane_state(record, inactive_after)["state"] != (
+        supervision.IDLE
+    ):
+        return True
+    return (
+        state.get("activity") != "idle"
+        and output_age is not None
+        and output_age < inactive_after
+    )
+
+
 def lane_summary(start: Path) -> str:
     """Summarizes the lane containing a directory for a native status line.
 
@@ -772,6 +817,7 @@ def _session(
     wake_checkpoint_at = 0.0
     wake_retried = False
     submit_at = 0.0
+    output_at = 0.0
     status = None
     watch = dialogs.watcher(lane.parent, name)
 
@@ -842,6 +888,7 @@ def _session(
                     break
                 if not output:
                     break
+                output_at = time.monotonic()
                 forward(output)
                 screen = output
                 if not attached:
@@ -878,7 +925,11 @@ def _session(
                             dialogs.APPROVAL
                         ):
                             result = "busy:approval"
-                        elif state.get("activity") != "idle":
+                        elif turn_busy(
+                            state,
+                            inactive_after,
+                            time.monotonic() - output_at if output_at else None,
+                        ):
                             result = "busy:turn"
                         elif pending_input or pending_control:
                             result = "busy:input"

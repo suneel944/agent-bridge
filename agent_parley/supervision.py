@@ -69,6 +69,7 @@ NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
+UNREADABLE = "unknown; activity record unreadable"
 DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
@@ -389,10 +390,32 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         checked in has not been quiet for any span a threshold can be
         compared against. `ended` is true when the last recorded event is
         a clean `SessionEnd` that left no session process to check, which
-        is a known stop rather than an unknown process.
+        is a known stop rather than an unknown process. An activity file
+        that cannot be read, is not an object or records a non-numeric
+        `updated` reads as `UNKNOWN` with no liveness, so one malformed
+        record never stops the poll for every other lane.
     """
     path = directory / f"{name}-activity.json"
-    value = json.loads(path.read_text()) if path.exists() else {}
+    try:
+        value = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        value = None
+    updated = value.get("updated") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or type(updated) not in (
+        int,
+        float,
+        type(None),
+    ):
+        return {
+            "state": UNKNOWN,
+            "process_alive": None,
+            "last_active": None,
+            "age_seconds": None,
+            "activity": UNKNOWN,
+            "evidence": UNREADABLE,
+            "stale": False,
+            "ended": False,
+        }
     derived = lane_state(value, inactive_after)
     current = derived["state"] == IDLE and not derived["stale"]
     return {
@@ -2162,7 +2185,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     record_stranded_claims(
         directory, stranded_claims(manifest, ledger, results)
     )
-    recovered = recovery.quiesce_authorized(directory, manifest)
+    recovered = recovery.quiesce_authorized(directory, manifest, isolate=True)
     if recovered:
         ledger = issues.snapshot(directory)
         for number, record in ledger["issues"].items():
@@ -4115,6 +4138,15 @@ def missing_root(
     nothing here deletes it. A root that reappears clears the record on the
     next poll.
 
+    A lane whose session process is still alive is never retired here: a
+    moved repository or a dropped mount leaves its client running, and
+    releasing its claims and revoking its credential could not be undone
+    when the root returns. The publication names such lanes under `live`
+    and the project is not recorded retired, so each later poll retires
+    only the lanes whose process has since gone. A lane whose activity
+    record cannot be read has no process evidence either way, so it is
+    counted as live rather than retired on an unreadable file.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -4138,9 +4170,17 @@ def missing_root(
         return
     if recorded.get("retired") or now - since < config["interval"]:
         return
-    lanes = []
+    lanes = list(recorded.get("lanes") or [])
+    live = []
     for name, participant in manifest["participants"].items():
         if roster.retired(participant):
+            continue
+        reading = presence(directory, name, config["inactive_after"])
+        if (
+            reading["process_alive"] is True
+            or reading["evidence"] == UNREADABLE
+        ):
+            live.append(name)
             continue
         with contextlib.suppress(BridgeError, OSError, ValueError):
             recovery.capture(directory, manifest, name)
@@ -4169,9 +4209,10 @@ def missing_root(
         path,
         {
             "since": since,
-            "retired": now,
+            "retired": None if live else now,
             "state_directory": str(directory),
             "lanes": lanes,
+            "live": live,
         },
     )
 

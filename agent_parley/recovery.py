@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -643,7 +644,12 @@ def _consume_approval(
     claim_id: str,
     authorization_id: str,
 ) -> None:
-    """Durably consumes the exact approval behind a completed transition."""
+    """Durably consumes the exact approval behind a completed transition.
+
+    A consumed approval means the recovery went through, so any refusal
+    `_refuse` recorded for the issue on an earlier pass is withdrawn and
+    `refusal` no longer reports a problem that has been resolved.
+    """
     path = _folder(directory) / f"{_identifier(issue, claim_id)}-approval.json"
     try:
         value = json.loads(path.read_text())
@@ -658,6 +664,11 @@ def _consume_approval(
     if not value.get("used_at"):
         value["used_at"] = time.time()
         write_json(path, value)
+    if re.fullmatch(r"[1-9][0-9]{0,17}", issue):
+        with contextlib.suppress(OSError):
+            (_folder(directory) / f"issue-{issue}-refusal.json").unlink(
+                missing_ok=True
+            )
 
 
 def _capacity_candidate(directory: Path, issue: str) -> dict:
@@ -1097,15 +1108,56 @@ def quiesce_exhausted(
     return marker
 
 
-def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
+def refusal(directory: Path, issue: str) -> dict | None:
+    """Returns the last recorded refusal of an approved live recovery."""
+    path = _folder(directory) / f"issue-{issue}-refusal.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _refuse(directory: Path, issue: str, claim_id: str, reason: str) -> None:
+    """Records why an approved live recovery could not proceed this pass."""
+    if not re.fullmatch(r"[1-9][0-9]{0,17}", issue):
+        return
+    previous = refusal(directory, issue) or {}
+    if (previous.get("claim_id"), previous.get("reason")) == (claim_id, reason):
+        return
+    write_json(
+        _folder(directory) / f"issue-{issue}-refusal.json",
+        {
+            "issue": issue,
+            "claim_id": claim_id,
+            "reason": reason,
+            "refused_at": time.time(),
+        },
+    )
+
+
+def quiesce_authorized(
+    directory: Path, manifest: dict, isolate: bool = False
+) -> list[dict]:
     """Quiesces published exhausted claims with exact operator approval.
+
+    An approved recovery can be refused by an ordinary state: the owner is
+    idle or at an approval prompt, paused, or on another session, or the
+    approval behind a completed transition is gone. The service poll calls
+    this with `isolate`, so such a refusal is recorded for its issue, read
+    back through `refusal`, and the remaining issues and the rest of the
+    poll proceed; the approval stays in place and the next poll tries again.
 
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
+        isolate: Records a refused issue and continues rather than raising.
 
     Returns:
         Orphan markers published for authorized live recovery transitions.
+
+    Raises:
+        BridgeError: If a transition is refused and `isolate` is false.
     """
     try:
         document = json.loads(
@@ -1148,12 +1200,19 @@ def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
             == transition.get("authorization_id")
             and marker.get("checkpoint") == transition.get("checkpoint")
         ):
-            _consume_approval(
-                directory,
-                issue,
-                str(transition.get("claim_id") or ""),
-                str(transition.get("authorization_id") or ""),
-            )
+            claim_id = str(transition.get("claim_id") or "")
+            try:
+                _consume_approval(
+                    directory,
+                    issue,
+                    claim_id,
+                    str(transition.get("authorization_id") or ""),
+                )
+            except BridgeError as exc:
+                if not isolate:
+                    raise
+                _refuse(directory, issue, claim_id, str(exc))
+                continue
             markers.append(marker)
             seen.add(identity)
     for candidate in candidates:
@@ -1174,7 +1233,12 @@ def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
             and allowed.get("owner") == candidate.get("owner")
             and allowed.get("session_id") == candidate.get("session_id")
         ):
-            markers.append(quiesce_exhausted(directory, manifest, issue))
+            try:
+                markers.append(quiesce_exhausted(directory, manifest, issue))
+            except BridgeError as exc:
+                if not isolate:
+                    raise
+                _refuse(directory, issue, claim_id, str(exc))
     return markers
 
 
