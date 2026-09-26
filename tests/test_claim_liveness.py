@@ -232,6 +232,20 @@ def test_a_project_may_raise_the_claim_cap(bridge, paired):
         bridge.issue(lane, "claim", "10")
 
 
+def test_a_delivered_claim_does_not_count_toward_the_cap(bridge, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    for number in ("7", "8"):
+        bridge.issue(lane, "claim", number)
+    lifecycle.record_report(
+        directory, "claude", "ready", "a" * 40, "", issue="7"
+    )
+    assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "10")
+
+
 def blocking_an_idle_claim(bridge, paired, monkeypatch):
     """Parks codex's #9 on claude's idle #8 and records every notice sent."""
     directory = busy_with_one_idle_claim(bridge, paired)

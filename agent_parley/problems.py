@@ -284,7 +284,8 @@ def _cap_rows(
     Every path that moves ownership to a lane refuses it past the cap, but a
     ledger written before a path was capped, or a cap lowered after claims
     were taken, can still hold more. Nothing moves them automatically, so the
-    excess is named for the operator to release or offer.
+    excess is named for the operator to release or offer. A delivered claim
+    does not count, as it does not where the cap is enforced.
 
     Args:
         record: One participant record from the status reading.
@@ -297,7 +298,11 @@ def _cap_rows(
         One row counting the claims past the cap and naming the newest-numbered
         of them as the one to release, or no row within the cap.
     """
-    held = [claim["issue"] for claim in record["claims"]]
+    held = [
+        claim["issue"]
+        for claim in record["claims"]
+        if not claim.get("delivered")
+    ]
     if len(held) <= cap:
         return []
     excess = len(held) - cap

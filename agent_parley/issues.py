@@ -873,7 +873,9 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
     looking held while no peer may take it, so the cap is checked where a
     lane takes on a new issue. The refusal names every claim the lane holds
     with how long each has gone without progress, so the lane can see which
-    one to release or offer.
+    one to release or offer. A delivered claim does not count: it waits on
+    verification and integration, not on its holder, and counting it would
+    stop every lane once nobody integrates.
 
     Args:
         ledger: Issue records keyed by number, read under the ledger lock.
@@ -884,7 +886,11 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
         BridgeError: If the lane already holds the cap.
     """
     held = sorted(
-        (number for number, item in ledger.items() if item["owner"] == agent),
+        (
+            number
+            for number, item in ledger.items()
+            if item["owner"] == agent and not delivered(item)
+        ),
         key=int,
     )
     if not cap or len(held) < cap:
