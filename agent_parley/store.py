@@ -57,6 +57,14 @@ BASE_NOTE = re.compile(
     r"(?:is|now|at|moved|advanced)\b|\bmerged\b",
     re.IGNORECASE,
 )
+CLAIM_SUPERSESSION = (
+    "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
+    "superseded_reason=? WHERE superseded_ts IS NULL AND message_id IN ("
+    "SELECT m.id FROM messages m JOIN projects p ON p.id=m.project_id "
+    "WHERE p.human_key=? AND m.claim_id=?) AND (read_ts IS NULL OR "
+    "(ack_ts IS NULL AND EXISTS (SELECT 1 FROM messages m WHERE "
+    "m.id=message_recipients.message_id AND m.ack_required=1)))"
+)
 SCHEDULE_FIELDS = (
     "id",
     "kind",
@@ -415,11 +423,19 @@ def _add_claim_correlation(db: sqlite3.Connection) -> None:
     It runs after the reservation table has been rebuilt into its current
     shape, because that rebuild copies a fixed column list and would otherwise
     drop a column added before it.
+
+    The partial index on a message's claim lets closing or moving a claim
+    find the mail that claim sent without scanning every delivery while it
+    holds the write lock. Mail sent under no claim stays out of it.
     """
     for table in ("messages", "file_reservations"):
         columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         if "claim_id" not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN claim_id TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS claims ON messages(project_id,claim_id) "
+        "WHERE claim_id IS NOT NULL"
+    )
 
 
 def _add_reservation_ttl(db: sqlite3.Connection) -> None:
@@ -3255,13 +3271,7 @@ def supersede_claim(home: Path, root: str, claim: str, reason: str) -> int:
         return 0
     with connect(home, write=True) as db:
         cursor = db.execute(
-            "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
-            "superseded_reason=? WHERE superseded_ts IS NULL AND EXISTS ("
-            "SELECT 1 FROM messages m JOIN projects p ON p.id=m.project_id "
-            "WHERE m.id=message_recipients.message_id AND p.human_key=? "
-            "AND m.claim_id=? AND (message_recipients.read_ts IS NULL OR "
-            "(m.ack_required=1 AND message_recipients.ack_ts IS NULL)))",
-            (reason[:MAX_SUPERSEDE_REASON], root, claim),
+            CLAIM_SUPERSESSION, (reason[:MAX_SUPERSEDE_REASON], root, claim)
         )
         return cursor.rowcount
 
