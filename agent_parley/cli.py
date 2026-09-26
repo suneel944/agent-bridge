@@ -2732,8 +2732,13 @@ class Bridge(
         for row in rows:
             if not row["reclaim"]:
                 continue
+            lane = Path(manifest["participants"][row["participant"]]["lane"])
             try:
-                self.retire(repo, row["participant"])
+                self.retire(
+                    repo,
+                    row["participant"],
+                    discard=ignored_paths(lane) if lane.exists() else (),
+                )
             except BridgeError as exc:
                 row.update(reclaim=False, removed=False, reason=str(exc))
                 continue

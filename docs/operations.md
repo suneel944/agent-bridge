@@ -2476,9 +2476,9 @@ the worktree is dirty, removes the worktree, invalidates that participant's
 coordination credential, and drops its manifest entry. Removing the worktree
 deletes its ignored files, such as a local `.env` or build output, so retire
 lists them and asks first; `--yes` answers in advance, and a declined or
-unanswered question retires nothing and exits non-zero. `gc --apply` never
-asks, so it leaves a lane holding ignored files in place and names them as
-the reason. The branch is deleted
+unanswered question retires nothing and exits non-zero. `gc --apply` reclaims
+only lanes whose work has already landed, so it removes their ignored files
+without asking. The branch is deleted
 only when it adds no commits to the project base; otherwise the branch is kept
 and named in the output. Message history is always preserved, so past handoffs
 still resolve their sender.
