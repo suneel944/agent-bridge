@@ -765,6 +765,19 @@ def _number(value: object, name: str, low: int, high: int) -> int:
     return value
 
 
+def _whole(value: object, name: str, low: int, high: int) -> int:
+    """Validates integer bounds, taking a whole-number float as its integer.
+
+    A duration parsed from the command line, or read back from a ``REAL``
+    column, is a float even when it names whole seconds. A finite float with
+    no fraction is taken as that integer; a fractional or non-finite float,
+    a boolean or anything else out of bounds is refused.
+    """
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    return _number(value, name, low, high)
+
+
 def _flag(value: object, name: str) -> bool:
     """Rejects truthy strings and numeric substitutes for booleans."""
     if type(value) is not bool:
@@ -1143,7 +1156,7 @@ def _send(
     decision = _flag(args.get("decision", False), "decision")
     within = args.get("ack_within")
     if within is not None:
-        within = _number(within, "ack_within", 1, 86400 * 30)
+        within = _whole(within, "ack_within", 1, 86400 * 30)
     if ack and within is None:
         within = _ack_window(directory)
     if "reply_to" in args:
@@ -4188,6 +4201,9 @@ def schedule(home: Path, root: str, item: dict) -> dict:
     recipient = str(item.get("recipient", ""))
     body = str(item.get("body_md", ""))
     repeats = int(item.get("repeats_left", 1))
+    within = item.get("ack_within")
+    if within is not None:
+        within = _whole(within, "ack_within", 1, 86400 * 30)
     if kind not in ("message", "offer"):
         raise BridgeError("A scheduled item is a message or an offer.")
     if not recipient:
@@ -4217,7 +4233,7 @@ def schedule(home: Path, root: str, item: dict) -> dict:
                 str(item.get("issue", "")),
                 str(item.get("dedup_key", "")),
                 int(bool(item.get("ack_required"))),
-                item.get("ack_within"),
+                within,
                 item.get("not_before"),
                 str(item.get("condition", "")),
                 int(bool(item.get("unless_reported"))),

@@ -38,6 +38,47 @@ def test_a_message_whose_time_passed_is_delivered_by_the_poll(
     assert store.schedules(bridge.home, paired["root"]) == []
 
 
+def test_a_scheduled_acknowledged_message_is_delivered_by_the_poll(
+    bridge, repo, paired
+):
+    name = ready(bridge, paired)
+    directory = bridge.project(repo)[1]
+    bridge.say(
+        repo,
+        "claude",
+        "Confirm the rebase.",
+        at=time.time() - 1,
+        ack=True,
+        within=900.0,
+    )
+    supervision.poll(bridge.home, directory)
+    assert store.schedules(bridge.home, paired["root"]) == []
+    waiting = inbox(bridge, paired, name)
+    assert waiting["kind"] == "acknowledgement"
+    assert waiting["sender"] == "operator"
+
+
+def test_a_whole_float_ack_window_is_accepted_and_a_fraction_refused(
+    bridge, repo, paired
+):
+    ready(bridge, paired)
+    sent = bridge.say(repo, "claude", "Confirm now.", ack=True, within=900.0)
+    with store.connect(bridge.home) as db:
+        window = db.execute(
+            "SELECT unixepoch(ack_deadline_ts)-unixepoch(created_ts) "
+            "FROM messages WHERE id=?",
+            (sent["id"],),
+        ).fetchone()[0]
+    assert window == 900
+    for within in (1.5, float("inf"), float("nan")):
+        with pytest.raises(BridgeError, match="ack_within"):
+            bridge.say(repo, "claude", "Later.", ack=True, within=within)
+        with pytest.raises(BridgeError, match="ack_within"):
+            bridge.say(
+                repo, "claude", "Later.", after=60, ack=True, within=within
+            )
+
+
 def test_a_message_waits_until_its_time_arrives(bridge, repo, paired):
     name = ready(bridge, paired)
     directory = bridge.project(repo)[1]
