@@ -3179,7 +3179,10 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
                     "to": [sender],
                     "subject": subject,
                     "body_md": body,
-                    "idempotency_key": f"retired-{retiring}-{sender}"[:80],
+                    "idempotency_key": "retired-"
+                    + retiring
+                    + "-"
+                    + hashlib.sha256(sender.encode()).hexdigest()[:32],
                 },
             )
             notices.append(
