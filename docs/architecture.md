@@ -663,9 +663,12 @@ and it already sits outside the target source tree; no new file and no
 in-repository file is introduced. A repository with no command configured runs
 no gate and merges exactly as before. The command is stored as argument tokens
 and run without a shell, so redirection, expansion and chaining cannot ride
-into a gate, and it runs in the common repository root while the merge already
-holds the project setup lock and that participant's session lock, so the lane
-cannot start and the roster cannot change underneath it. A non-zero exit
+into a gate, and it runs in the common repository root while the merge holds
+the project merge lock and that participant's session lock, so the lane cannot
+start and no second merge can move the base. The setup lock is held only while
+the manifest is read, never across the gate, so other lanes launch and policy
+changes land while a gate runs; the merging lane's worktree and branch are
+checked again under its session lock. A non-zero exit
 refuses the merge, reporting the exit status and the last twenty lines of the
 command's combined output; a command that cannot run is a refusal, not a skip.
 No flag bypasses the gate, and removing it is an explicit `verify set ''`.
