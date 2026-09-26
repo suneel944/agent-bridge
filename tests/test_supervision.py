@@ -413,6 +413,34 @@ def test_launcher_reads_a_fresh_working_label_as_busy():
     assert not terminal.turn_busy({**stale, "activity": "idle"}, 300)
 
 
+@pytest.mark.parametrize(
+    "content", ["[]", "{", json.dumps({"activity": "idle", "updated": "x"})]
+)
+def test_a_malformed_activity_file_reads_as_unknown_presence(
+    bridge, paired, content
+):
+    registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    (directory / "codex-activity.json").write_text(content)
+    write_json(
+        directory / "claude-activity.json",
+        {
+            "activity": "working",
+            "updated": time.time(),
+            "session_id": "claude-session",
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+        },
+    )
+
+    reading = supervision.presence(directory, "codex")
+    supervision.poll(bridge.home, directory)
+
+    assert reading["state"] == supervision.UNKNOWN
+    assert reading["process_alive"] is None
+    assert supervision.presence(directory, "claude")["process_alive"]
+
+
 def test_permission_prompt_is_never_woken(bridge, paired, monkeypatch):
     actors = registered(bridge, paired)
     directory = Path(paired["lanes"]["codex"]).parent

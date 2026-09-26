@@ -389,10 +389,32 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         checked in has not been quiet for any span a threshold can be
         compared against. `ended` is true when the last recorded event is
         a clean `SessionEnd` that left no session process to check, which
-        is a known stop rather than an unknown process.
+        is a known stop rather than an unknown process. An activity file
+        that cannot be read, is not an object or records a non-numeric
+        `updated` reads as `UNKNOWN` with no liveness, so one malformed
+        record never stops the poll for every other lane.
     """
     path = directory / f"{name}-activity.json"
-    value = json.loads(path.read_text()) if path.exists() else {}
+    try:
+        value = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        value = None
+    updated = value.get("updated") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or type(updated) not in (
+        int,
+        float,
+        type(None),
+    ):
+        return {
+            "state": UNKNOWN,
+            "process_alive": None,
+            "last_active": None,
+            "age_seconds": None,
+            "activity": UNKNOWN,
+            "evidence": "unknown; activity record unreadable",
+            "stale": False,
+            "ended": False,
+        }
     derived = lane_state(value, inactive_after)
     current = derived["state"] == IDLE and not derived["stale"]
     return {
