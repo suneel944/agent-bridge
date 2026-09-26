@@ -65,7 +65,7 @@ on standard output and export to a file.
 | `participant show NAME` | Show one lane: its branch, worktree, provider, account profile, advisory budget, current claims, reported outcome and last coordination. |
 | `participant add NAME` | Create a lane with an optional provider and credential profile. |
 | `participant restore NAME` | Restore the assigned branch while preserving work. |
-| `participant retire NAME` | Retire a lane that is no longer working while preserving recoverable work. |
+| `participant retire NAME` | Retire a lane that is no longer working while preserving recoverable work. Lists the ignored files removing its worktree deletes and asks first; `--yes` skips the question. |
 | `participant pause NAME` | Refuse a lane's calls and tool use; keep its session and claims. |
 | `participant resume NAME` | Let a paused lane act again. |
 | `participant stop NAME` | End a lane's session from the base checkout; keep its claims. |
