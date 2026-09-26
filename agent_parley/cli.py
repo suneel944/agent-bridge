@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -380,7 +381,7 @@ def duration(text: str) -> float:
         seconds = float(text[:-1] if scale else text) * (scale or 1)
     except ValueError:
         seconds = 0.0
-    if seconds <= 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError(f"{text!r} is not a window; use 45m, 6h or 7d.")
     return seconds
 
