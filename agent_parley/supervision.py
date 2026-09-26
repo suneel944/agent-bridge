@@ -2162,7 +2162,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     record_stranded_claims(
         directory, stranded_claims(manifest, ledger, results)
     )
-    recovered = recovery.quiesce_authorized(directory, manifest)
+    recovered = recovery.quiesce_authorized(directory, manifest, isolate=True)
     if recovered:
         ledger = issues.snapshot(directory)
         for number, record in ledger["issues"].items():
