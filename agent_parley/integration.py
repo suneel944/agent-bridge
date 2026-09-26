@@ -496,13 +496,16 @@ class IntegrationMixin(MailMixin):
                 "change."
             )
         here = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-        for lane in data["participants"].values():
-            if here == Path(lane["lane"]).resolve():
-                raise BridgeError(
-                    "Approvals are recorded from the base checkout at "
-                    f"{root}, never from an assigned worktree, so a lane "
-                    "does not decide its own work."
-                )
+        lanes = {
+            Path(lane["lane"]).resolve()
+            for lane in data["participants"].values()
+        }
+        if here in lanes or roster.caller_lane(data):
+            raise BridgeError(
+                "Approvals are recorded from the base checkout at "
+                f"{root}, never from an assigned worktree, so a lane "
+                "does not decide its own work."
+            )
         reviewed = self._reviewed(directory, data, name)
         if reviewed["state"] == approvals.UNREPORTED:
             raise BridgeError(
