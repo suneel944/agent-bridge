@@ -1352,8 +1352,9 @@ def bulk_lanes(
         notes: Extra lines the plan reports before the confirmation.
 
     Returns:
-        0 when every matched lane was done, when nothing matched, or when the
-        operator declined; 1 when any lane refused or failed.
+        0 when every matched lane was done or when nothing matched; 1 when
+        the operator declined or left the confirmation unanswered, or when
+        any lane refused or failed.
     """
     proposal = selection_plan(action, names, notes)
     if not names:
@@ -1361,7 +1362,7 @@ def bulk_lanes(
         return 0
     if not confirmed(proposal, assume_yes):
         print("Declined: nothing was done.")
-        return 0
+        return 1
     done: list[str] = []
     refused: list[str] = []
     for name in names:
@@ -1592,8 +1593,9 @@ def merged_lanes(
         The account the selected merge produced.
 
     Raises:
-        BridgeError: If the selection is ambiguous or names nothing, or if
-            the ordered run stops on a refusal or a failure.
+        BridgeError: If the selection is ambiguous or names nothing, if the
+            operator declines or leaves the plan unanswered, or if the
+            ordered run stops on a refusal or a failure.
     """
     narrowing = bool(
         args.provider
@@ -1635,7 +1637,7 @@ def merged_lanes(
             ),
             args.yes,
         ):
-            return "Declined: nothing was merged."
+            raise BridgeError("Declined: nothing was merged.")
         return bridge.integrate(
             repo,
             group=args.group,

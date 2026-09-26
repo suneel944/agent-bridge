@@ -181,11 +181,41 @@ def test_declining_the_plan_does_nothing(
         "--repo",
         str(repo),
         "--all",
+        expected=1,
     )
 
     assert "Declined: nothing was done." in printed
     with store.connect(bridge.home) as db:
         assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+def test_a_closed_stdin_declines_and_exits_non_zero(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    registered(bridge, paired, "claude", "codex")
+
+    def closed(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", closed)
+
+    printed = run(
+        bridge,
+        monkeypatch,
+        capsys,
+        "participant",
+        "pause",
+        "--repo",
+        str(repo),
+        "--all",
+        expected=1,
+    )
+
+    assert "Declined: nothing was done." in printed
+    _, data = state(bridge, repo)
+    assert not any(
+        lane.get("paused", False) for lane in data["participants"].values()
+    )
 
 
 def test_a_selector_matching_nothing_does_nothing_and_says_so(
@@ -397,19 +427,24 @@ def test_a_declined_merge_plan_merges_nothing(
     git(repo, "config", "user.email", "test@example.com")
     worked(bridge, paired, "claude", "42", "first.txt")
     monkeypatch.setattr(builtins, "input", lambda prompt: "")
-
-    printed = run(
-        bridge,
-        monkeypatch,
-        capsys,
-        "participant",
-        "merge",
-        "--repo",
-        str(repo),
-        "--provider",
-        "claude",
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "participant",
+            "merge",
+            "--repo",
+            str(repo),
+            "--provider",
+            "claude",
+        ],
     )
 
-    assert "Plan: integrate 1 lane." in printed
-    assert "Declined: nothing was merged." in printed
+    assert cli.main() == 1
+    printed = capsys.readouterr()
+    assert "Plan: integrate 1 lane." in printed.out
+    assert "Declined: nothing was merged." in printed.err
     assert not (repo / "first.txt").exists()

@@ -530,7 +530,9 @@ lane.
 
 Every bulk run prints the lanes it matched and what will happen to each, then
 asks once for the whole set. `--yes` answers that one question in advance.
-A selector matching nothing does nothing and says so.
+A declined or unanswered confirmation, including a closed standard input, does
+nothing and exits non-zero, so a script without `--yes` cannot mistake it for
+success. A selector matching nothing does nothing and says so.
 
 Non-integration operations are independent, so a lane's refusal is printed
 beside that lane and the remaining lanes are still attempted. The closing tally
