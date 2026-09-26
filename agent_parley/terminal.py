@@ -530,12 +530,16 @@ def turn_busy(state: dict, inactive_after: float) -> bool:
         inactive_after: Checkpoint age after which the evidence is stale.
 
     Returns:
-        True when the lane is taking a turn and the wake must wait.
+        True when the lane is taking a turn and the wake must wait. A
+        record without a numeric `updated` has no age to go stale by, so a
+        label other than `idle` stays busy as the label says.
     """
     from agent_parley import supervision
 
     if state.get("activity") == "idle":
         return False
+    if type(state.get("updated")) not in (int, float):
+        return True
     return not supervision.lane_state(state, inactive_after)["stale"]
 
 

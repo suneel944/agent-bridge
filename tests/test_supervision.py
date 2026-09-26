@@ -411,6 +411,7 @@ def test_launcher_reads_a_fresh_working_label_as_busy():
     assert terminal.turn_busy(fresh, 300)
     assert not terminal.turn_busy(stale, 300)
     assert not terminal.turn_busy({**stale, "activity": "idle"}, 300)
+    assert terminal.turn_busy({**stale, "updated": "x"}, 300)
 
 
 @pytest.mark.parametrize(
