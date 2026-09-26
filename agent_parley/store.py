@@ -1862,11 +1862,13 @@ def _expired_leases(
         project_id: Registered project whose leases are read.
 
     Returns:
-        One row per reclaimable lease, with its holder, its key and how long
-        it has been past its deadline, in holder and key order.
+        One row per reclaimable lease, with its holder, whether that holder
+        still holds a credential to be told, its key and how long it has
+        been past its deadline, in holder and key order.
     """
     return db.execute(
         "SELECT f.id,f.agent_id,f.path_pattern,a.name,"
+        "a.token_digest IS NOT NULL AS addressable,"
         "max(0,unixepoch('now')-unixepoch(f.expires_ts)) AS stale_seconds "
         "FROM file_reservations f JOIN agents a ON a.id=f.agent_id "
         "LEFT JOIN participant_presence s ON s.agent_id=f.agent_id "
@@ -1887,14 +1889,18 @@ def _reclaim(db: sqlite3.Connection, project_id: int) -> list[dict]:
     Reservations stay advisory throughout: this changes who is told that a
     key is free, not what the file system allows.
 
+    A retired holder keeps its leases but no credential, so it cannot be
+    sent mail. Its leases are still released and handed on; only the notice
+    is skipped, because nobody is left to read it.
+
     Args:
         db: Open write transaction owned by the caller.
         project_id: Registered project whose leases are swept.
 
     Returns:
         One entry per holder whose leases were reclaimed, naming that holder,
-        the released keys, the notice it was sent and the lanes that took the
-        keys from its queue.
+        the released keys, the notice it was sent, or ``None`` when it could
+        not be told, and the lanes that took the keys from its queue.
     """
     holders: dict[str, list[sqlite3.Row]] = {}
     for row in _expired_leases(db, project_id):
@@ -1913,27 +1919,29 @@ def _reclaim(db: sqlite3.Connection, project_id: int) -> list[dict]:
             "name": name,
         }
         granted = _grant_queued(db, holder, keys, reclaimed=True)
-        subject, body = _reclaim_notice(
-            keys, max(lease["stale_seconds"] for lease in leases), granted
-        )
-        message = _send(
-            db,
-            _operator(db, project_id),
-            {
-                "to": [name],
-                "subject": subject,
-                "body_md": body,
-                "idempotency_key": (
-                    f"reservation-reclaimed-"
-                    f"{max(lease['id'] for lease in leases)}"
-                ),
-            },
-        )
+        message_id = None
+        if leases[0]["addressable"]:
+            subject, body = _reclaim_notice(
+                keys, max(lease["stale_seconds"] for lease in leases), granted
+            )
+            message_id = _send(
+                db,
+                _operator(db, project_id),
+                {
+                    "to": [name],
+                    "subject": subject,
+                    "body_md": body,
+                    "idempotency_key": (
+                        f"reservation-reclaimed-"
+                        f"{max(lease['id'] for lease in leases)}"
+                    ),
+                },
+            )["id"]
         reclaimed.append(
             {
                 "agent": name,
                 "paths": keys,
-                "message_id": message["id"],
+                "message_id": message_id,
                 "granted": granted,
             }
         )
