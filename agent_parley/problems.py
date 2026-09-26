@@ -26,7 +26,15 @@ import sqlite3
 import time
 from pathlib import Path
 
-from agent_parley import dialogs, issues, roster, store, supervision, tables
+from agent_parley import (
+    dialogs,
+    issues,
+    recovery,
+    roster,
+    store,
+    supervision,
+    tables,
+)
 from agent_parley.state import BridgeError
 
 STORE = "store"
@@ -51,6 +59,8 @@ HELD = "held by a native dialog"
 READY = "ready to retire"
 HOLDING = "holding a refused key"
 FOREIGN = "second session"
+REFUSED = "recovery refused"
+ROOT = "root missing"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -227,6 +237,21 @@ def _recorded(value: str | None, now: float) -> float:
         return datetime.datetime.fromisoformat(str(value)).timestamp()
     except (TypeError, ValueError):
         return now
+
+
+def _age(value: object, now: float) -> int:
+    """Measures whole seconds since an instant recorded as Unix seconds.
+
+    Args:
+        value: Unix seconds a state file recorded, or anything unreadable.
+        now: Unix time the age is measured against.
+
+    Returns:
+        The non-negative age, or zero when no readable instant is recorded.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return 0
+    return max(0, int(now - value))
 
 
 def _listed(paths: list[str]) -> str:
@@ -839,6 +864,90 @@ def _retired_rows(home: Path, project: dict) -> list[dict]:
     return rows
 
 
+def _refused_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Derives one row per issue whose approved live recovery was refused.
+
+    The service retries an approved recovery on every poll and records why
+    the last attempt could not proceed. The row lasts while the refused
+    claim is still the issue's current claim, so a release, a handoff or a
+    completed recovery clears it.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the refusal ages are measured against.
+
+    Returns:
+        Zero or more rows, one per refused issue, on the owning lane.
+    """
+    rows = []
+    with contextlib.suppress(OSError, ValueError):
+        ledger = issues.snapshot(directory)["issues"]
+        for number, record in ledger.items():
+            refused = recovery.refusal(directory, number)
+            if not refused or not record.get("claim_id"):
+                continue
+            if refused.get("claim_id") != record["claim_id"]:
+                continue
+            rows.append(
+                _row(
+                    REFUSED,
+                    f"issue #{number}: approved recovery refused: "
+                    f"{refused.get('reason', '')}",
+                    "clear what the reason names in the owner's lane; the "
+                    "service retries the recovery on every poll",
+                    _age(refused.get("refused_at"), now),
+                    str(record.get("owner") or ""),
+                    root,
+                )
+            )
+    return rows
+
+
+def _root_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports a project whose root checkout is gone, naming the lanes kept.
+
+    The supervisor retires every lane one interval after the root goes
+    missing, except a lane whose session process is still alive or whose
+    activity record cannot be read. Those lanes keep the project out of
+    retirement until their sessions end, so the row names them.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the absence is measured against.
+
+    Returns:
+        One row while the supervisor records the root as missing, or none.
+    """
+    try:
+        recorded = json.loads(
+            (directory / supervision.ROOT_PUBLICATION).read_text()
+        )
+    except (OSError, ValueError):
+        return []
+    if not isinstance(recorded, dict) or recorded.get("retired"):
+        return []
+    live = [str(name) for name in recorded.get("live") or []]
+    detail = (
+        f"project root is gone; {len(live)} live lanes kept from "
+        f"retirement: {', '.join(live)}"
+        if live
+        else "project root is gone; lanes retire one interval after it went"
+    )
+    return [
+        _row(
+            ROOT,
+            detail,
+            "restore the root checkout, or end the named sessions so the "
+            "next poll retires them",
+            _age(recorded.get("since"), now),
+            project=root,
+            count=max(len(live), 1),
+        )
+    ]
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -904,6 +1013,8 @@ def derive(
         aged.extend(_offer_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
         aged.extend(_retired_rows(home, project))
+        aged.extend(_refused_rows(directory, project["root"], stamp))
+        aged.extend(_root_rows(directory, project["root"], stamp))
     aged.sort(key=lambda row: -(row["seconds"] or 0))
     return rows + aged
 

@@ -1109,8 +1109,20 @@ def quiesce_exhausted(
 
 
 def refusal(directory: Path, issue: str) -> dict | None:
-    """Returns the last recorded refusal of an approved live recovery."""
-    path = _folder(directory) / f"issue-{issue}-refusal.json"
+    """Returns the last recorded refusal of an approved live recovery.
+
+    The read never creates the recovery folder, so `problems` can call it
+    on every issue without writing to the project state directory.
+
+    Args:
+        directory: Private project state directory.
+        issue: Issue number the refusal was recorded for.
+
+    Returns:
+        The recorded issue, claim identifier, reason and refusal time, or
+        None when no readable refusal is recorded.
+    """
+    path = directory / RECOVERY_FOLDER / f"issue-{issue}-refusal.json"
     try:
         value = json.loads(path.read_text())
     except (OSError, ValueError):
