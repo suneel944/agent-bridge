@@ -302,6 +302,8 @@ class IntegrationMixin(MailMixin):
         group: str = "",
         preview: bool = False,
         lanes: Sequence[str] | None = None,
+        *,
+        confirmed: Sequence[str] | None = None,
     ) -> str:
         """Integrates several lanes in the order their dependencies imply.
 
@@ -333,6 +335,9 @@ class IntegrationMixin(MailMixin):
             lanes: Lanes a selector matched, narrowing the ready lanes an
                 ungrouped run considers; unrestricted when None. An empty
                 selection integrates nothing.
+            confirmed: Lanes of the plan the operator confirmed, so a lane
+                that became a candidate afterwards is never merged under
+                that confirmation; unrestricted when None.
 
         Returns:
             The ordered plan when previewing, otherwise an account of every
@@ -340,8 +345,9 @@ class IntegrationMixin(MailMixin):
 
         Raises:
             BridgeError: If the candidates cannot be ordered, if a group is
-                refused, or if the run stops on a refusal or a failure, whose
-                report names everything already integrated.
+                refused or gained a lane after its plan was confirmed, or if
+                the run stops on a refusal or a failure, whose report names
+                everything already integrated.
         """
         from agent_parley.cli import (
             group_refusal,
@@ -360,6 +366,10 @@ class IntegrationMixin(MailMixin):
             subject, candidates = self._integration_candidates(
                 directory, data, state, group, lanes
             )
+            if confirmed is not None:
+                candidates = self._confirmed_candidates(
+                    group, candidates, confirmed
+                )
             if not candidates:
                 return f"{subject}: no lane to integrate, so nothing merged."
             waits = lane_dependencies(state, candidates)
@@ -379,6 +389,42 @@ class IntegrationMixin(MailMixin):
             return self._integrate_sequence(
                 root, directory, data, subject, sequence, waits, refusals
             )
+
+    def _confirmed_candidates(
+        self,
+        group: str,
+        candidates: dict[str, list[str]],
+        confirmed: Sequence[str],
+    ) -> dict[str, list[str]]:
+        """Keeps only the candidates the operator's confirmed plan named.
+
+        A ready lane that appeared after the confirmation is left out of an
+        ungrouped run. A group is admitted whole, so a group that gained a
+        lane since its plan was confirmed is refused instead of being merged
+        in part.
+
+        Args:
+            group: Group of the applied plan; empty for an ungrouped run.
+            candidates: Current candidate lanes mapped to the issues they hold.
+            confirmed: Lanes of the plan the operator confirmed.
+
+        Returns:
+            The current candidates that the confirmed plan named.
+
+        Raises:
+            BridgeError: If a group gained a lane after its plan was confirmed.
+        """
+        kept = set(confirmed)
+        added = sorted(name for name in candidates if name not in kept)
+        if group and added:
+            raise BridgeError(
+                f"Group {group} gained {', '.join(added)} after its plan was "
+                "confirmed; nothing was merged. Run the merge again to "
+                "confirm the current plan."
+            )
+        return {
+            name: issues for name, issues in candidates.items() if name in kept
+        }
 
     def _integration_preview(
         self,

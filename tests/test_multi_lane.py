@@ -326,6 +326,45 @@ def test_an_empty_selection_integrates_nothing(bridge, repo, paired):
     assert not (repo / "first.txt").exists()
 
 
+def test_a_lane_ready_after_confirmation_is_not_merged(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    git(repo, "config", "user.name", "Bridge Test")
+    git(repo, "config", "user.email", "test@example.com")
+    worked(bridge, paired, "claude", "42", "first.txt")
+
+    def answer(prompt):
+        worked(bridge, paired, "codex", "43", "second.txt")
+        return "y"
+
+    monkeypatch.setattr(builtins, "input", answer)
+
+    printed = run(
+        bridge,
+        monkeypatch,
+        capsys,
+        "participant",
+        "merge",
+        "--repo",
+        str(repo),
+        "--all",
+    )
+
+    assert "Plan: integrate 1 lane." in printed
+    assert "Integrated 1 of 1 lanes: claude." in printed
+    assert (repo / "first.txt").exists()
+    assert not (repo / "second.txt").exists()
+
+
+def test_a_group_that_gained_a_lane_after_confirmation_is_refused(
+    bridge, repo, paired
+):
+    with pytest.raises(BridgeError, match="gained codex after its plan"):
+        bridge._confirmed_candidates(
+            "rewrite", {"claude": ["42"], "codex": ["43"]}, ["claude"]
+        )
+
+
 def test_a_merge_selector_matching_nothing_merges_nothing(
     bridge, repo, paired, monkeypatch, capsys
 ):

@@ -1636,7 +1636,12 @@ def merged_lanes(
             args.yes,
         ):
             return "Declined: nothing was merged."
-        return bridge.integrate(repo, group=args.group, lanes=names)
+        return bridge.integrate(
+            repo,
+            group=args.group,
+            lanes=names,
+            confirmed=proposed["sequence"],
+        )
     if not args.name:
         raise BridgeError(
             "`participant merge` needs a participant name, --all, a "
