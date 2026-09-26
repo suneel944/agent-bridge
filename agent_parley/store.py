@@ -2,14 +2,16 @@
 
 import contextlib
 import fnmatch
+import functools
 import hashlib
 import json
 import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from agent_parley import (
     attachments,
@@ -213,6 +215,22 @@ END;
 """
 
 
+class Transaction(sqlite3.Connection):
+    """A store connection that undoes its side files when it rolls back.
+
+    SQLite reuses the identifier of a rolled-back row in a table without
+    ``AUTOINCREMENT``, so a file written beside such a row would outlive the
+    rollback under an identifier the next record takes. A writer that creates
+    one registers its removal in ``undo``, and ``connect`` runs every removal
+    when the transaction rolls back.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Opens the connection with nothing to undo yet."""
+        super().__init__(*args, **kwargs)
+        self.undo: list[Callable[[], None]] = []
+
+
 @contextlib.contextmanager
 def connect(
     home: Path, *, write: bool = False, timeout: float = BUSY_TIMEOUT
@@ -234,8 +252,13 @@ def connect(
     accumulated sleep budget, which can overrun wall time on macOS. A writer
     holds its reservation before yielding, so its statements do not need a
     second busy wait.
+
+    A transaction that rolls back also runs every removal registered in its
+    ``undo`` list, so no file written for it outlives it.
     """
-    db = sqlite3.connect(home / DATABASE, timeout=0 if write else timeout)
+    db = sqlite3.connect(
+        home / DATABASE, timeout=0 if write else timeout, factory=Transaction
+    )
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     try:
@@ -257,6 +280,9 @@ def connect(
         db.commit()
     except BaseException:
         db.rollback()
+        for undo in db.undo:
+            with contextlib.suppress(OSError):
+                undo()
         raise
     finally:
         db.close()
@@ -1323,6 +1349,14 @@ def _send(
     if decision:
         result["decision"] = True
     if oversized and directory is not None:
+        if isinstance(db, Transaction):
+            db.undo.append(
+                functools.partial(
+                    attachments.remove,
+                    directory,
+                    attachments.reference("message", message_id),
+                )
+            )
         stored, ref = attachments.spill(
             directory,
             "message",
