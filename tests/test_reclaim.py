@@ -17,6 +17,7 @@ from agent_parley import (
     issues,
     lanes,
     problems,
+    process,
     reclaim,
     recovery,
     retirement,
@@ -793,6 +794,62 @@ def test_a_missing_project_root_is_retired_within_one_interval(
     assert released["checkpoints"] == {"1": saved["id"]}
     assert bridge.status_snapshot()["projects"] == []
     assert dashboard.collect(bridge.home, False, {})["projects"] == []
+
+
+def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    (directory / "claude-activity.json").write_text(
+        json.dumps(
+            {
+                "activity": "working",
+                "updated": time.time(),
+                "session_id": "claude-session",
+                "session_pid": os.getpid(),
+                "session_ticks": process.start_ticks(os.getpid()),
+            }
+        )
+    )
+    shutil.rmtree(repo)
+
+    supervision.poll(bridge.home, directory)
+    marker = directory / supervision.ROOT_PUBLICATION
+    recorded = json.loads(marker.read_text())
+    recorded["since"] -= supervision.DEFAULTS["interval"]
+    marker.write_text(json.dumps(recorded))
+    supervision.poll(bridge.home, directory)
+
+    assert not supervision.root_retired(directory)
+    participants = roster.read(directory)["participants"]
+    assert not roster.retired(participants["claude"])
+    assert roster.retired(participants["codex"])
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+    published = json.loads(marker.read_text())
+    assert published["live"] == ["claude"]
+    assert [lane["participant"] for lane in published["lanes"]] == ["codex"]
+
+
+def test_a_missing_root_never_retires_an_unreadable_lane(bridge, repo, paired):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    (directory / "claude-activity.json").write_text("{")
+    shutil.rmtree(repo)
+
+    supervision.poll(bridge.home, directory)
+    marker = directory / supervision.ROOT_PUBLICATION
+    recorded = json.loads(marker.read_text())
+    recorded["since"] -= supervision.DEFAULTS["interval"]
+    marker.write_text(json.dumps(recorded))
+    supervision.poll(bridge.home, directory)
+
+    assert not supervision.root_retired(directory)
+    participants = roster.read(directory)["participants"]
+    assert not roster.retired(participants["claude"])
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+    published = json.loads(marker.read_text())
+    assert published["live"] == ["claude"]
 
 
 def test_service_start_removes_wake_sockets_nobody_listens_on():

@@ -21,12 +21,21 @@ from agent_parley.mail import MailMixin
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+MERGE_BUSY = "Another merge into the base checkout is running; retry later."
+"""Refusal a merge reports while another merge holds `merge.lock`."""
+
 
 class IntegrationMixin(MailMixin):
     """Lane merges, bulk integration order, and operator decisions."""
 
     def merge(self, repo: Path, name: str) -> str:
         """Merges one participant's bridge branch into the base checkout.
+
+        Merges serialize on `merge.lock`. The shared setup lock is held only
+        while the manifest is read, never across the verification gate, so
+        launches, pauses, retirements and policy changes stay available while
+        a gate runs. The lane's session lock then excludes its own launch, and
+        the lane's recorded worktree and branch are checked again under it.
 
         Args:
             repo: Any checkout of the target repository.
@@ -47,14 +56,15 @@ class IntegrationMixin(MailMixin):
 
         root, directory = self.project(repo, create=False)
         roster.read(directory)
-        with lock(directory / "setup.lock"):
-            data = self._project(root, directory, verify={name})
-            participant = data["participants"].get(name)
-            if participant is None:
-                raise BridgeError(
-                    f"{name} is not a participant in this project; "
-                    "run agent-parley participant list."
-                )
+        with lock(directory / "merge.lock", MERGE_BUSY):
+            with lock(directory / "setup.lock"):
+                data = self._project(root, directory, verify={name})
+                participant = data["participants"].get(name)
+                if participant is None:
+                    raise BridgeError(
+                        f"{name} is not a participant in this project; "
+                        "run agent-parley participant list."
+                    )
             return self._integrate_lane(root, directory, data, name)
 
     def _integrate_lane(
@@ -87,6 +97,7 @@ class IntegrationMixin(MailMixin):
             lock,
             merge_branch,
             metrics,
+            roster,
             session_busy,
             snapshot,
             verify_base,
@@ -94,6 +105,14 @@ class IntegrationMixin(MailMixin):
 
         participant = data["participants"][name]
         with lock(directory / f"{name}.session.lock", session_busy(name)):
+            current = roster.read(directory)["participants"].get(name)
+            if current is None or any(
+                current[key] != participant[key] for key in ("lane", "branch")
+            ):
+                raise BridgeError(
+                    f"{name}'s lane changed before the merge started; "
+                    "nothing was merged. Retry the merge."
+                )
             self._require_approval(directory, data, name, "merge")
             claim = exact_claim(directory, name)
             source_commit = ""
@@ -360,37 +379,39 @@ class IntegrationMixin(MailMixin):
         )
 
         root, directory = self.project(repo, create=False)
-        with lock(directory / "setup.lock"):
-            data = roster.read(directory)
-            state = snapshot(directory)
-            subject, candidates = self._integration_candidates(
-                directory, data, state, group, lanes
-            )
-            skipped: list[str] = []
-            if confirmed is not None:
-                skipped = [
-                    f"- {name} no longer ready, skipped."
-                    for name in confirmed
-                    if name not in candidates
-                ]
-                candidates = self._confirmed_candidates(
-                    group, candidates, confirmed
+        with lock(directory / "merge.lock", MERGE_BUSY):
+            with lock(directory / "setup.lock"):
+                data = roster.read(directory)
+                state = snapshot(directory)
+                subject, candidates = self._integration_candidates(
+                    directory, data, state, group, lanes
                 )
-            if not candidates:
-                return "\n".join(
-                    [
-                        f"{subject}: no lane to integrate, so nothing merged.",
-                        *skipped,
+                skipped: list[str] = []
+                if confirmed is not None:
+                    skipped = [
+                        f"- {name} no longer ready, skipped."
+                        for name in confirmed
+                        if name not in candidates
                     ]
-                )
-            waits = lane_dependencies(state, candidates)
-            sequence = plan.order(waits, "Lane dependencies")
-            refusals = {
-                name: lane_refusals(
-                    root, directory, data["participants"][name], name
-                )
-                for name in sequence
-            }
+                    candidates = self._confirmed_candidates(
+                        group, candidates, confirmed
+                    )
+                if not candidates:
+                    return "\n".join(
+                        [
+                            f"{subject}: no lane to integrate, "
+                            "so nothing merged.",
+                            *skipped,
+                        ]
+                    )
+                waits = lane_dependencies(state, candidates)
+                sequence = plan.order(waits, "Lane dependencies")
+                refusals = {
+                    name: lane_refusals(
+                        root, directory, data["participants"][name], name
+                    )
+                    for name in sequence
+                }
             if preview:
                 return self._integration_preview(
                     root, directory, data, subject, sequence
@@ -585,13 +606,16 @@ class IntegrationMixin(MailMixin):
                 "change."
             )
         here = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-        for lane in data["participants"].values():
-            if here == Path(lane["lane"]).resolve():
-                raise BridgeError(
-                    "Approvals are recorded from the base checkout at "
-                    f"{root}, never from an assigned worktree, so a lane "
-                    "does not decide its own work."
-                )
+        lanes = {
+            Path(lane["lane"]).resolve()
+            for lane in data["participants"].values()
+        }
+        if here in lanes or roster.caller_lane(data):
+            raise BridgeError(
+                "Approvals are recorded from the base checkout at "
+                f"{root}, never from an assigned worktree, so a lane "
+                "does not decide its own work."
+            )
         reviewed = self._reviewed(directory, data, name)
         if reviewed["state"] == approvals.UNREPORTED:
             raise BridgeError(
