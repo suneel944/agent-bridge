@@ -2726,6 +2726,9 @@ def _overdue_peer(
 ) -> str | None:
     """Chooses the peer an overdue claim is offered to.
 
+    Only undelivered claims count toward a peer's cap and load, as they do
+    where the cap is enforced.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -2758,7 +2761,11 @@ def _overdue_peer(
             config["inactive_after"],
         )["fit"]:
             continue
-        owned = sum(1 for record in ledger if record.get("owner") == name)
+        owned = sum(
+            1
+            for record in ledger
+            if record.get("owner") == name and not issues.delivered(record)
+        )
         if owned >= config["max_claims_per_lane"]:
             continue
         candidates.append((owned, name))
