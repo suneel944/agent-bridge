@@ -19,7 +19,7 @@ from pathlib import Path
 
 from agent_parley import lifecycle, roster
 from agent_parley.issues import MAX_BLOCKERS, parse_issue, snapshot
-from agent_parley.state import BridgeError, lock, write_json
+from agent_parley.state import BridgeError, Transient, lock, write_json
 
 PLAN = "plan.json"
 MAX_ISSUES = 200
@@ -401,7 +401,10 @@ def apply(directory: Path, path: Path, actor: str = roster.OPERATOR) -> dict:
             dependency cycle, or the ledger cannot be locked.
     """
     document = read(path)
-    with lock(directory / "issues.lock", timeout=1):
+    with (
+        lock(directory / "plan.lock", timeout=1),
+        lock(directory / "issues.lock", timeout=1),
+    ):
         state = snapshot(directory)
         added = []
         approved = set(document["dependencies"])
@@ -445,21 +448,21 @@ def apply(directory: Path, path: Path, actor: str = roster.OPERATOR) -> dict:
         if approved:
             state["revision"] += 1
             write_json(directory / "issues.json", state)
-    version = {
-        "at": time.time(),
-        "by": actor,
-        "name": document["name"],
-        "digest": document["digest"],
-        "dependencies": document["dependencies"],
-        "groups": document["groups"],
-        "envelope": document["envelope"],
-        "added": sorted(added),
-    }
-    with lock(directory / "plan.lock", timeout=1):
+        version = {
+            "at": time.time(),
+            "by": actor,
+            "name": document["name"],
+            "digest": document["digest"],
+            "dependencies": document["dependencies"],
+            "groups": document["groups"],
+            "envelope": document["envelope"],
+            "added": sorted(added),
+        }
         history = recorded(directory)
         history["versions"] = [*history["versions"], version][-MAX_VERSIONS:]
         history["revision"] += 1
         history.update(automatic=0, flips={})
+        _expire(history)
         write_json(directory / PLAN, history)
     return version
 
@@ -749,11 +752,11 @@ def _settle(
                     )
                     return
             for change in changes:
-                touched = [change["issue"]]
+                state["issues"].setdefault(change["issue"], _blank())
                 if change["op"] == "add":
-                    touched.append(change["blocker"])
-                for number in touched:
-                    record = state["issues"].setdefault(number, _blank())
+                    record = state["issues"].setdefault(
+                        change["blocker"], _blank()
+                    )
                     if operator:
                         lifecycle.authorize(record)
                 state["issues"][change["issue"]]["blocked_by"] = sorted(
@@ -825,6 +828,7 @@ def _accept(history: dict, proposal: dict, operator: bool) -> None:
         decided_at=now,
         version=history["revision"],
     )
+    _expire(history)
 
 
 def _retain(history: dict) -> None:
@@ -835,6 +839,31 @@ def _retain(history: dict) -> None:
     ]
     for key in settled[: max(len(proposals) - MAX_PROPOSALS, 0)]:
         del proposals[key]
+
+
+def _expire(history: dict) -> None:
+    """Marks every open proposal written against an older version stale.
+
+    Approval refuses such a proposal anyway, so leaving it open would only
+    hold one of the `MAX_PENDING` places and keep it in the problems view
+    until the operator decided something that can no longer apply.
+    """
+    now = time.time()
+    for item in history.get("proposals", {}).values():
+        if item["status"] in OPEN and item["base"] != history["revision"]:
+            item.update(
+                status=STALE,
+                decided_at=now,
+                note=(
+                    f"the plan moved from version {item['base']} to "
+                    f"{history['revision']}; propose again against it"
+                ),
+            )
+
+
+def _landed(directory: Path, identity: str) -> bool:
+    """Reports whether the ledger already holds one proposal's changes."""
+    return identity in snapshot(directory).get("plan_revisions", [])
 
 
 def propose(
@@ -873,8 +902,9 @@ def propose(
         from the same participant against the same version already exists.
 
     Raises:
-        BridgeError: If no plan is applied, the base version is stale, a
-            change or its evidence is malformed or out of bounds, the
+        BridgeError: If no plan is applied, the base version is stale and
+            the ledger does not already hold the proposal, a change or its
+            evidence is malformed or out of bounds, the
             resulting graph is invalid, or too many proposals are open.
     """
     changes = _changes(add, remove)
@@ -894,7 +924,8 @@ def propose(
                 "No plan is applied; apply one with "
                 "`agent-parley plan apply FILE` before revising it."
             )
-        if base != history["revision"]:
+        landed = _landed(directory, identity)
+        if base != history["revision"] and not landed:
             raise BridgeError(
                 f"The proposal names plan version {base}, but the plan is at "
                 f"version {history['revision']}; read `agent-parley plan "
@@ -916,7 +947,10 @@ def propose(
             "note": "",
             "version": None,
         }
-        _settle(directory, history, proposal, by == roster.OPERATOR)
+        if landed:
+            _accept(history, proposal, by == roster.OPERATOR)
+        else:
+            _settle(directory, history, proposal, by == roster.OPERATOR)
         if proposal["status"] in OPEN and (
             sum(item["status"] in OPEN for item in proposals.values())
             >= MAX_PENDING
@@ -937,8 +971,11 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
     Approval validates the whole resulting graph again and applies the
     proposal atomically, authorizing any prerequisite it adds; it is refused
     as stale when the plan has moved past the proposal's base version, and
-    rejected with the reason when the graph is no longer valid. Deciding a
-    proposal the same way twice changes nothing.
+    rejected with the reason when the graph is no longer valid. An approval
+    whose ledger write landed before a crash is recorded as accepted
+    whatever the plan version is now, and a busy ledger lock leaves the
+    proposal open for a retry instead of rejecting it. Deciding a proposal
+    the same way twice changes nothing.
 
     Args:
         directory: Private state directory for the common repository.
@@ -952,6 +989,7 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
     Raises:
         BridgeError: If no such proposal exists, it was already decided the
             other way, or the note is too long.
+        Transient: If the ledger lock stays busy; nothing is recorded.
     """
     note = note.strip()
     if len(note) > MAX_REASON:
@@ -967,7 +1005,8 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
             )
         if proposal["status"] == wanted:
             return {**proposal, "replayed": True}
-        if proposal["status"] not in OPEN:
+        landed = approve and _landed(directory, identity)
+        if proposal["status"] not in OPEN and not landed:
             raise BridgeError(
                 f"Proposal {identity} is already {proposal['status']}."
             )
@@ -978,6 +1017,9 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
         }
         if not approve:
             proposal.update(status=REJECTED, **settled)
+        elif landed:
+            _accept(history, proposal, True)
+            proposal["note"] = note
         elif proposal["base"] != history["revision"]:
             proposal.update(
                 settled,
@@ -991,6 +1033,8 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
             try:
                 _settle(directory, history, proposal, True)
                 proposal["note"] = note
+            except Transient:
+                raise
             except BridgeError as exc:
                 proposal.update(settled, status=REJECTED, note=str(exc))
         write_json(directory / PLAN, history)

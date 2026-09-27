@@ -1172,7 +1172,7 @@ def test_plan_revisions_waiting_on_the_operator_are_rows(
     [pending] = rows(bridge, problems.PROPOSED)
     assert pending["count"] == 1
     assert pending["command"] == f"agent-parley plan proposals --repo {root}"
-    bridge.plan_revision(repo, "approve", looped["id"])
     bridge.plan_revision(repo, "reject", waiting["id"], reason="not needed")
+    bridge.plan_revision(repo, "approve", looped["id"])
     assert not rows(bridge, problems.ESCALATED)
     assert not rows(bridge, problems.PROPOSED)

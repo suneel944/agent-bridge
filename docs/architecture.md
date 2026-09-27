@@ -983,10 +983,17 @@ apply and every accepted revision), the edges to add or remove, a reason of up
 to 2000 characters and at most five evidence items of 500 characters. Its
 identifier is the digest of the base version, the proposer and the changes, so
 a repeated proposal returns the recorded one. A proposal against any other
-version is refused as stale; an open one the plan has since moved past is
-recorded as stale when approved and must be proposed again.
+version is refused as stale, and every open proposal is recorded as stale the
+moment an apply or an accepted revision moves the plan past its base, so a
+proposal that can no longer apply never holds one of the places for proposals
+awaiting the operator; it must be proposed again. An apply holds the plan lock
+across its ledger write, taken before the ledger lock as a revision takes them,
+so no proposal can name a version the ledger has already moved past.
 
 The optional `[revisions]` table of the plan file is the operator's envelope:
+because it bounds what lanes may revise alone, only the operator applies a plan
+file, from the project base checkout outside every lane; any checkout may show
+or compare one.
 `scope` lists the issues whose edges lanes may revise unattended, `max_changes`
 bounds the edges one automatic revision changes (default 1, at most 10) and
 `max_revisions` bounds the automatic revisions under one applied plan (default
@@ -997,8 +1004,9 @@ lane, no removed edge waits on work reported ready but not yet verified, and
 both limits hold. Anything else is kept as `pending` with every reason and the
 `plan approve ID` command; it writes nothing to the ledger, so unrelated work
 stays eligible. The operator's own proposal and an operator approval apply
-directly and authorize the issues an added edge names, which is the only way a
-new prerequisite becomes claimable through a revision.
+directly and authorize the prerequisite an added edge names, which is the only
+way a new prerequisite becomes claimable through a revision; a removed edge
+authorizes nothing.
 
 Every application validates the whole resulting graph, recorded edges
 included, and refuses a removed edge that is not recorded, an added edge that
@@ -1007,7 +1015,9 @@ cycle. The ledger is written once, under its lock, together with the
 proposal's identifier, and the plan history then records a new version
 attributed to the proposer with the edges it added and removed; a proposal
 whose ledger write landed before a restart is recorded as accepted on replay
-rather than applied twice. A revision changes only `blocked_by`: it never
+or approval rather than applied twice, even when another revision was accepted
+in between. An approval that finds the ledger lock busy leaves the proposal
+open for a retry instead of rejecting it. A revision changes only `blocked_by`: it never
 claims, releases, completes or verifies work and never changes an owner or a
 claim generation. Each accepted revision counts against the edges it touched;
 a lane's proposal touching an edge already revised twice under the current plan

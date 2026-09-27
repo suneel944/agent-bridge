@@ -850,10 +850,14 @@ class ClaimsMixin(ReportsMixin):
 
         A plan records advisory dependencies and nothing else. Applying one
         claims no issue, assigns no lane and gates no transition, so a plan
-        that turns out to be wrong never blocks anybody.
+        that turns out to be wrong never blocks anybody. Only the operator
+        applies, from the project base checkout outside every lane, because
+        the plan's `[revisions]` table bounds what lanes may revise alone;
+        any checkout may show or compare.
 
         Args:
-            repo: Any checkout of the target repository.
+            repo: Any checkout of the target repository; the base checkout
+                for apply.
             action: Apply, diff, or show.
             path: Plan file for apply and diff.
 
@@ -862,19 +866,30 @@ class ClaimsMixin(ReportsMixin):
             applied plan beside current ownership for show.
 
         Raises:
-            BridgeError: If the plan file is unusable or the ledger cannot be
-                locked.
+            BridgeError: If a lane rather than the operator applies, the plan
+                file is unusable, or the ledger cannot be locked.
         """
-        from agent_parley.cli import plan, reported_ready
+        from agent_parley.cli import git, plan, reported_ready, roster
 
         _, directory = self.project(repo)
         if action == "show":
             return plan.describe(directory, reported_ready(directory))
         if path is None:
             raise BridgeError("Name the plan file to apply or compare.")
-        if action == "apply":
-            return plan.apply(directory, path)
-        return plan.diff(directory, path)
+        if action != "apply":
+            return plan.diff(directory, path)
+        if (directory / "project.json").exists():
+            data = roster.read(directory)
+            checkout = Path(git(repo, "rev-parse", "--show-toplevel"))
+            if checkout.resolve() != Path(data["root"]).resolve() or (
+                roster.caller_lane(data)
+            ):
+                raise BridgeError(
+                    "Only the operator applies a plan, from the project base "
+                    "checkout, because a plan sets the revision envelope "
+                    "lanes are held to."
+                )
+        return plan.apply(directory, path)
 
     def plan_revision(
         self,

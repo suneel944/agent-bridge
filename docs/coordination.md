@@ -295,7 +295,8 @@ closed claim or a newer message, no longer counts against the lane.
 ## The work order is a file you can review
 
 Write the issues, the dependencies between them and the groups that may run in
-parallel as TOML, then `agent-parley plan apply work-order.toml`. Applying
+parallel as TOML, then run `agent-parley plan apply work-order.toml` from the
+project base checkout; a lane cannot apply a plan. Applying
 records the same advisory dependencies `issue block` records and nothing else —
 no claim, no assignment, no gate. `plan diff` previews the edges first,
 `plan show` prints the plan as a tree with each issue's current owner, and every

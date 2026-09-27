@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from agent_parley import cli, issues, lifecycle, plan
+from agent_parley import cli, issues, lifecycle, plan, state
 from agent_parley.state import BridgeError
 
 ENVELOPED = """
@@ -167,12 +167,24 @@ def test_a_proposal_left_behind_by_a_new_apply_is_stale(bridge, repo, paired):
     base = applied(bridge, repo)
     record = proposed(bridge, paired["lanes"]["claude"], base, add=["42:60"])
     applied(bridge, repo, name="again.toml")
-    listing = bridge.plan_revision(repo, "proposals")
-    assert listing["proposals"][0]["current"] is False
-    decided = bridge.plan_revision(repo, "approve", record["id"])
-    assert decided["status"] == "stale"
-    assert "propose again" in decided["note"]
+    [left] = bridge.plan_revision(repo, "proposals")["proposals"]
+    assert left["current"] is False
+    assert left["status"] == "stale"
+    assert "propose again" in left["note"]
+    with pytest.raises(BridgeError, match="already stale"):
+        bridge.plan_revision(repo, "approve", record["id"])
     assert "60" not in ledger(bridge, repo)
+
+
+def test_proposals_left_behind_never_hold_open_places(
+    bridge, repo, paired, monkeypatch
+):
+    base = applied(bridge, repo, BARE)
+    lane = paired["lanes"]["claude"]
+    monkeypatch.setattr(plan, "MAX_PENDING", 1)
+    proposed(bridge, lane, base, add=["43:42"])
+    base = applied(bridge, repo, BARE, name="again.toml")
+    assert proposed(bridge, lane, base, add=["43:42"])["status"] == "pending"
 
 
 def test_concurrent_proposals_on_one_version_apply_once(bridge, repo, paired):
@@ -182,8 +194,8 @@ def test_concurrent_proposals_on_one_version_apply_once(bridge, repo, paired):
     assert bridge.plan_revision(repo, "approve", first["id"])["status"] == (
         "accepted"
     )
-    late = bridge.plan_revision(repo, "approve", second["id"])
-    assert late["status"] == "stale"
+    with pytest.raises(BridgeError, match="already stale"):
+        bridge.plan_revision(repo, "approve", second["id"])
     assert ledger(bridge, repo)["43"]["blocked_by"] == ["17"]
     with pytest.raises(BridgeError, match="plan is at version 2"):
         proposed(bridge, paired["lanes"]["codex"], base, add=["43:42"])
@@ -373,6 +385,96 @@ def test_the_command_line_proposes_lists_and_approves(
     )
     stale = proposed(bridge, lane, base + 1, add=["43:60"])
     applied(bridge, repo, name="again.toml")
-    assert "stale" in run(
-        "plan", "approve", stale["id"], "--repo", str(repo), code=1
+    assert f"{stale['id']} stale" in run(
+        "plan", "proposals", "--repo", str(repo)
     )
+
+
+def test_a_lane_cannot_apply_a_plan(bridge, repo, paired):
+    applied(bridge, repo)
+    lane = paired["lanes"]["claude"]
+    path = repo.parent / "wider.toml"
+    path.write_text(ENVELOPED.replace('"44"]', '"44", "60"]'))
+    with pytest.raises(BridgeError, match="Only the operator applies"):
+        bridge.work_plan(lane, "apply", path)
+    assert bridge.plan_revision(repo, "proposals")["revision"] == 1
+    assert bridge.work_plan(lane, "diff", path)["add"] == []
+    assert bridge.work_plan(lane, "show")["versions"] == 1
+
+
+def test_apply_holds_the_plan_lock_across_the_ledger_write(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo)[1]
+    path = repo.parent / "plan.toml"
+    path.write_text(ENVELOPED)
+    with (
+        state.lock(directory / "plan.lock"),
+        pytest.raises(state.LockBusy),
+    ):
+        bridge.work_plan(repo, "apply", path)
+    assert "44" not in ledger(bridge, repo)
+
+
+def test_a_crashed_proposal_lands_after_another_acceptance(
+    bridge, repo, paired
+):
+    base = applied(bridge, repo)
+    directory = bridge.project(repo)[1]
+    before = (directory / plan.PLAN).read_text()
+    first = proposed(bridge, paired["lanes"]["claude"], base, add=["43:42"])
+    (directory / plan.PLAN).write_text(before)
+    other = proposed(bridge, paired["lanes"]["codex"], base, remove=["44:43"])
+    assert other["status"] == "accepted"
+    revision = issues.snapshot(directory)["revision"]
+    replayed = proposed(bridge, paired["lanes"]["claude"], base, add=["43:42"])
+    assert replayed["id"] == first["id"]
+    assert replayed["status"] == "accepted"
+    assert issues.snapshot(directory)["revision"] == revision
+    assert ledger(bridge, repo)["43"]["blocked_by"] == ["17", "42"]
+    assert bridge.plan_revision(repo, "proposals")["revision"] == base + 2
+
+
+def test_a_crashed_approval_lands_after_another_acceptance(
+    bridge, repo, paired
+):
+    base = applied(bridge, repo)
+    directory = bridge.project(repo)[1]
+    held = proposed(bridge, paired["lanes"]["claude"], base, add=["42:60"])
+    before = (directory / plan.PLAN).read_text()
+    bridge.plan_revision(repo, "approve", held["id"])
+    (directory / plan.PLAN).write_text(before)
+    proposed(bridge, paired["lanes"]["codex"], base, remove=["44:43"])
+    approved = bridge.plan_revision(repo, "approve", held["id"])
+    assert approved["status"] == "accepted"
+    assert ledger(bridge, repo)["42"]["blocked_by"] == ["17", "60"]
+
+
+def test_removing_an_edge_authorizes_nothing(bridge, repo, paired):
+    base = applied(bridge, repo, BARE)
+    directory = bridge.project(repo)[1]
+    snapshot = issues.snapshot(directory)
+    snapshot["issues"]["42"]["execution"]["authorized"] = False
+    snapshot["revision"] += 1
+    state.write_json(directory / "issues.json", snapshot)
+    record = proposed(bridge, paired["lanes"]["claude"], base, remove=["42:17"])
+    assert record["status"] == "pending"
+    approved = bridge.plan_revision(repo, "approve", record["id"])
+    assert approved["status"] == "accepted"
+    after = ledger(bridge, repo)["42"]
+    assert after["blocked_by"] == []
+    assert not lifecycle.state(after)["authorized"]
+
+
+def test_a_busy_ledger_leaves_an_approval_open(bridge, repo, paired):
+    base = applied(bridge, repo)
+    directory = bridge.project(repo)[1]
+    held = proposed(bridge, paired["lanes"]["claude"], base, add=["42:60"])
+    with (
+        state.lock(directory / "issues.lock"),
+        pytest.raises(state.LockBusy),
+    ):
+        bridge.plan_revision(repo, "approve", held["id"])
+    [still] = bridge.plan_revision(repo, "proposals")["proposals"]
+    assert still["status"] == "pending"
+    assert "60" not in ledger(bridge, repo)
