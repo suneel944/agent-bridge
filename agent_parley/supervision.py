@@ -4696,11 +4696,20 @@ def _poll(home: Path, directory: Path) -> None:
     stage("launches", launches, directory, manifest, config)
     stage("readings", refresh_readings, home, manifest, 2 * config["interval"])
     stage("lane evidence", settle_evidence, home, directory, manifest)
+    read_at = time.time()
     observations = {
         name: presence(directory, name, config["inactive_after"])
         for name in manifest["participants"]
     }
-    stage("lane states", settle_lanes, home, manifest, config, observations)
+    stage(
+        "lane states",
+        settle_lanes,
+        home,
+        manifest,
+        config,
+        observations,
+        read_at,
+    )
     stage("lane accounting", account_lanes, home, directory, manifest)
     stage("run budget", budgets.account, home, directory, manifest)
     observations = recorded_observations(home, manifest, observations)
@@ -4881,7 +4890,11 @@ def settle_evidence(home: Path, directory: Path, manifest: dict) -> None:
 
 
 def settle_lanes(
-    home: Path, manifest: dict, config: dict, observations: dict[str, dict]
+    home: Path,
+    manifest: dict,
+    config: dict,
+    observations: dict[str, dict],
+    read_at: float | None = None,
 ) -> None:
     """Records this poll's liveness sample of every lane in its state.
 
@@ -4891,13 +4904,17 @@ def settle_lanes(
     project's stall threshold, and nowhere else. The poll takes the reading
     only after `settle_evidence` has applied the queued hook evidence, so a
     reading of the activity file older than a hook it already applied can
-    never override that hook.
+    never override that hook. A lane that moved after the reading began,
+    such as one launched while the poll waited for the store, keeps its
+    newer state until the next poll reads it.
 
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
         config: Resolved supervision settings.
         observations: Presence reading per participant.
+        read_at: Unix time the readings began, or None to apply them
+            regardless of the lanes' later transitions.
     """
     with store.connect(home, write=True) as db:
         for name in manifest["participants"]:
@@ -4907,6 +4924,7 @@ def settle_lanes(
                 name,
                 observations[name],
                 dead_after=config["stalled_after"],
+                read_at=read_at,
             )
 
 

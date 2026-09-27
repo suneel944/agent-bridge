@@ -480,13 +480,16 @@ def sample(
     *,
     dead_after: float,
     now: float | None = None,
+    read_at: float | None = None,
 ) -> dict | None:
     """Applies one liveness sample and ages a stopped lane into `dead`.
 
     A lane is dead once it has been stopped for `dead_after` seconds, or once
     the evidence the sample was derived from is that old, so a lane that was
     already long gone when this record was first written is not given a
-    second grace period.
+    second grace period. A reading taken before the lane's last transition
+    moves nothing, because the transition, such as a launch recording
+    `starting` while the poll waited for the store, is newer evidence.
 
     Args:
         db: Open write transaction on the coordination store.
@@ -495,6 +498,8 @@ def sample(
         observed: Presence reading taken by the supervision poll.
         dead_after: Seconds a stopped lane waits before it reads as dead.
         now: Unix time of the sample, or None for the current time.
+        read_at: Unix time the reading was taken, or None when it was taken
+            inside this transaction.
 
     Returns:
         The lane's record once the sample is applied, or None when the lane
@@ -502,7 +507,12 @@ def sample(
     """
     moment = time.time() if now is None else now
     record = read(db, root, lane)
-    move = from_liveness(record, observed)
+    stale = (
+        read_at is not None
+        and record is not None
+        and float(record["since"]) > read_at
+    )
+    move = None if stale else from_liveness(record, observed)
     if move is not None:
         state, cause = move
         record = transition(
