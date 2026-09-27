@@ -109,6 +109,9 @@ on standard output and export to a file.
 | `budget set` | Set `--tokens`, `--calls` and `--hours` project defaults; a budget informs and does not gate. |
 | `verify show` | Show the project's configured pre-merge command. |
 | `verify set COMMAND` | Set that command; an empty string removes it. |
+| `unattended show` | Show the unattended integration policy, or that integration is operator-only. |
+| `unattended set ISSUE ... --target BRANCH` | Authorize unattended integration of those issues into `BRANCH`; no issues removes the policy. Base checkout only. |
+| `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal. Base checkout only. |
 | `init show` | Show the command every new lane runs before it starts. |
 | `init set COMMAND` | Set that command; an empty string removes it. |
 | `mail show ID` | Print one message this lane sent or received; `--full` adds the whole attachment. |

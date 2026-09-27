@@ -2657,6 +2657,48 @@ both in the pull-request body and in the integration record kept in private
 project state. `participant merge` remains operator-only under every setting,
 and authentication is still the native `gh` CLI's own, with no added flag.
 
+A project can separately authorize unattended integration of named issues.
+From the base checkout, never from a lane:
+
+```bash
+agent-parley unattended set 42 43 --target main
+agent-parley unattended show
+agent-parley unattended run claude-1
+agent-parley unattended set          # remove it; operator-only again
+```
+
+The policy is stored in `project.json` as
+`"integration": {"unattended": {"target": "main", "issues": ["42", "43"]}}`.
+Without it, which is every existing project, integration stays operator-only
+and `unattended run` refuses. An invalid policy refuses too, naming what is
+wrong, and the rest of the project keeps working. No served coordination tool
+can set or widen it. `set` and `run` refuse lane shells: inside an assigned
+worktree, or with a lane's `AGENT_PARLEY_TOKEN` in the environment even after
+changing directory to the base checkout. Like `approve`, that is a
+command-line boundary, not an OS-level one; when a lane must be unable to act
+as the operator, run lanes under a separate OS account.
+
+`unattended run NAME` merges the lane only when its claimed issue is listed,
+its claim generation is current, it is reported ready at the commit the lane
+still sits on, the base checkout is on the target branch, its dependencies are
+verified complete, a verification command is configured, and no peer
+reservation covers a changed path. The merge itself is the `participant merge`
+step, with the same locks, approvals and gates, so a concurrent attempt is
+refused as busy. Each attempt records a decision in the lane's report log with
+the claim generation, source and target commits, gate and outcome; a refusal
+says which condition failed and what resolves it, and a gate or merge failure
+is recorded as `failed` beside the merge step's integration recovery record,
+and an input it cannot read is a refusal. While the base carries an unverified
+integration, `unattended run` refuses and never repairs it; repair stays with
+the lane that owns it or the operator.
+If the claim or ready commit changes between the check and the merge, nothing
+is merged. Running it again after a recorded integration merges nothing; an
+earlier integration never stands in for a different issue, claim or commit.
+It never pushes and makes no forge calls: forge checks and reviews are enforced
+when you push the target branch, not at the local merge, and each decision
+records `forge: "deferred to push"`. The supervision service does not
+dispatch it automatically.
+
 `participant retire` removes one lane: it refuses while a session is running or
 the worktree is dirty, removes the worktree, invalidates that participant's
 coordination credential, and drops its manifest entry. Removing the worktree
