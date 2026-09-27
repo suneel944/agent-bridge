@@ -536,6 +536,34 @@ again after it, so a set whose halves pass alone but fail together is caught
 before you move on. A failure after a merge stops the run and leaves that merge
 commit present and visibly unverified.
 
+### Recovering an unverified integration
+
+```sh
+agent-parley problems                                   # the one escalation
+agent-parley participant merge claude-2                 # retry and verify
+agent-parley participant merge claude-2 --renew-recovery # after exhaustion
+agent-parley participant merge --verify-recovery        # no repairing lane
+```
+
+A conflict, a failed post-merge gate, or a crash before the gate answered is
+recorded durably as `conflict`, `gate failed` or `interrupted`, bound to the
+claim, the pre-merge base, the resulting commit and the gate command. Until it
+clears, no other lane is integrated and the issue is never recorded complete,
+so its dependents stay held. The issue moves to `recovery` and its holder is
+mailed the failure; whoever holds the issue through the usual claim and
+handoff rules repairs it, commits and reports ready again. `participant merge`
+on that lane then merges the repair and runs the gate on the exact commit the
+base holds, including a fix you committed on the base yourself or a conflict
+you finished with `git merge --continue`. Three attempts are allowed; after
+that `problems` shows one `integration unverified` row naming
+`--renew-recovery`, which grants three more from the base checkout. When no
+lane can repair it, because the issue is unheld or complete or the lane
+retired, fix or reset the base yourself and run `participant merge
+--verify-recovery` from the base checkout: it runs the recorded gate on the
+base as it stands and clears the record only if the gate passes and the tree
+stays clean. Nothing is reset or reverted for you. See the architecture contract for the record's
+fields, its migration and its evidence limits.
+
 `plan show` and `status` mark a group whose every member is reported ready, and
 the `top` header counts those groups, so an integrable set is visible before
 anyone merges. A reported state is the lane's own account of its work, never
