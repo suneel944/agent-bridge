@@ -926,7 +926,39 @@ def test_mail_cancel_reports_the_outcome_as_json(
     assert document["cancelled"] is True
 
 
-@pytest.mark.parametrize("text", ["nan", "inf", "-inf", "infm", "nanh"])
+@pytest.mark.parametrize(
+    "text",
+    ["nan", "inf", "-inf", "infm", "nanh", "1e309", "1e308d", "1e307h"],
+)
 def test_duration_refuses_a_non_finite_window(text):
     with pytest.raises(ValueError, match="is not a window"):
         cli.duration(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("45m", 2700.0), ("6h", 21600.0), ("7d", 604800.0), ("90", 90.0)],
+)
+def test_duration_reads_a_finite_positive_window(text, seconds):
+    assert cli.duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["0", "0m", "-5", "-1h", "", "m", "5x"])
+def test_duration_refuses_an_empty_or_malformed_window(text):
+    with pytest.raises(ValueError, match="is not a window"):
+        cli.duration(text)
+
+
+@pytest.mark.parametrize("text", ["nan", "inf", "1e309", "1e308d"])
+def test_a_duration_option_rejects_a_non_finite_window(
+    monkeypatch, capsys, text
+):
+    monkeypatch.setattr(
+        sys, "argv", ["agent-parley", "mail", "send", "--within", text]
+    )
+    with pytest.raises(SystemExit) as exit_status:
+        cli.main()
+    assert exit_status.value.code == 2
+    assert f"--within: invalid duration value: '{text}'" in (
+        capsys.readouterr().err
+    )
