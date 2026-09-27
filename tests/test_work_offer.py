@@ -413,7 +413,18 @@ def test_a_qualified_weekly_limit_is_exhausted(bridge, repo, paired):
 
 def test_a_named_reset_holds_the_lane_until_it_passes(bridge, repo, paired):
     directory = Path(paired["lanes"]["claude"]).parent
-    refused(paired, "claude", 30, SESSION_LIMIT)
+    ahead = datetime.datetime.now(ZoneInfo("Asia/Dubai")) + (
+        datetime.timedelta(hours=1)
+    )
+    hour = ahead.hour % 12 or 12
+    meridiem = "am" if ahead.hour < 12 else "pm"
+    refused(
+        paired,
+        "claude",
+        30,
+        f"You've hit your session limit · resets {hour}:{ahead.minute:02d}"
+        f"{meridiem} (Asia/Dubai) (error type rate_limit, HTTP 429)",
+    )
     observed = supervision.capacity(bridge.home, directory, paired, "claude")
     assert observed["state"] == "exhausted"
     assert observed["reset_at"] > observed["observed_at"]
