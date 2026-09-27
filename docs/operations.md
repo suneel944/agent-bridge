@@ -388,6 +388,8 @@ condition, that count, its age and what clears it:
 | `awaiting acknowledgement` | Messages needing acknowledgement have waited past `--ack-after`, which defaults to `stalled_after`. | Whatever the lane's state allows, from the remedy table below. |
 | `holding a refused key` | A lane that is not active refused a peer a reserved key and still holds it. The row names the refused lanes and how long the holder has been quiet. | Whatever the lane's state allows, from the remedy table below; an expired lease of a holder observed idle past `inactive_after` is also reclaimed by the next sweep. |
 | `bounced share` | A share the sender is still waiting on reached a recipient that cannot act on it. The row sits on the sender's lane. | Whatever the first blocked recipient's state allows, from the remedy table below. |
+| `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
+| `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `ready to retire` | Every claim the lane holds has been orphaned for longer than `orphan_retire_after` and no peer took it. | `agent-parley participant retire NAME` |
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
 | `dirty worktree` | The lane holds uncommitted work and is not active, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |
@@ -532,7 +534,9 @@ lane.
 
 Every bulk run prints the lanes it matched and what will happen to each, then
 asks once for the whole set. `--yes` answers that one question in advance.
-A selector matching nothing does nothing and says so.
+A declined or unanswered confirmation, including a closed standard input, does
+nothing and exits non-zero, so a script without `--yes` cannot mistake it for
+success. A selector matching nothing does nothing and says so.
 
 Non-integration operations are independent, so a lane's refusal is printed
 beside that lane and the remaining lanes are still attempted. The closing tally
@@ -546,7 +550,9 @@ narrows that set rather than widening it, and its plan names every prerequisite
 that lies outside the selected set: held by a lane that is not selected, and so
 not satisfied here, or released and held by nobody. Narrowing a selection never
 lifts a recorded dependency and never admits a lane on easier terms than the
-single-lane merge would.
+single-lane merge would. `participant merge --group NAME` integrates the whole
+group, so it refuses `--provider`, `--outcome`, `--drifted`, `--idle` and
+`--over-budget` rather than silently ignoring them.
 
 One issue carries one offer, so `issue assign` accepts a selector only while it
 matches a single lane. A wider match is refused and names every lane it matched,
@@ -1104,6 +1110,18 @@ lane whose situation has not changed sees nothing new. Nothing is claimed for a
 lane, `issue offer` remains the only transfer path, and the recipient still
 accepts or declines.
 
+**A lane whose claims all wait is told what to do next.** A lane holding
+claims that are ready and waiting on CI and review, blocked on a recorded
+condition, or waiting on an unfinished dependency has nothing to resume. Its
+continue offer names each waiting claim and what it waits on, so the lane does
+not re-check them, and then the next work in order: peer mail that asks for an
+acknowledgement, the top `agent-parley issue next` candidate to claim, and a
+peer claim with no progress past the stall interval to ask for with
+`agent-parley issue request`. When none of those exists, the offer tells the
+lane to call the `retire` MCP tool rather than answer with a status line. A
+lane that can still resume a claim is told to resume it, and the claims that
+wait are listed after it.
+
 **An idle holder offers the split itself.** A claim held by a lane that has
 gone quiet on it is a defect that reads as healthy: the claim is held, the
 remaining work is untouched, and no row says anything is wrong. The runtime
@@ -1156,7 +1174,9 @@ the runtime stops the process, captures its committed, staged, unstaged and
 non-ignored untracked content, and marks the claim recoverable. A refusal from
 the provider, elapsed time, or the approval alone cannot transfer ownership.
 Recovery also refuses while the owner is paused, waiting for a native approval,
-or waiting for more operator input.
+or waiting for more operator input. The command itself refuses inside an
+assigned worktree, even with `--repo` pointing at the base checkout, so a lane
+cannot approve recovery of its own or a peer's claim.
 The receiving lane still runs `issue claim 42 --take-orphaned`. That claim
 revalidates the stopped process and ownership generation, moves only the old
 claim's reservations, fast-forwards to the captured committed HEAD, and restores
@@ -1629,6 +1649,24 @@ longer owns the issue, whether it released, handed off, was reclaimed or was
 resolved, so the former holder is not woken, sent or listed a reminder for
 work it no longer holds.
 
+A lane that opens a pull request and ends its turn to wait is woken when that
+pull request changes. At most once a minute the service reads up to 30 open
+pull requests with their head commit, checks, latest reviews, merge state and
+the issues they close, and keeps the last reading in `pull-requests.json` in
+the project state directory. A pull request belongs to the lane whose branch
+is its head, else to the one lane holding every claimed issue it closes, else
+to the lane whose worktree alone checked out its head branch. Its lane gets
+one supervisor message, and so a wake, when the checks finish green or red on
+a head commit not yet reported, when a review is submitted, or when the merge
+state moves between mergeable and conflicting. The message names the pull
+request, the full head SHA and the new state; a red run lists every failing
+check by name. The verdict waits until every check finished, so a run is
+reported once rather than job by job. A pull request first seen with finished
+checks or reviews is reported once too. Nothing is merged, rerun or answered
+for the lane. Only the GitHub forge is read; `beads` and `null` read nothing,
+and a forge that is missing, offline or unreadable keeps the last reading and
+wakes nobody without stopping the poll.
+
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
 complete. The reminder is written once and a silent lane is asked
@@ -1919,8 +1957,9 @@ When the project root itself disappears, the first poll records
 lane still registered is captured for recovery, retired and has its
 reservations revoked. The marker names, per lane, the claims released and the
 checkpoint each one left, and the state directory for the operator to remove.
-The project then leaves `status`, `top` and `metrics`; a root that
-returns clears the marker on the next poll. When the service starts, it
+A lane whose session is still live is kept, and `agent-parley problems` names
+it under `root missing` until its session ends. The project then leaves
+`status`, `top` and `metrics`; a root that returns clears the marker on the next poll. When the service starts, it
 removes every wake socket in its home that no launcher is listening on.
 
 ## Other agent CLIs
@@ -2484,7 +2523,12 @@ and authentication is still the native `gh` CLI's own, with no added flag.
 
 `participant retire` removes one lane: it refuses while a session is running or
 the worktree is dirty, removes the worktree, invalidates that participant's
-coordination credential, and drops its manifest entry. The branch is deleted
+coordination credential, and drops its manifest entry. Removing the worktree
+deletes its ignored files, such as a local `.env` or build output, so retire
+lists them and asks first; `--yes` answers in advance, and a declined or
+unanswered question retires nothing and exits non-zero. `gc --apply` reclaims
+only lanes whose work has already landed, so it removes their ignored files
+without asking. The branch is deleted
 only when it adds no commits to the project base; otherwise the branch is kept
 and named in the output. Message history is always preserved, so past handoffs
 still resolve their sender.

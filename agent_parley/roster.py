@@ -1271,6 +1271,28 @@ def resolve(manifest: dict, lane: Path) -> str:
     )
 
 
+def caller_lane(manifest: dict) -> str | None:
+    """Returns the participant whose worktree holds the working directory.
+
+    Operator-only commands call this rather than trusting ``--repo``: a lane
+    can name the base checkout as ``--repo`` while it runs inside its own
+    worktree, and only the process working directory shows where the command
+    actually runs.
+
+    Args:
+        manifest: Manifest using the participant roster layout.
+
+    Returns:
+        The owning participant name, or None outside every lane.
+    """
+    here = Path.cwd().resolve()
+    for name, participant in manifest["participants"].items():
+        lane = Path(participant["lane"]).resolve()
+        if here == lane or lane in here.parents:
+            return name
+    return None
+
+
 def describe(manifest: dict) -> str:
     """Formats the roster for operators and for peer discovery."""
     lines = []

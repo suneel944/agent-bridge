@@ -754,3 +754,9 @@ def test_mail_cancel_reports_the_outcome_as_json(
         "mail_cancel",
     )
     assert document["cancelled"] is True
+
+
+@pytest.mark.parametrize("text", ["nan", "inf", "-inf", "infm", "nanh"])
+def test_duration_refuses_a_non_finite_window(text):
+    with pytest.raises(ValueError, match="is not a window"):
+        cli.duration(text)

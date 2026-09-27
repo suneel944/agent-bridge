@@ -838,6 +838,141 @@ def test_quiesce_resumes_after_the_exact_process_stops(
             child.wait()
 
 
+def test_a_refused_recovery_leaves_other_lanes_their_work(bridge, repo, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    running(directory, "codex")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    session_id = "refused-capacity-session"
+    try:
+        activity = {
+            "activity": "working",
+            "updated": time.time(),
+            "session_id": session_id,
+            "session_pid": child.pid,
+            "session_ticks": process.start_ticks(child.pid),
+        }
+        write_json(directory / "claude-activity.json", activity)
+        write_json(
+            directory / "capacity-candidates.json",
+            {
+                "version": 1,
+                "candidates": [
+                    {
+                        "issue": "42",
+                        "owner": "claude",
+                        "reason": "provider capacity exhausted",
+                        "reset_at": None,
+                        "source": "provider-status",
+                        "session_id": session_id,
+                        "observation_id": "refused-observation",
+                    }
+                ],
+            },
+        )
+        bridge.authorize_recovery(repo, "42", "recover the exhausted claim")
+        write_json(
+            directory / "claude-activity.json",
+            {**activity, "activity": "idle"},
+        )
+        manifest = roster.read(directory)
+        with pytest.raises(BridgeError, match="waiting for operator input"):
+            recovery.quiesce_authorized(directory, manifest)
+        supervision.work(
+            bridge.home, directory, manifest, dict(supervision.DEFAULTS)
+        )
+
+        assert child.poll() is None
+        refused = recovery.refusal(directory, "42")
+        assert "waiting for operator input" in refused["reason"]
+        assert (directory / "codex-work.json").exists()
+        record = issues.snapshot(directory)["issues"]["42"]
+        assert "orphan" not in record
+        assert recovery.approval(directory, "42", record["claim_id"])
+
+        write_json(directory / "claude-activity.json", activity)
+        assert recovery.quiesce_authorized(directory, manifest)
+        assert recovery.refusal(directory, "42") is None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_a_claim_succeeds_while_a_quiesce_captures(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    (lane / "pending.txt").write_text("pending\n")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    session_id = "unlocked-capacity-session"
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "working",
+                "updated": time.time(),
+                "session_id": session_id,
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        write_json(
+            directory / "capacity-candidates.json",
+            {
+                "version": 1,
+                "candidates": [
+                    {
+                        "issue": "42",
+                        "owner": "claude",
+                        "eligible_peers": ["codex"],
+                        "reason": "provider capacity exhausted",
+                        "next_action": "request recorded recovery transition",
+                        "reset_at": None,
+                        "source": "provider-status",
+                        "session_id": session_id,
+                        "observation_id": "unlocked-observation",
+                    }
+                ],
+            },
+        )
+        manifest = roster.read(directory)
+        bridge.authorize_recovery(repo, "42", "recover without blocking")
+        original_capture = recovery.capture
+
+        def capture_during_claim(*args, **kwargs):
+            bridge.issue(peer, "claim", "43")
+            return original_capture(*args, **kwargs)
+
+        monkeypatch.setattr(recovery, "capture", capture_during_claim)
+        markers = recovery.quiesce_authorized(directory, manifest)
+
+        child.wait(timeout=5)
+        ledger = issues.snapshot(directory)["issues"]
+        assert ledger["43"]["owner"] == "codex"
+        assert ledger["42"]["orphan"]["checkpoint"] == markers[0]["checkpoint"]
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
 def test_pre_stop_transition_requires_fresh_authority_after_session_restart(
     bridge, repo, paired, monkeypatch
 ):
@@ -996,6 +1131,60 @@ def test_a_lane_with_no_recorded_session_end_is_never_orphaned(
 
     assert "orphan" not in issues.snapshot(directory)["issues"]["42"]
     assert not inbox(bridge, paired, "codex")
+
+
+def test_a_lane_with_a_corrupt_activity_record_is_orphaned_once_it_dies(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "working",
+                "updated": time.time(),
+                "session_id": "claude-session",
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        running(directory, "codex")
+        supervision.poll(bridge.home, directory)
+        (directory / "claude-activity.json").write_text("{")
+
+        supervision.poll(bridge.home, directory)
+
+        reading = supervision.presence(directory, "claude")
+        assert reading["state"] == supervision.UNKNOWN
+        assert reading["process_alive"] is None
+        assert "orphan" not in issues.snapshot(directory)["issues"]["42"]
+    finally:
+        child.kill()
+        child.wait()
+
+    assert supervision.presence(directory, "claude")["process_alive"] is False
+    supervision.poll(bridge.home, directory)
+    later = time.time() + STALLED + 100
+    monkeypatch.setattr(
+        supervision.lanes, "time", types.SimpleNamespace(time=lambda: later)
+    )
+    supervision.poll(bridge.home, directory)
+
+    record = issues.snapshot(directory)["issues"]["42"]
+    assert record["owner"] == "claude"
+    assert record["orphan"]["owner"] == "claude"
+    assert inbox(bridge, paired, "codex")[0][0] == (
+        "Orphaned claims held by claude"
+    )
 
 
 def test_a_cleanly_ended_lane_that_starts_again_loses_the_marker(

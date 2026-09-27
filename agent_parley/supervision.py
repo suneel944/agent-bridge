@@ -69,6 +69,8 @@ NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
+UNREADABLE = "unknown; activity record unreadable"
+UNREADABLE_STOPPED = "stopped; activity record unreadable"
 DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
@@ -389,10 +391,40 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         checked in has not been quiet for any span a threshold can be
         compared against. `ended` is true when the last recorded event is
         a clean `SessionEnd` that left no session process to check, which
-        is a known stop rather than an unknown process.
+        is a known stop rather than an unknown process. An activity file
+        that cannot be read, is not an object or records a non-numeric
+        `updated` reads as `UNKNOWN` with no liveness, so one malformed
+        record never stops the poll for every other lane. The session
+        process identity of the last readable record is kept in
+        `<name>-session-process.json`, so a lane whose record is unreadable
+        and whose last known session process has exited reads as `STOPPED`
+        and moves through the stop, dead and orphan path like any other gone
+        lane, while one whose process still runs stays `UNKNOWN`.
     """
     path = directory / f"{name}-activity.json"
-    value = json.loads(path.read_text()) if path.exists() else {}
+    known = directory / f"{name}-session-process.json"
+    try:
+        value = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        value = None
+    updated = value.get("updated") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or type(updated) not in (
+        int,
+        float,
+        type(None),
+    ):
+        gone = _known_process_gone(known)
+        return {
+            "state": STOPPED if gone else UNKNOWN,
+            "process_alive": False if gone else None,
+            "last_active": None,
+            "age_seconds": None,
+            "activity": STOPPED if gone else UNKNOWN,
+            "evidence": UNREADABLE_STOPPED if gone else UNREADABLE,
+            "stale": False,
+            "ended": False,
+        }
+    _remember_process(known, value)
     derived = lane_state(value, inactive_after)
     current = derived["state"] == IDLE and not derived["stale"]
     return {
@@ -406,6 +438,53 @@ def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
         "ended": value.get("event") == "SessionEnd"
         and derived["process_alive"] is None,
     }
+
+
+def _remember_process(path: Path, published: dict) -> None:
+    """Keeps the session process identity a readable record names.
+
+    Args:
+        path: The lane's `-session-process.json` record.
+        published: Readable activity record of the lane.
+    """
+    identity = {
+        "session_pid": published.get("session_pid"),
+        "session_ticks": published.get("session_ticks"),
+    }
+    with contextlib.suppress(OSError):
+        if identity["session_pid"] is None:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            kept = json.loads(path.read_text())
+        except (OSError, ValueError):
+            kept = None
+        if kept != identity:
+            write_json(path, identity)
+
+
+def _known_process_gone(path: Path) -> bool:
+    """Reports whether the last known session process of a lane has exited.
+
+    Args:
+        path: The lane's `-session-process.json` record.
+
+    Returns:
+        Whether the record names a process identity that no longer runs.
+        A missing, unreadable or incomplete record proves nothing and reads
+        as False.
+    """
+    try:
+        kept = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(kept, dict):
+        return False
+    pid = kept.get("session_pid")
+    ticks = kept.get("session_ticks")
+    if type(pid) is not int or pid <= 1 or not isinstance(ticks, str):
+        return False
+    return bool(ticks) and not process.alive(pid, ticks)
 
 
 def recorded_presence(record: dict | None, observed: dict) -> dict:
@@ -1872,15 +1951,187 @@ def _split_text(issue: str, count: int, recipients: list[str]) -> str:
     )
 
 
-def _continue_text(ledger: dict, numbers: list[str]) -> str:
-    """Describes already-owned work that remains authorized to continue."""
-    actions = ", ".join(
-        f"#{number} ({lifecycle.describe_action(ledger['issues'][number])})"
-        for number in numbers[:5]
+def _waiting_claims(ledger: dict, held: list[str]) -> list[str]:
+    """Names each held claim that cannot move now and what it waits on.
+
+    Args:
+        ledger: Current issue ledger.
+        held: Issues the lane owns.
+
+    Returns:
+        One phrase per held claim with no action the lane can take now, in
+        the order held: ready work waits on CI and review before verified
+        integration, blocked work on its recorded condition, and work whose
+        dependency is unfinished on that dependency.
+    """
+    waiting = []
+    for number in held:
+        record = ledger["issues"].get(number) or {}
+        if number in lifecycle.actionable(ledger, record.get("owner")):
+            continue
+        execution = lifecycle.state(record)
+        pending = [
+            f"#{dependency}"
+            for dependency in record.get("blocked_by", [])
+            if lifecycle.state(ledger["issues"].get(dependency) or {})["state"]
+            != lifecycle.COMPLETE
+        ]
+        if execution["state"] == lifecycle.READY:
+            reason = "ready, waits on CI and review before integration"
+        elif pending:
+            reason = "waits on dependency " + ", ".join(pending)
+        else:
+            reason = lifecycle.describe_action(record)
+        waiting.append(f"#{number} ({reason})")
+    return waiting
+
+
+def _idle_leads(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    ledger: dict,
+    after: float,
+) -> dict | None:
+    """Gathers the next work for a lane whose held claims cannot move.
+
+    A lane that holds claims all waiting on CI, review or a dependency has
+    nothing to resume, and a wake that only says continue leaves it idle. The
+    next work it could do is read here, in the order the wake names it: peer
+    mail that asks for an answer, the top candidate `agent-parley issue next`
+    ranks, and a peer claim with no progress past the stall interval that the
+    lane could request. Each reading is best effort, and none carries an age,
+    so the wake text stays the same until the work itself changes.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant the wake is for.
+        ledger: Current issue ledger.
+        after: Stall interval a peer claim must pass without progress.
+
+    Returns:
+        The mail senders with their message identifiers, the top candidate
+        issue, and the stalled peer claim, or None when the lane holds no
+        claim or one of its claims can still move.
+    """
+    from agent_parley import checkpoints, plan, recommend
+
+    held = issues.holders(ledger).get(name, [])
+    if not held or lifecycle.actionable(ledger, name):
+        return None
+    participant = manifest["participants"][name]
+    try:
+        mail = checkpoints.mailbox(
+            home, manifest["root"], participant["display"]
+        )["outstanding_ack"]
+    except (BridgeError, OSError, sqlite3.Error):
+        mail = []
+    try:
+        groups = plan.groups(directory)
+    except (BridgeError, OSError, ValueError):
+        groups = {}
+    ranked = recommend.rank(
+        ledger, groups, {}, {}, str(participant.get("provider", "")), 1
     )
+    now = time.time()
+    stalled = sorted(
+        (issues.last_progress(record), number, str(record["owner"]))
+        for number, record in ledger["issues"].items()
+        if record.get("owner") not in (None, name)
+        and not record.get("offer")
+        and not record.get("request")
+        and lifecycle.state(record)["state"] in lifecycle.ACTIVE
+        and now - issues.last_progress(record) >= after
+    )
+    return {
+        "mail": [f"#{item['id']} from {item['sender']}" for item in mail[:5]],
+        "next": ranked[0]["issue"] if ranked else "",
+        "stalled": (
+            {"issue": stalled[0][1], "owner": stalled[0][2]}
+            if stalled
+            else None
+        ),
+    }
+
+
+def _continue_text(
+    ledger: dict,
+    numbers: list[str],
+    held: list[str] | None = None,
+    leads: dict | None = None,
+) -> str:
+    """Describes held work and the next work when none of it can move.
+
+    Args:
+        ledger: Current issue ledger.
+        numbers: Held issues the lane can continue now.
+        held: Every issue the lane holds, so waiting claims are named.
+        leads: Next work from `_idle_leads`, read when nothing held can move.
+
+    Returns:
+        The wake text: the claims to resume and the claims that wait, or,
+        when every held claim waits, the next work in order, or the
+        instruction to retire when there is none.
+    """
+    waiting = _waiting_claims(ledger, held or [])
+    said = (
+        f" Waiting, no need to re-check: {', '.join(waiting[:5])}."
+        if waiting
+        else ""
+    )
+    if numbers:
+        actions = ", ".join(
+            f"#{number} ({lifecycle.describe_action(ledger['issues'][number])})"
+            for number in numbers[:5]
+        )
+        return (
+            f"Continue authorized work already assigned to you: {actions}. "
+            "Resume the current claim generation; delivery does not mark "
+            f"progress.{said}"
+        )
+    leads = leads or {}
+    steps = []
+    if leads.get("mail"):
+        steps.append(
+            "answer the peer mail that asks for it: " + ", ".join(leads["mail"])
+        )
+    if leads.get("next"):
+        number = leads["next"]
+        steps.append(
+            f"claim #{number}, the top agent-parley issue next candidate, "
+            f"with agent-parley issue claim {number}"
+        )
+    if stalled := leads.get("stalled"):
+        steps.append(
+            f"ask for #{stalled['issue']}, held by {stalled['owner']} with "
+            "no progress past the stall interval, with agent-parley issue "
+            f"request {stalled['issue']}"
+        )
+    if steps:
+        listed = "; then ".join(steps)
+        return (
+            f"No held claim can move now.{said} Next work, in order: {listed}."
+        )
+    if any(
+        lifecycle.state(ledger["issues"].get(number) or {})["state"]
+        == lifecycle.READY
+        for number in held or []
+    ):
+        return (
+            f"No held claim can move now.{said} Nothing else needs this lane, "
+            "but ready work stays claimed through verified integration, so "
+            "retire would be refused. End the turn; a change to that work "
+            "wakes this lane again."
+        )
     return (
-        f"Continue authorized work already assigned to you: {actions}. "
-        "Resume the current claim generation; delivery does not mark progress."
+        f"No held claim can move now.{said} Nothing else needs this lane: "
+        "no peer mail asks for an answer, agent-parley issue next has no "
+        "candidate and no peer claim is stalled. Retire with the retire MCP "
+        "tool, per the coordinate skill, instead of answering with a status "
+        "line."
     )
 
 
@@ -2008,6 +2259,7 @@ def _work_offer(
     ledger: dict,
     after: float,
     recipients: list[str],
+    leads: dict | None = None,
 ) -> dict | None:
     """Derives the current offer for one lane from live eligibility inputs.
 
@@ -2020,6 +2272,11 @@ def _work_offer(
     exhausted owner belongs to recovery instead. A lane holding more than one
     claim is told to shed a whole claim first, which needs no split.
 
+    A lane whose held claims all wait on CI, review or a dependency still
+    gets a continue offer, because a lane left without one goes idle while
+    other work waits. Its text names the waiting claims and the next work
+    `_idle_leads` found, or tells the lane to retire when there is none.
+
     Args:
         name: Participant receiving the offer.
         results: Current fit result for every participant.
@@ -2029,6 +2286,8 @@ def _work_offer(
         ledger: Current issue ledger.
         after: Minimum idle duration for a rebalance target.
         recipients: Participants that read as able to act on a share now.
+        leads: Next work for a lane none of whose held claims can move, or
+            None when the lane holds no such set of claims.
 
     Returns:
         The actionable offer, or None when no work is currently eligible.
@@ -2085,12 +2344,12 @@ def _work_offer(
             ),
             "progress": _work_progress(ledger, [loaded]),
         }
-    elif continuation and capacity is not False:
-        selected = continuation[:5]
+    elif (continuation or leads is not None) and capacity is not False:
+        selected = (continuation or held)[:5]
         offer = {
             "kind": "continue",
             "issues": selected,
-            "text": _continue_text(ledger, selected),
+            "text": _continue_text(ledger, continuation, held, leads),
             "progress": _work_progress(ledger, selected),
         }
     elif results[name]["fit"] and not held and (available or busy):
@@ -2162,7 +2421,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     record_stranded_claims(
         directory, stranded_claims(manifest, ledger, results)
     )
-    recovered = recovery.quiesce_authorized(directory, manifest)
+    recovered = recovery.quiesce_authorized(directory, manifest, isolate=True)
     if recovered:
         ledger = issues.snapshot(directory)
         for number, record in ledger["issues"].items():
@@ -2202,6 +2461,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             ledger,
             after,
             recipients,
+            _idle_leads(home, directory, manifest, name, ledger, after),
         )
         with lock(directory / f"{name}-work.lock", timeout=1):
             previous = published_work(directory, name)
@@ -3866,6 +4126,153 @@ def branch_lane(manifest: dict, branch: str) -> str:
     return owners[0] if len(owners) == 1 else ""
 
 
+PULL_REQUEST_SECONDS = 60.0
+PULL_REQUEST_RECORD = "pull-requests.json"
+
+
+def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
+    """Tells a lane once when its open pull request's checks or reviews change.
+
+    A lane that opens a pull request ends its turn to wait, and nothing used
+    to tell it when the checks finished, a review landed or the pull request
+    became mergeable. The forge is read at most once per
+    `PULL_REQUEST_SECONDS`, and each open pull request's last reading is
+    kept in `PULL_REQUEST_RECORD`. A pull request whose checks finished green
+    or red on a head commit not yet reported, which gained a review, or
+    whose merge state moved between mergeable and conflicting, is announced
+    to its lane as supervisor mail naming the number, head commit and new
+    state, with the failing check names on a red run. Unread mail is a wake
+    reason, so the ordinary wake path gives the lane its turn. A pull request
+    seen for the first time with finished checks or reviews is announced
+    once as well.
+
+    A pull request belongs to the lane whose branch is its head, else to the
+    one lane owning every claimed issue it closes, else to the lane
+    `branch_lane` attributes its head branch to. One no lane can be named
+    for is recorded and announced to nobody. A forge that is missing,
+    offline or unreadable leaves the record as it was and wakes nobody.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    path = directory / PULL_REQUEST_RECORD
+    try:
+        seen = json.loads(path.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
+    now = time.time()
+    if now - float(seen.get("read_at") or 0) < PULL_REQUEST_SECONDS:
+        return
+    readings = forge.open_pull_requests(Path(manifest["root"]))
+    if readings is None:
+        return
+    before = seen.get("pull_requests") or {}
+    ledger = issues.snapshot(directory)["issues"]
+    for reading in readings:
+        changes = _pull_request_changes(
+            before.get(str(reading["number"])) or {}, reading
+        )
+        name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        if not name:
+            continue
+        body = (
+            f"Pull request #{reading['number']} {reading['url']} at head "
+            f"{reading['sha']}: {'; '.join(changes)}. Take the next step "
+            "yourself: merge it, fix it or answer the review. Nothing was "
+            "merged, changed or answered for you."
+        )
+        digest = hashlib.sha256(
+            f"{reading['number']}\x00{name}\x00{body}".encode()
+        ).hexdigest()[:32]
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            store.speak(
+                home,
+                manifest["root"],
+                manifest["participants"][name]["display"],
+                f"Pull request #{reading['number']} changed",
+                body,
+                f"pull-request:{digest}",
+            )
+    write_json(
+        path,
+        {
+            "read_at": now,
+            "pull_requests": {
+                str(reading["number"]): reading for reading in readings
+            },
+        },
+    )
+
+
+def _pull_request_changes(before: dict, after: dict) -> list[str]:
+    """Describes what changed between two readings of one pull request.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading from `forge.open_pull_requests`.
+
+    Returns:
+        One phrase per change worth a wake, empty when nothing changed.
+    """
+    changes: list[str] = []
+    finished = after["checks"] in {"green", "red"}
+    if finished and (
+        before.get("checks"),
+        before.get("sha"),
+        before.get("failing"),
+    ) != (after["checks"], after["sha"], after["failing"]):
+        changes.append(
+            "checks passed"
+            if after["checks"] == "green"
+            else f"checks failed: {', '.join(after['failing'])}"
+        )
+    known = before.get("reviews") or []
+    added = [review for review in after["reviews"] if review not in known]
+    if added:
+        listed = ", ".join(
+            f"{review['author'] or 'unknown'} {review['state']}"
+            for review in added
+        )
+        changes.append(f"review submitted: {listed}")
+    settled = {"MERGEABLE", "CONFLICTING"}
+    if (
+        before.get("mergeable") in settled
+        and after["mergeable"] in settled
+        and before["mergeable"] != after["mergeable"]
+    ):
+        changes.append(f"merge state is now {after['mergeable']}")
+    return changes
+
+
+def _pull_request_lane(manifest: dict, ledger: dict, reading: dict) -> str:
+    """Names the lane a pull request belongs to, as `pull_request_wakes` says.
+
+    Args:
+        manifest: Current participant manifest.
+        ledger: Issue records by number.
+        reading: One reading from `forge.open_pull_requests`.
+
+    Returns:
+        The participant name, or an empty string when no single lane owns it.
+    """
+    participants = manifest["participants"]
+    for name, participant in participants.items():
+        if reading["branch"] and participant["branch"] == reading["branch"]:
+            return name
+    owners = {
+        ledger[number].get("owner")
+        for number in reading["issues"]
+        if number in ledger and ledger[number].get("owner") in participants
+    }
+    if len(owners) == 1:
+        return str(owners.pop())
+    return branch_lane(manifest, reading["branch"]) if reading["branch"] else ""
+
+
 def reported_since(directory: Path, name: str, since: float) -> bool:
     """Reports whether a lane filed a report after a recorded instant.
 
@@ -4122,6 +4529,15 @@ def missing_root(
     nothing here deletes it. A root that reappears clears the record on the
     next poll.
 
+    A lane whose session process is still alive is never retired here: a
+    moved repository or a dropped mount leaves its client running, and
+    releasing its claims and revoking its credential could not be undone
+    when the root returns. The publication names such lanes under `live`
+    and the project is not recorded retired, so each later poll retires
+    only the lanes whose process has since gone. A lane whose activity
+    record cannot be read has no process evidence either way, so it is
+    counted as live rather than retired on an unreadable file.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -4145,9 +4561,17 @@ def missing_root(
         return
     if recorded.get("retired") or now - since < config["interval"]:
         return
-    lanes = []
+    lanes = list(recorded.get("lanes") or [])
+    live = []
     for name, participant in manifest["participants"].items():
         if roster.retired(participant):
+            continue
+        reading = presence(directory, name, config["inactive_after"])
+        if (
+            reading["process_alive"] is True
+            or reading["evidence"] == UNREADABLE
+        ):
+            live.append(name)
             continue
         with contextlib.suppress(BridgeError, OSError, ValueError):
             recovery.capture(directory, manifest, name)
@@ -4176,9 +4600,10 @@ def missing_root(
         path,
         {
             "since": since,
-            "retired": now,
+            "retired": None if live else now,
             "state_directory": str(directory),
             "lanes": lanes,
+            "live": live,
         },
     )
 
@@ -4283,6 +4708,7 @@ def _poll(home: Path, directory: Path) -> None:
             stage,
         )
         stage("work", work, home, directory, manifest, config)
+        stage("pull requests", pull_request_wakes, home, directory, manifest)
         stage(
             "overdue claims",
             overdue_claims,
@@ -4741,6 +5167,9 @@ def _work_backlog(
             owned,
             ledger,
             config,
+        ),
+        _idle_leads(
+            home, directory, manifest, name, ledger, config["stalled_after"]
         ),
     )
     if not current or (
