@@ -405,6 +405,9 @@ def apply(directory: Path, path: Path, actor: str = roster.OPERATOR) -> dict:
         lock(directory / "plan.lock", timeout=1),
         lock(directory / "issues.lock", timeout=1),
     ):
+        history = recorded(directory)
+        if _recover(directory, history):
+            write_json(directory / PLAN, history)
         state = snapshot(directory)
         added = []
         approved = set(document["dependencies"])
@@ -458,7 +461,6 @@ def apply(directory: Path, path: Path, actor: str = roster.OPERATOR) -> dict:
             "envelope": document["envelope"],
             "added": sorted(added),
         }
-        history = recorded(directory)
         history["versions"] = [*history["versions"], version][-MAX_VERSIONS:]
         history["revision"] += 1
         history.update(automatic=0, flips={})
@@ -899,8 +901,10 @@ def _recover(directory: Path, history: dict) -> bool:
     before they write the ledger, so a crash between the two writes never
     leaves ledger edges without a proposal record. A mark found later means
     the process stopped in that window. When the ledger holds the proposal
-    it is accepted now. Otherwise nothing landed: a new proposal is
-    withdrawn for its lane to file again, and a decided one stays open.
+    it is accepted now, with the operator's decision note the mark kept.
+    Otherwise nothing landed: a new proposal is withdrawn for its lane to
+    file again, and a decided one stays open. `apply` recovers first too,
+    so a new plan version never stales a proposal the ledger already holds.
 
     Args:
         directory: Private state directory for the common repository.
@@ -919,6 +923,8 @@ def _recover(directory: Path, history: dict) -> bool:
         changed = True
         if _landed(directory, identity):
             _accept(history, item, mark["operator"])
+            if "note" in mark:
+                item["note"] = mark["note"]
         elif mark["new"]:
             del proposals[identity]
     return changed
@@ -1106,7 +1112,11 @@ def decide(directory: Path, identity: str, approve: bool, note: str) -> dict:
                 ),
             )
         else:
-            proposal["applying"] = {"operator": True, "new": False}
+            proposal["applying"] = {
+                "operator": True,
+                "new": False,
+                "note": note,
+            }
             write_json(directory / PLAN, history)
             try:
                 _settle(directory, history, proposal, True)

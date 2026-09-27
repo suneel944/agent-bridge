@@ -989,11 +989,11 @@ the waits of an issue it changed; it carries the others to the new version
 with a note, because approval validates the whole resulting graph again. A
 proposal that can no longer apply therefore never holds one of the places for
 proposals awaiting the operator, and must be proposed again. Before a revision
-writes the ledger it marks the proposal `applying` in `plan.json`; the next
-`plan propose`, `approve` or `reject` finishes a marked proposal the ledger
-already holds and withdraws or reopens one it does not, so a crash between
-the two writes never leaves ledger edges without a proposal record. An apply
-holds the plan lock
+writes the ledger it marks the proposal `applying` in `plan.json`, with the
+operator's decision note; the next `plan apply`, `propose`, `approve` or
+`reject` finishes a marked proposal the ledger already holds and withdraws or
+reopens one it does not, so a crash between the two writes never leaves ledger
+edges without a proposal record. An apply holds the plan lock
 across its ledger write, taken before the ledger lock as a revision takes them,
 so no proposal can name a version the ledger has already moved past.
 
