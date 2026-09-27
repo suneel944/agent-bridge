@@ -1031,6 +1031,11 @@ def normalize(manifest: dict) -> dict:
         "resources": resources(list(manifest.get("resources") or [])),
         "deadlines": deadlines(dict(manifest.get("deadlines") or {})),
         "budget": budget(dict(manifest.get("budget") or {})),
+        **(
+            {"run_budget": budget(dict(manifest["run_budget"]))}
+            if manifest.get("run_budget")
+            else {}
+        ),
         "forge": forge_choice(manifest.get("forge")),
         "approval": approval_steps(manifest.get("approval") or []),
         "pull_request": pull_request_policy(manifest.get("pull_request", {})),

@@ -425,6 +425,8 @@ condition, that count, its age and what clears it:
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
 | `dirty worktree` | The lane holds uncommitted work and is not active, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |
 | `over budget` | The lane crossed an advisory token, call or hour limit. | `agent-parley participant budget NAME` |
+| `run budget exhausted` | The project's enforced run budget is used up or its ledger was unreadable or missing; no wake, dispatch, retry or launch starts. | `agent-parley budget resume` after raising the limit, or `--reset` |
+| `run budget unmetered` | A lane has no readable token records while a token limit is enforced, or a live session not started by `agent-parley run` while an hours limit is, so it is refused wakes, dispatch and retries. | `agent-parley budget enforce --tokens 0 --hours 0`, or relaunch the lane with `agent-parley run` on a provider whose transcripts Parley reads |
 
 A retired lane reports nothing but that kept worktree. Its quiet is the state
 it was asked for, so it raises no stall, no inactivity and no acknowledgement
@@ -777,6 +779,129 @@ limit, recorded in its lane state so it is not repeated until the limit is
 crossed again. Nothing is stopped, revoked or refused: `--over-budget` selects
 the crossed lanes, and `participant pause --over-budget` or `participant stop
 --over-budget` is the operator's decision to make.
+
+### Enforcing a run budget
+
+```sh
+agent-parley budget enforce --tokens 20000000 --calls 50000 --hours 24
+agent-parley budget enforce
+agent-parley budget resume
+agent-parley budget resume --reset
+agent-parley budget enforce --tokens 0 --calls 0 --hours 0
+```
+
+Every budget above is advisory, and stays advisory: nothing changes for a
+project until an operator runs `budget enforce` with a limit. The run budget
+is a separate, opt-in record. It is a usage limit on what Parley can observe
+and control, **not** a billing guarantee or a monetary cap: tokens are the
+counts each native client recorded, not spend, and a provider's own spending
+limit is complementary to it, never replaced by it.
+
+**Scope.** One run budget per project, summed over every lane, provider and
+account of that project: the tokens every lane's client recorded, the
+coordination calls the store served, and the hours every session process has
+been alive. It gates only what the service starts on its own: wakes, work
+dispatch delivered by a wake, capacity retries and resumes, and `run` launches.
+Advisory limits never gate, and the run budget never changes their notices;
+when both exist, the run budget alone decides whether the service starts a
+turn.
+
+**Accounting.** A durable ledger, `run-budget.json` in the project's private
+state directory, keeps the highest reading of each token source (a lane's
+transcript path and inode) and each session (a lane and its start time), and
+counts served calls past a durable event cursor, so retired events are never
+lost and none is counted twice. A restart, a replaced or removed lane and a
+retried session therefore add to the run and never reset it. Every transcript
+a lane's client kept is read from a byte offset stored in the ledger, not only
+the newest, so usage appended just before a session switched transcripts, and
+sessions that ran while the service was down, are still counted. `budget
+enforce` writes the initial ledger before it records the first limit, starting
+the call cursor at the project's latest served call and skipping transcripts
+not modified since, so use from before enforcement does not count.
+
+Counting can err both ways. Over: a resumed session that writes a new
+transcript replaying earlier messages is a new source, so the replayed usage
+is counted again; message identifiers are not deduplicated across transcripts,
+and Codex rollouts carry none. Under: tokens appended to a transcript that is
+deleted before the next poll reads them, and Codex rollouts older than two days
+or outside the 16 most recently modified, are never seen, so the run can
+exhaust late by that much.
+
+The ledger is refreshed once by every supervision poll, under its lock, so
+concurrent lanes and services see one sequence of readings and the first
+reading at or over a limit records the exhaustion that every later admission
+refuses on. Admitting a wake takes no new reading: it reads the recorded
+exhaustion and unmetered lanes under the same lock and, while a calls limit is
+enforced, reserves one call for the admitted turn until the next poll reads
+its use. Concurrent admissions therefore never share the last call: with one
+call left, exactly one of any number of simultaneous wakes is admitted and
+the rest are parked until the next poll. A ledger lock that stays busy parks
+the wake the same way rather than failing it. Accounting latency is one poll
+interval for calls and hours (a session that ends between polls loses at most
+that span) and, for tokens, whenever the client appends its usage to the
+transcript; a large transcript is read at most 1 MiB per refresh.
+
+**Exhaustion.** Reaching any enforced limit records one exhaustion in the
+ledger, which survives restarts and appears as a `run budget exhausted` row in
+`problems` with the command to run, and sends one outbound notification when a
+transport is configured. From then on no wake, dispatch, retry, resume or
+launch starts. A refused wake spends no attempt; the lane is parked under the
+refusal and keeps its claims, reservations, worktree and uncommitted changes.
+
+**In-flight sessions and overshoot.** Parley never kills a native process. A
+lane whose client delivers hooks receives one notice at its next hook event
+asking it to finish the current step, commit or checkpoint its work, report
+and stop, and a `Stop` event is no longer held open for new coordination work.
+A lane whose provider delivers no hook receives no in-flight notice and runs
+its current turn to its natural end; that is reported here rather than
+claimed. The maximum overshoot is what turns already running when the limit is
+reached consume before they end, plus what accrues within the accounting
+latency above; stopping dispatch never guarantees zero further consumption.
+Admissions already in flight add to that bound: every turn admitted before the
+poll that records the exhaustion keeps running until its next hook event, or to
+its end without hooks. For calls, a poll releases the reservations it has read
+use for, so a turn admitted in the previous interval that has served no call
+yet can be joined by one more admission; the calls overshoot is therefore at
+most the turns admitted in one poll interval plus the calls each in-flight turn
+serves before its stop notice. Tokens and hours reserve nothing, so every lane
+admitted before the exhausting poll may overshoot by one turn's use.
+Native authentication, trust and approval prompts are untouched.
+
+**Missing or corrupt evidence.** While a token limit is enforced, a lane
+whose token records cannot be read, including every lane on a provider whose
+transcripts Parley cannot parse, is refused wakes and resumes, because an
+unmetered lane would otherwise be unlimited. The same holds while an hours
+limit is enforced for a lane with a live session that `agent-parley run` did
+not start, since its start time is unknown; `budget enforce` lists those
+lanes as unmetered, and `problems` shows each as a `run budget unmetered` row,
+whether or not the service ever woke it before. A ledger that cannot be read,
+or is missing while a run budget is enforced, is moved aside to
+`run-budget.json.corrupt` when present, rebuilt from the evidence that remains
+and recorded as exhausted, so unknown prior use never reads as none.
+
+**Resume and reset.** Raising, removing or clearing a limit is an operator
+action. `budget enforce` and `budget resume` refuse to run when
+`AGENT_PARLEY_TOKEN` is set, as it is in a launched lane's environment, and no
+MCP tool changes the run budget. A lane's hook also denies a shell command that
+runs `agent-parley budget enforce` or `budget resume`, so unsetting the
+variable in the same command does not slip past. Nothing here is enforcement:
+both refusals only prevent accidental use from a lane, are not an authority
+boundary, and a process that hides the command well enough is not stopped.
+A Stop hook that would keep a lane working on new issue or work notices is
+admitted through the run budget like a wake, and reserves a call where a calls
+limit applies. Recording a new limit never
+clears an exhaustion; `budget resume` does, and refuses while the run is still
+at or over a limit, so raise the limit first. Both read current usage first.
+`budget resume --reset` starts a new accounting period in which consumption so
+far, including use read at the moment of the reset, no longer counts. Removing every enforced limit returns the project to advisory budgets.
+
+**Migration.** Existing projects keep their advisory budgets unchanged and
+carry no run budget. To adopt enforcement, pick aggregate limits for the whole
+run, record them with `budget enforce`, and check `budget enforce` for
+unmetered lanes before leaving the run unattended. Live provider behavior,
+such as how quickly a client appends usage and how a lane answers the stop
+notice, is verified in live acceptance runs, separately from the local test
+suite.
 
 ### Delivering a message or an offer later
 

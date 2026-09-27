@@ -4806,6 +4806,40 @@ def usage(
     return report
 
 
+def served_since(home: Path, root: str, cursor: int) -> tuple[int, int]:
+    """Counts the calls served for one project after an event cursor.
+
+    Retention retires old events, so a count of retained events can fall;
+    counting only identifiers past a durable cursor never counts a call
+    twice and never loses one to retirement. A cursor beyond every stored
+    identifier means the event table was recreated, and counting restarts
+    from its first row.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        cursor: Highest event identifier already counted.
+
+    Returns:
+        The number of newly served calls and the new cursor.
+    """
+    if not (home / DATABASE).exists():
+        return 0, cursor
+    with reading(home) as db:
+        highest = db.execute(
+            "SELECT coalesce(max(id),0) FROM events"
+        ).fetchone()[0]
+        if int(highest) < cursor:
+            cursor = 0
+        row = db.execute(
+            "SELECT count(e.id),coalesce(max(e.id),?) FROM events e "
+            "JOIN projects p ON p.id=e.project_id "
+            "WHERE p.human_key=? AND e.id>?",
+            (cursor, root, cursor),
+        ).fetchone()
+    return int(row[0]), int(row[1])
+
+
 def transfer_reservations(
     home: Path,
     root: str,

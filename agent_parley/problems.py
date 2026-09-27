@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from agent_parley import (
+    budgets,
     dialogs,
     issues,
     merges,
@@ -67,6 +68,8 @@ INTEGRATION = "integration unverified"
 ROOT = "root missing"
 ESCALATED = "escalated plan revision"
 PROPOSED = "plan revisions pending"
+RUN_BUDGET = "run budget exhausted"
+RUN_UNMETERED = "run budget unmetered"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -1110,6 +1113,51 @@ def _plan_rows(directory: Path, root: str, now: float) -> list[dict]:
     return rows
 
 
+def _run_rows(
+    directory: Path, manifest: dict, root: str, now: float
+) -> list[dict]:
+    """Reports an exhausted run budget and every lane it cannot meter.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Project manifest.
+        root: Canonical project key.
+        now: Unix time the exhaustion's age is measured against.
+
+    Returns:
+        One row while the run budget is exhausted; otherwise one row per
+        lane refused because its use cannot be metered, or none.
+    """
+    stopped = budgets.halted(directory, manifest)
+    if not stopped:
+        return [
+            _row(
+                RUN_UNMETERED,
+                f"{name} cannot be metered: no readable token records while "
+                "a token limit is enforced, or a live session not started by "
+                "agent-parley run while an hours limit is; no wake, dispatch "
+                "or retry starts for it",
+                f"agent-parley budget enforce --tokens 0 --hours 0 --repo "
+                f"{root} (or relaunch the lane with agent-parley run on a "
+                "provider whose transcripts Parley reads)",
+                participant=name,
+                project=root,
+            )
+            for name in budgets.unmetered(directory, manifest)
+        ]
+    return [
+        _row(
+            RUN_BUDGET,
+            f"{stopped['cause']}; no wake, dispatch, retry or launch starts",
+            f"agent-parley budget resume --repo {root} (add --reset to start "
+            "a new accounting period, or raise the limit with agent-parley "
+            "budget enforce)",
+            _age(stopped.get("at"), now),
+            project=root,
+        )
+    ]
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1179,6 +1227,7 @@ def derive(
         aged.extend(_integration_rows(directory, project["root"], stamp))
         aged.extend(_root_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
+        aged.extend(_run_rows(directory, data, project["root"], stamp))
     aged.sort(key=lambda row: -(row["seconds"] or 0))
     return rows + aged
 
