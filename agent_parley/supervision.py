@@ -1951,15 +1951,187 @@ def _split_text(issue: str, count: int, recipients: list[str]) -> str:
     )
 
 
-def _continue_text(ledger: dict, numbers: list[str]) -> str:
-    """Describes already-owned work that remains authorized to continue."""
-    actions = ", ".join(
-        f"#{number} ({lifecycle.describe_action(ledger['issues'][number])})"
-        for number in numbers[:5]
+def _waiting_claims(ledger: dict, held: list[str]) -> list[str]:
+    """Names each held claim that cannot move now and what it waits on.
+
+    Args:
+        ledger: Current issue ledger.
+        held: Issues the lane owns.
+
+    Returns:
+        One phrase per held claim with no action the lane can take now, in
+        the order held: ready work waits on CI and review before verified
+        integration, blocked work on its recorded condition, and work whose
+        dependency is unfinished on that dependency.
+    """
+    waiting = []
+    for number in held:
+        record = ledger["issues"].get(number) or {}
+        if number in lifecycle.actionable(ledger, record.get("owner")):
+            continue
+        execution = lifecycle.state(record)
+        pending = [
+            f"#{dependency}"
+            for dependency in record.get("blocked_by", [])
+            if lifecycle.state(ledger["issues"].get(dependency) or {})["state"]
+            != lifecycle.COMPLETE
+        ]
+        if execution["state"] == lifecycle.READY:
+            reason = "ready, waits on CI and review before integration"
+        elif pending:
+            reason = "waits on dependency " + ", ".join(pending)
+        else:
+            reason = lifecycle.describe_action(record)
+        waiting.append(f"#{number} ({reason})")
+    return waiting
+
+
+def _idle_leads(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    ledger: dict,
+    after: float,
+) -> dict | None:
+    """Gathers the next work for a lane whose held claims cannot move.
+
+    A lane that holds claims all waiting on CI, review or a dependency has
+    nothing to resume, and a wake that only says continue leaves it idle. The
+    next work it could do is read here, in the order the wake names it: peer
+    mail that asks for an answer, the top candidate `agent-parley issue next`
+    ranks, and a peer claim with no progress past the stall interval that the
+    lane could request. Each reading is best effort, and none carries an age,
+    so the wake text stays the same until the work itself changes.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant the wake is for.
+        ledger: Current issue ledger.
+        after: Stall interval a peer claim must pass without progress.
+
+    Returns:
+        The mail senders with their message identifiers, the top candidate
+        issue, and the stalled peer claim, or None when the lane holds no
+        claim or one of its claims can still move.
+    """
+    from agent_parley import checkpoints, plan, recommend
+
+    held = issues.holders(ledger).get(name, [])
+    if not held or lifecycle.actionable(ledger, name):
+        return None
+    participant = manifest["participants"][name]
+    try:
+        mail = checkpoints.mailbox(
+            home, manifest["root"], participant["display"]
+        )["outstanding_ack"]
+    except (BridgeError, OSError, sqlite3.Error):
+        mail = []
+    try:
+        groups = plan.groups(directory)
+    except (BridgeError, OSError, ValueError):
+        groups = {}
+    ranked = recommend.rank(
+        ledger, groups, {}, {}, str(participant.get("provider", "")), 1
     )
+    now = time.time()
+    stalled = sorted(
+        (issues.last_progress(record), number, str(record["owner"]))
+        for number, record in ledger["issues"].items()
+        if record.get("owner") not in (None, name)
+        and not record.get("offer")
+        and not record.get("request")
+        and lifecycle.state(record)["state"] in lifecycle.ACTIVE
+        and now - issues.last_progress(record) >= after
+    )
+    return {
+        "mail": [f"#{item['id']} from {item['sender']}" for item in mail[:5]],
+        "next": ranked[0]["issue"] if ranked else "",
+        "stalled": (
+            {"issue": stalled[0][1], "owner": stalled[0][2]}
+            if stalled
+            else None
+        ),
+    }
+
+
+def _continue_text(
+    ledger: dict,
+    numbers: list[str],
+    held: list[str] | None = None,
+    leads: dict | None = None,
+) -> str:
+    """Describes held work and the next work when none of it can move.
+
+    Args:
+        ledger: Current issue ledger.
+        numbers: Held issues the lane can continue now.
+        held: Every issue the lane holds, so waiting claims are named.
+        leads: Next work from `_idle_leads`, read when nothing held can move.
+
+    Returns:
+        The wake text: the claims to resume and the claims that wait, or,
+        when every held claim waits, the next work in order, or the
+        instruction to retire when there is none.
+    """
+    waiting = _waiting_claims(ledger, held or [])
+    said = (
+        f" Waiting, no need to re-check: {', '.join(waiting[:5])}."
+        if waiting
+        else ""
+    )
+    if numbers:
+        actions = ", ".join(
+            f"#{number} ({lifecycle.describe_action(ledger['issues'][number])})"
+            for number in numbers[:5]
+        )
+        return (
+            f"Continue authorized work already assigned to you: {actions}. "
+            "Resume the current claim generation; delivery does not mark "
+            f"progress.{said}"
+        )
+    leads = leads or {}
+    steps = []
+    if leads.get("mail"):
+        steps.append(
+            "answer the peer mail that asks for it: " + ", ".join(leads["mail"])
+        )
+    if leads.get("next"):
+        number = leads["next"]
+        steps.append(
+            f"claim #{number}, the top agent-parley issue next candidate, "
+            f"with agent-parley issue claim {number}"
+        )
+    if stalled := leads.get("stalled"):
+        steps.append(
+            f"ask for #{stalled['issue']}, held by {stalled['owner']} with "
+            "no progress past the stall interval, with agent-parley issue "
+            f"request {stalled['issue']}"
+        )
+    if steps:
+        listed = "; then ".join(steps)
+        return (
+            f"No held claim can move now.{said} Next work, in order: {listed}."
+        )
+    if any(
+        lifecycle.state(ledger["issues"].get(number) or {})["state"]
+        == lifecycle.READY
+        for number in held or []
+    ):
+        return (
+            f"No held claim can move now.{said} Nothing else needs this lane, "
+            "but ready work stays claimed through verified integration, so "
+            "retire would be refused. End the turn; a change to that work "
+            "wakes this lane again."
+        )
     return (
-        f"Continue authorized work already assigned to you: {actions}. "
-        "Resume the current claim generation; delivery does not mark progress."
+        f"No held claim can move now.{said} Nothing else needs this lane: "
+        "no peer mail asks for an answer, agent-parley issue next has no "
+        "candidate and no peer claim is stalled. Retire with the retire MCP "
+        "tool, per the coordinate skill, instead of answering with a status "
+        "line."
     )
 
 
@@ -2087,6 +2259,7 @@ def _work_offer(
     ledger: dict,
     after: float,
     recipients: list[str],
+    leads: dict | None = None,
 ) -> dict | None:
     """Derives the current offer for one lane from live eligibility inputs.
 
@@ -2099,6 +2272,11 @@ def _work_offer(
     exhausted owner belongs to recovery instead. A lane holding more than one
     claim is told to shed a whole claim first, which needs no split.
 
+    A lane whose held claims all wait on CI, review or a dependency still
+    gets a continue offer, because a lane left without one goes idle while
+    other work waits. Its text names the waiting claims and the next work
+    `_idle_leads` found, or tells the lane to retire when there is none.
+
     Args:
         name: Participant receiving the offer.
         results: Current fit result for every participant.
@@ -2108,6 +2286,8 @@ def _work_offer(
         ledger: Current issue ledger.
         after: Minimum idle duration for a rebalance target.
         recipients: Participants that read as able to act on a share now.
+        leads: Next work for a lane none of whose held claims can move, or
+            None when the lane holds no such set of claims.
 
     Returns:
         The actionable offer, or None when no work is currently eligible.
@@ -2164,12 +2344,12 @@ def _work_offer(
             ),
             "progress": _work_progress(ledger, [loaded]),
         }
-    elif continuation and capacity is not False:
-        selected = continuation[:5]
+    elif (continuation or leads is not None) and capacity is not False:
+        selected = (continuation or held)[:5]
         offer = {
             "kind": "continue",
             "issues": selected,
-            "text": _continue_text(ledger, selected),
+            "text": _continue_text(ledger, continuation, held, leads),
             "progress": _work_progress(ledger, selected),
         }
     elif results[name]["fit"] and not held and (available or busy):
@@ -2281,6 +2461,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             ledger,
             after,
             recipients,
+            _idle_leads(home, directory, manifest, name, ledger, after),
         )
         with lock(directory / f"{name}-work.lock", timeout=1):
             previous = published_work(directory, name)
@@ -4831,6 +5012,9 @@ def _work_backlog(
             owned,
             ledger,
             config,
+        ),
+        _idle_leads(
+            home, directory, manifest, name, ledger, config["stalled_after"]
         ),
     )
     if not current or (

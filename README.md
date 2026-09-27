@@ -15,7 +15,7 @@
   <a href="https://github.com/suneel944/agent-parley/releases"><img src="https://img.shields.io/github/v/release/suneel944/agent-parley?style=flat&color=blue" alt="Release"></a>
   <a href="#install"><img src="https://img.shields.io/badge/runtime_dependencies-0-brightgreen?style=flat" alt="Zero runtime dependencies"></a>
   <a href="#install"><img src="https://img.shields.io/badge/python-3.12%2B-blue?style=flat" alt="Python 3.12+"></a>
-  <a href="https://github.com/suneel944/agent-parley/blob/main/docs/providers.md"><img src="https://img.shields.io/badge/native_CLIs-claude_%2B_codex-orange?style=flat" alt="claude and codex"></a>
+  <a href="https://github.com/suneel944/agent-parley/blob/main/docs/providers.md"><img src="https://img.shields.io/badge/native_CLIs-6-orange?style=flat" alt="six native CLIs"></a>
   <a href="https://github.com/suneel944/agent-parley/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="MIT license"></a>
 </p>
 
