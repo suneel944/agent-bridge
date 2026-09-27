@@ -1594,3 +1594,153 @@ def test_an_expired_completion_refreshes_without_holding_the_poll(
     assert held < 1
     assert calls == ["lane"]
     assert supervision.branch_completion(tmp_path, "lane") == ("MERGED", 1.0)
+
+
+def held(state, **extra):
+    """Builds one ledger record claude holds in its current generation."""
+    return {
+        "owner": "claude",
+        "claim_id": "c",
+        "blocked_by": [],
+        **extra,
+        "execution": {"authorized": True, "state": state, "claim_id": "c"},
+    }
+
+
+def waiting_offer(ledger, leads):
+    """Derives claude's offer from a ledger and the leads read for it."""
+    return supervision._work_offer(
+        "claude",
+        {"claude": {"fit": True, "checks": {}}},
+        {"claude": 0},
+        issues.holders(ledger),
+        [],
+        ledger,
+        600,
+        [],
+        leads,
+    )
+
+
+NO_LEADS = {"mail": [], "next": "", "stalled": None}
+WAITING = {
+    "issues": {
+        "2": held("ready"),
+        "3": held("running", blocked_by=["9"]),
+        "9": {"owner": None, "execution": {"state": "queued"}},
+    }
+}
+
+
+def test_a_lane_whose_claims_all_wait_is_told_what_each_waits_on():
+    offer = waiting_offer(WAITING, NO_LEADS)
+    assert offer["kind"] == "continue"
+    assert offer["issues"] == ["2", "3"]
+    assert "#2 (ready, waits on CI and review" in offer["text"]
+    assert "#3 (waits on dependency #9)" in offer["text"]
+    assert "(resume)" not in offer["text"]
+
+
+def test_a_lane_with_nothing_left_is_told_to_retire():
+    ledger = {
+        "issues": {
+            "3": held("running", blocked_by=["9"]),
+            "9": {"owner": None, "execution": {"state": "queued"}},
+        }
+    }
+    text = waiting_offer(ledger, NO_LEADS)["text"]
+    assert "Nothing else needs this lane" in text
+    assert "retire MCP tool" in text
+
+
+def test_a_lane_holding_ready_work_is_not_told_to_retire():
+    text = waiting_offer(WAITING, NO_LEADS)["text"]
+    assert "Nothing else needs this lane" in text
+    assert "retire MCP tool" not in text
+    assert "retire would be refused" in text
+
+
+def test_a_waiting_lane_answers_peer_mail_before_new_work():
+    leads = {
+        "mail": ["#12 from codex"],
+        "next": "7",
+        "stalled": {"issue": "4", "owner": "codex"},
+    }
+    text = waiting_offer(WAITING, leads)["text"]
+    mail = text.index("#12 from codex")
+    claim = text.index("agent-parley issue claim 7")
+    request = text.index("agent-parley issue request 4")
+    assert mail < claim < request
+    assert "retire" not in text
+
+
+def test_a_waiting_lane_is_pointed_at_the_top_next_candidate():
+    text = waiting_offer(WAITING, {**NO_LEADS, "next": "7"})["text"]
+    assert "claim #7, the top agent-parley issue next candidate" in text
+    assert "retire" not in text
+
+
+def test_a_waiting_lane_is_pointed_at_a_stalled_peer_claim():
+    stalled = {"issue": "4", "owner": "codex"}
+    text = waiting_offer(WAITING, {**NO_LEADS, "stalled": stalled})["text"]
+    assert "ask for #4, held by codex" in text
+    assert "agent-parley issue request 4" in text
+
+
+def test_a_resumable_claim_still_names_the_claims_that_wait():
+    ledger = {"issues": {"2": held("ready"), "5": held("running")}}
+    text = waiting_offer(ledger, None)["text"]
+    assert text.startswith("Continue authorized work")
+    assert "#5 (resume)" in text
+    assert "Waiting, no need to re-check: #2 (ready" in text
+
+
+def test_idle_leads_read_mail_the_next_issue_and_a_stalled_peer(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    actors = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    message = store.call(
+        bridge.home,
+        actors["codex"],
+        "send_message",
+        {
+            "to": ["claude"],
+            "subject": "Question",
+            "body_md": "Which branch holds the fix?",
+            "idempotency_key": "ask",
+            "ack_required": True,
+        },
+    )
+    directory = Path(paired["lanes"]["claude"]).parent
+    manifest = roster.read(directory)
+    ledger = {
+        "issues": {
+            "2": held("ready"),
+            "3": {**held("running"), "owner": "codex"},
+            "7": {"owner": None, "execution": {"authorized": True}},
+        }
+    }
+    leads = supervision._idle_leads(
+        bridge.home, directory, manifest, "claude", ledger, 0
+    )
+    assert leads == {
+        "mail": [f"#{message['id']} from codex"],
+        "next": "7",
+        "stalled": {"issue": "3", "owner": "codex"},
+    }
+    ledger["issues"]["5"] = held("running")
+    assert (
+        supervision._idle_leads(
+            bridge.home, directory, manifest, "claude", ledger, 0
+        )
+        is None
+    )
