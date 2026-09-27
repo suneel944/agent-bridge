@@ -4,25 +4,22 @@ Every reading here is read-only: no lock is taken, no vendor is asked, no model
 call is made and nothing in coordination state moves. The field-by-field
 reference for the same views is in [Operations](operations.md#reading-status).
 
-## Three presence states
+## Four presence states
 
-A lane is reported in one of three states, and they are not interchangeable:
+A lane is reported in one of four states, and they are not interchangeable:
 
 | State | What it means | What it is not |
 | --- | --- | --- |
 | `active` | The lane served a coordination call inside the configured interval. | — |
 | `idle` | The session process is alive, but nothing was served inside the inactivity threshold. | Not a lost lane, and not an error. |
 | `stopped` | The recorded session process is gone. | Not merely a quiet lane. |
+| `unknown` | The session's process identity cannot be trusted. | Never inferred dead from its age; it is left for you to inspect. |
 
 A live lane past the inactivity threshold therefore reads `idle`; only a dead
 process reads `stopped`. The distinction is what lets `problems`, the wake
 path and the fitness check tell a lane that is thinking from a lane that is no
 longer there. Every state only reports: nothing is revoked, no claim is released
 and no ownership moves.
-
-A session whose process identity cannot be trusted reads `unknown` instead of
-any of the three: it is never inferred dead from its age, and it is left for
-you to inspect.
 
 The send result keeps the older operator wording for the dead case. A message
 addressed to a `stopped` lane is summarised as `queued for NAME (unreachable)`,
@@ -57,7 +54,8 @@ owns the client's terminal, so it reads that screen and reports it. The activity
 column then shows `dialog: ` and the dialog's name, the activity record carries
 a `dialog` entry with the last screen lines, a wake addressed to the lane is
 refused with `manual attention required`, and you get one notification with the
-screen text. A recognized usage limit also records the provider capacity as
+screen text when [notifications](operations.md#notifications) are configured.
+A recognized usage limit also records the provider capacity as
 exhausted with the reset instant the screen names, so the lane is parked with
 that reason and restored when the reset passes. A screen that names no reset
 is probed on a doubling backoff capped at one hour; an accepted probe or a
@@ -327,7 +325,14 @@ supervision threshold, a claim past its deadline, a handoff offer with no
 answer, a message awaiting acknowledgement past `--ack-after`, a lane whose
 branch drifted or whose worktree is dirty with no recent activity, a lane over
 its advisory budget, a lane holding more claims than `max_claims_per_lane`, a
-store schema behind the code, and a service that is down.
+store schema behind the code, and a service that is down. It also lists an
+issue `not converging`, an `integration unverified` on the base checkout, a
+`recovery refused`, an `escalated plan revision` and the `plan revisions
+pending`, a `run budget exhausted` or `run budget unmetered`, an `unresolved
+completion`, a project reporting `root missing` or `supervision failing`, and
+a lane needing `wake attention`. Every condition, when it is
+raised and what clears it, is in the
+[Operations](operations.md#triage-with-problems) table.
 
 A quiet lane counts as inactive only while it owes work: it holds a claim that
 has not reported ready or been verified complete, or it is paused, held by a
@@ -340,6 +345,16 @@ to a retired lane`, for example `3 shares to codex superseded: codex retired`.
 The row is informational and offers nothing to run; it clears when those
 shares' acknowledgement deadlines pass, or a day after retirement for a share
 sent without a deadline.
+
+Two readings wake a lane before they could ever reach this list. A lane
+waiting on its own pull request is sent one supervisor message, and so a wake,
+when that pull request's checks finish, a review lands or its merge state
+changes. A claim whose verification keeps failing with no verified improvement
+is asked once to change approach, and only a repeat is escalated to you as
+`not converging`. Both are described under
+[waking](operations.md#availability-reminders-and-waking) in Operations. The
+changes that reach you outside the terminal are listed under
+[Notifications](operations.md#notifications).
 
 Each lane contributes one row per cause, not one row per item: a lane sitting
 on twenty unacknowledged messages is a single row carrying that count and the

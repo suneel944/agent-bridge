@@ -185,6 +185,14 @@ naming the crossed limit, and `--over-budget` selects such lanes, so
 `participant pause --over-budget` is one command. Nothing is stopped, revoked or
 refused: the operator decides.
 
+The one exception is opt-in. `agent-parley budget enforce --tokens N`, with
+`--calls` and `--hours` alike, records a run budget: the same readings summed
+over every lane of the project, which gates what the service starts. Once it is exhausted no wake, work dispatch, capacity
+retry or launch starts, running sessions are asked to checkpoint and stop at
+their next hook event, and only `agent-parley budget resume` clears it. Nothing
+is killed or discarded; [Operations](operations.md#enforcing-a-run-budget) has
+the detail.
+
 ## Reservations are advisory
 
 Conflicting reservations grant nothing and name the blocking owner with that
@@ -363,6 +371,20 @@ its recorded session. Attempts back off from `inactive_after`, doubling up to
 one hour, and stop after three without progress. A retired or paused lane, and
 one stopped by a host restart, is not woken;
 [Operations](operations.md#availability-reminders-and-waking) has the detail.
+
+A lane waiting on its own pull request is woken with one supervisor message when
+its checks finish, a review lands or its merge state changes; see
+[pull-request wakes](operations.md#availability-reminders-and-waking). A claim
+whose verification keeps failing is asked once to change approach and, if it
+still does not converge, escalated to you with the handoff commands, never
+moved; see [non-convergence](operations.md#availability-reminders-and-waking).
+The supervisor's work offers above stay advisory, are checked against the
+lane's fitness first, and are revalidated before a wake delivers them; see
+[supervisor offers](operations.md#availability-reminders-and-waking). A ready
+lane whose issue is listed in the project's recorded unattended policy can be
+integrated with `unattended run`, an operator command, on the same gate and
+approval terms as `participant merge`; see
+[Running unattended](lanes.md#running-unattended).
 
 ## The forge is selectable per project
 
