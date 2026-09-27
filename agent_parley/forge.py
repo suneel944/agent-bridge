@@ -787,12 +787,59 @@ def assign(repo: Path, number: str) -> bool:
     )
 
 
+def assigned(repo: Path, number: str) -> bool:
+    """Reports whether the operator's account already holds an issue.
+
+    Every lane runs under the operator's own account, so an assignment a
+    person set by hand and one a claim added name the same account. The
+    claim reads this before it assigns, so a release removes only an
+    assignment the claim added. The lookup is best effort and read only.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        True only when the GitHub forge reports the signed-in account among
+        the issue's assignees; False for any other forge or any failure.
+    """
+    if _implementation(repo) != "github":
+        return False
+    project = _reachable(repo)
+    if project is None:
+        return False
+    login = _run(["gh", "api", "user", "--jq", ".login"], 15)
+    output = _run(
+        [
+            "gh",
+            "issue",
+            "view",
+            number,
+            "--repo",
+            project,
+            "--json",
+            "assignees",
+        ],
+        15,
+    )
+    if not login or output is None:
+        return False
+    try:
+        names = {
+            str(person["login"]) for person in json.loads(output)["assignees"]
+        }
+    except (ValueError, TypeError, KeyError):
+        return False
+    return login.strip() in names
+
+
 def unassign(repo: Path, number: str) -> bool:
     """Removes the operator's forge account from a released issue.
 
     This is the counterpart of :func:`assign` and carries the same best-effort
-    contract. It removes only the account Agent Parley added, so an assignee
-    a person set by hand is left in place.
+    contract. The claim path calls it only for an assignment its own claim
+    added, as `assigned` read it, so an assignee a person set by hand is left
+    in place.
 
     Args:
         repo: Repository or assigned worktree that selects the forge project.
