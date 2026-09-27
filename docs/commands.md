@@ -155,7 +155,10 @@ commit, the reservations that move on acceptance, and the remaining work.
 Field names are documented in
 [Operations](operations.md#machine-readable-output) and carry the same stability
 promise as the flags. `events export` and `watch --json` stay JSON Lines,
-because each is a stream rather than a snapshot.
+because each is a stream rather than a snapshot. A runtime failure under
+`--json` adds a one-line `error` document on standard output and still exits
+1; an argument the parser rejects exits 2 with usage on standard error. See
+[Operations](operations.md#machine-readable-output) for the error contract.
 
 Without `--json`, `decision list` prints one row per decision — its ID, time,
 sender and subject — with a one-line body preview, and `provider show` and

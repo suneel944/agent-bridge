@@ -1353,12 +1353,33 @@ commands are unchanged, and a refusal still goes to standard error with a
 non-zero exit status, so a script tells a refusal from a document by the exit
 status alone.
 
+With `--json`, a runtime failure also prints one error document on standard
+output, on a single line, and exits 1 as it does without `--json`:
+
+```json
+{"schema": "agent-parley/read/v1", "kind": "error", "generated_at": "2026-09-27T10:00:00Z", "error": {"type": "bridge", "message": "No participant named nobody"}}
+```
+
+`type` is `bridge` for a coordination refusal, `os` for a file or network
+failure, `value` for an invalid value and `timeout` for an external command
+that ran out of time. `message` is the same text the `agent-parley:` line
+prints on standard error, which still appears; no traceback is printed. The
+document goes to standard output so `agent-parley ... --json | jq` reads a
+failure the same way it reads a result. A command that already wrote part of
+its output before failing is not rolled back: the error document follows on
+its own line, so a script checks the exit status first and reads the last
+line on failure. `watch --json` and `events export` end the same way, and the
+single-line document keeps their JSON Lines stream valid. Without `--json`
+nothing changes. An invalid flag or argument is rejected by the argument
+parser before any command runs: it prints usage on standard error, nothing on
+standard output, and exits 2, with or without `--json`.
+
 Every document carries the same envelope:
 
 | Field | Meaning |
 | --- | --- |
 | `schema` | `agent-parley/read/v1`, the version of this contract. |
-| `kind` | The command reported: `status`, `top`, `metrics`, `version`, `issues`, `issue`, `issue_next`, `issue_match`, `participants`, `participant`, `history`, `mail_thread`, `mail_show`, `mail_search`, `mail_list`, `mail_pending`, `mail_cancel`, `decide`, `decision_list`, `report_show`, `report_review`, `plan`, `plan_diff`, `approval`, `verify`, `init`, `branch`, `forge`, `deadlines`, `budget`, `state`, `setup`, `up`, `down`, `run`, `say`, `approve`, `reject`, `problems`, `problems_ack`, `doctor`, `notify`, `gc`, `resources`, `providers`, `provider`, `credentials` or `credentials_show`. |
+| `kind` | The command reported: `status`, `top`, `metrics`, `version`, `issues`, `issue`, `issue_next`, `issue_match`, `participants`, `participant`, `history`, `mail_thread`, `mail_show`, `mail_search`, `mail_list`, `mail_pending`, `mail_cancel`, `decide`, `decision_list`, `report_show`, `report_review`, `plan`, `plan_diff`, `approval`, `verify`, `init`, `branch`, `forge`, `deadlines`, `budget`, `state`, `setup`, `up`, `down`, `run`, `say`, `approve`, `reject`, `problems`, `problems_ack`, `doctor`, `notify`, `gc`, `resources`, `providers`, `provider`, `credentials`, `credentials_show` or `error`. |
 | `generated_at` | RFC 3339 UTC instant the snapshot was taken. |
 
 Repeated rows are arrays rather than objects keyed by name, so a reader pages

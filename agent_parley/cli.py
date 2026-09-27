@@ -5507,7 +5507,37 @@ def main() -> int:
         subprocess.TimeoutExpired,
     ) as exc:
         print(f"agent-parley: {exc}", file=sys.stderr)
+        if getattr(args, "json", False):
+            print(_error_document(exc))
         return 1
+
+
+def _error_document(exc: Exception) -> str:
+    """Frames one runtime failure as a single-line JSON error document.
+
+    The document carries the shared snapshot envelope with ``kind`` set to
+    ``error``, a stable ``type`` for the exception class and the same
+    ``message`` the human line prints. It fits on one line so it stays a
+    separate record after any partial output a command already wrote.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The error document as compact JSON text, without a trailing newline.
+    """
+    if isinstance(exc, BridgeError):
+        kind = "bridge"
+    elif isinstance(exc, subprocess.TimeoutExpired):
+        kind = "timeout"
+    elif isinstance(exc, OSError):
+        kind = "os"
+    else:
+        kind = "value"
+    return json.dumps(
+        views.document("error", {"error": {"type": kind, "message": str(exc)}}),
+        ensure_ascii=False,
+    )
 
 
 if __name__ == "__main__":
