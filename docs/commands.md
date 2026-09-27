@@ -65,6 +65,9 @@ on standard output and export to a file.
 | `issue unblock NUMBER --on NUMBER` | Remove a recorded dependency. |
 | `plan apply PATH` | Record a TOML work order as advisory dependencies; `plan diff PATH` previews it. |
 | `plan show` | Print the applied plan as a tree with owners; `--json` prints it for scripts. |
+| `plan propose --base N --add I:B --remove I:B --reason TEXT` | File a revision of the applied plan's edges against plan version `N`: `--add` records a discovered prerequisite, `--remove` drops an obsolete edge, each repeatable, with up to five `--evidence TEXT`. A lane's revision applies at once only inside the plan's `[revisions]` envelope; otherwise it is kept, changing nothing, with the `plan approve` command that applies it. |
+| `plan proposals` | Print the current plan version, the envelope, the automatic revisions used and every retained proposal with its status. |
+| `plan approve ID` | As `operator`, validate the whole resulting graph and apply one open revision, authorizing any prerequisite it adds; a revision whose base version is no longer current is recorded as stale. `plan reject ID --reason TEXT` refuses it. |
 | `gc` (alias `reclaim`) | Report the lanes and lane-made worktrees a reclaim would remove and keep, with each worktree's size; `--dry-run` is that default, `--apply` removes them, and `--apply --force` also removes lane-made worktrees kept for uncommitted changes, unpushed commits or a recent change after writing a recovery checkpoint of each; a lane's own worktree is never forced. |
 | `notify test` | Send one test message on each configured transport. |
 | `doctor` | Report launcher, plugin, store and running-service versions and their fit; non-zero exit on a mismatch. |
@@ -143,12 +146,14 @@ without parsing a table: `status`, `top`, `version`, `doctor`, `problems`,
 `participant show`, `mail show`, `mail thread`, `mail search`, `mail list`,
 `mail pending`, `decision list`, `report show`, `history issue`,
 `history participant`, `history claim`, `plan diff`, `plan show`,
+`plan proposals`,
 `approval show`, `verify show`, `init show`, `branch show`, `forge show`,
 `deadlines show`, `budget show`, `resources show`, `state show`,
 `provider list`, `provider show`, `credentials list` and `credentials show`.
 The commands that change something print their outcome the same way with
 `--json`: `up`, `down`, `setup`, `run`, `say`, `decide`, `mail send`,
 `mail cancel`, `approve`, `reject`, `report review`, `problems ack`,
+`plan propose`, `plan approve`, `plan reject`,
 `notify test` and `gc`. `top --json` prints one frame and exits;
 `metrics --json` prints the same values as its Prometheus text.
 The document carries the identifiers the table abbreviates — offer, message and

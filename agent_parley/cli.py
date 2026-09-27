@@ -4175,6 +4175,35 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             )
         if action != "apply":
             command.add_argument("--json", action="store_true", help=JSON_HELP)
+    revising = {
+        "propose": "File a revision that adds or removes plan edges.",
+        "approve": "Approve and apply one open revision as operator.",
+        "reject": "Reject one open revision as operator.",
+        "proposals": "List the plan version, envelope and revisions.",
+    }
+    for action, summary in revising.items():
+        command = steps.add_parser(action, help=summary)
+        command.add_argument("--repo", type=Path, default=Path.cwd())
+        command.add_argument("--json", action="store_true", help=JSON_HELP)
+        if action in ("approve", "reject"):
+            command.add_argument("proposal_id")
+            command.add_argument("--reason", default="")
+        elif action == "propose":
+            command.add_argument(
+                "--base",
+                type=int,
+                required=True,
+                help="Plan version read from `plan proposals`.",
+            )
+            for edge in ("add", "remove"):
+                command.add_argument(
+                    f"--{edge}",
+                    action="append",
+                    default=[],
+                    metavar="ISSUE:BLOCKER",
+                )
+            command.add_argument("--reason", required=True)
+            command.add_argument("--evidence", action="append", default=[])
     mail = commands.add_parser(
         "mail",
         help=(
@@ -5180,6 +5209,34 @@ def main() -> int:
                 else notification_report(probed)
             )
             return 0 if all(item["ok"] for item in probed["results"]) else 1
+        elif args.command == "plan" and args.action in (
+            "propose",
+            "approve",
+            "reject",
+            "proposals",
+        ):
+            revised = bridge.plan_revision(
+                args.repo.resolve(),
+                args.action,
+                getattr(args, "proposal_id", ""),
+                base=getattr(args, "base", 0),
+                add=getattr(args, "add", None),
+                remove=getattr(args, "remove", None),
+                reason=getattr(args, "reason", ""),
+                evidence=getattr(args, "evidence", None),
+            )
+            listing = args.action == "proposals"
+            print(
+                views.render(
+                    "plan_proposals" if listing else "plan_revision", revised
+                )
+                if args.json
+                else plan.render_revisions(revised)
+                if listing
+                else plan.render_proposal(revised)
+            )
+            if args.action == "approve" and revised["status"] != "accepted":
+                return 1
         elif args.command == "plan":
             applied = bridge.work_plan(
                 args.repo.resolve(), args.action, getattr(args, "path", None)

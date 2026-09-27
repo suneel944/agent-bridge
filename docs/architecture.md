@@ -62,7 +62,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `watch` | Read-only stream of one lane's coordination events, tailed from the ledger, reports, store and hook event log |
 | `retries` | Idempotency key contracts shared by the store and the issue ledger |
 | `waits` | Bounded waits for a lane's next mail, served beside the store and woken by a delivery rather than by polling from a turn |
-| `plan` | Versioned work-order plans read from TOML and recorded as dependencies |
+| `plan` | Versioned work-order plans read from TOML and recorded as dependencies, and the proposals that revise their edges within the operator's envelope |
 | `protocol` | Wire-protocol contract between launcher, plugin, hooks and service |
 | `records` | Best-effort reading of native CLI session records on disk |
 | `completion` | Shell completion scripts generated from the live command parser, and the lock-free candidate lookup they call back into |
@@ -974,6 +974,49 @@ instant it is recorded. Applying adds edges and never removes one, so an edge re
 after the apply is reported as entered by hand and a narrowed plan shows its
 dropped edges as unlisted until `issue unblock` removes them. Groups are advice
 a later offer or integration path may read; this layer only records them.
+
+Changing a plan's edges after it is applied is a separate revision operation,
+because deleting an edge is its own authority and consistency decision and
+reapplying a narrower file never removes one. A proposal names the plan version
+it was written against (the `revision` counter in `plan.json`, raised by every
+apply and every accepted revision), the edges to add or remove, a reason of up
+to 2000 characters and at most five evidence items of 500 characters. Its
+identifier is the digest of the base version, the proposer and the changes, so
+a repeated proposal returns the recorded one. A proposal against any other
+version is refused as stale; an open one the plan has since moved past is
+recorded as stale when approved and must be proposed again.
+
+The optional `[revisions]` table of the plan file is the operator's envelope:
+`scope` lists the issues whose edges lanes may revise unattended, `max_changes`
+bounds the edges one automatic revision changes (default 1, at most 10) and
+`max_revisions` bounds the automatic revisions under one applied plan (default
+1, at most 100). A plan without the table has no envelope. A lane's proposal is
+applied at once only when both ends of every edge are in scope, every issue an
+added edge names is already authorized, no waiting issue is held by another
+lane, no removed edge waits on work reported ready but not yet verified, and
+both limits hold. Anything else is kept as `pending` with every reason and the
+`plan approve ID` command; it writes nothing to the ledger, so unrelated work
+stays eligible. The operator's own proposal and an operator approval apply
+directly and authorize the issues an added edge names, which is the only way a
+new prerequisite becomes claimable through a revision.
+
+Every application validates the whole resulting graph, recorded edges
+included, and refuses a removed edge that is not recorded, an added edge that
+already is or waits on complete work, a waiting list past ten issues, and any
+cycle. The ledger is written once, under its lock, together with the
+proposal's identifier, and the plan history then records a new version
+attributed to the proposer with the edges it added and removed; a proposal
+whose ledger write landed before a restart is recorded as accepted on replay
+rather than applied twice. A revision changes only `blocked_by`: it never
+claims, releases, completes or verifies work and never changes an owner or a
+claim generation. Each accepted revision counts against the edges it touched;
+a lane's proposal touching an edge already revised twice under the current plan
+version is `escalated` to the operator instead of applied, at most twenty
+proposals may await the operator, and the fifty most recent proposals are
+retained with their proposer, evidence, decision and note. Applying a plan file
+starts a new plan version and resets the automatic count and the contradiction
+record. Existing `plan.json` files need no migration: the proposal table and
+counters are added the first time they are used.
 
 A writing call can commit and still fail to answer, so the caller retries what
 already happened. An idempotency key makes the two calls one. The first call

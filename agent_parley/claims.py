@@ -875,3 +875,66 @@ class ClaimsMixin(ReportsMixin):
         if action == "apply":
             return plan.apply(directory, path)
         return plan.diff(directory, path)
+
+    def plan_revision(
+        self,
+        repo: Path,
+        action: str,
+        identity: str = "",
+        *,
+        base: int = 0,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+        reason: str = "",
+        evidence: list[str] | None = None,
+    ) -> dict:
+        """Proposes, decides or lists revisions of the applied plan's edges.
+
+        A proposal run from an assigned worktree is that lane's; one run from
+        the project base checkout, outside every lane, is the operator's.
+        Only the operator approves or rejects, so a lane can never widen the
+        authority its own proposal needs.
+
+        Args:
+            repo: Assigned worktree, or the base checkout for the operator.
+            action: Propose, approve, reject, or proposals.
+            identity: Proposal identifier for approve and reject.
+            base: Plan version a proposal was written against.
+            add: `ISSUE:BLOCKER` edges a proposal records.
+            remove: `ISSUE:BLOCKER` edges a proposal drops.
+            reason: Proposal rationale, or the operator's decision note.
+            evidence: Bounded observations supporting a proposal.
+
+        Returns:
+            The proposal record, or the listing for proposals.
+
+        Raises:
+            BridgeError: If the caller lacks the authority the action needs
+                or the plan layer refuses the proposal.
+        """
+        from agent_parley.cli import git, plan, roster
+
+        _, directory = self.project(repo)
+        if action == "proposals":
+            return plan.revisions(directory)
+        data = roster.read(directory)
+        lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
+        operator = lane == Path(data["root"]).resolve() and not (
+            roster.caller_lane(data)
+        )
+        if action == "propose":
+            return plan.propose(
+                directory,
+                roster.OPERATOR if operator else roster.resolve(data, lane),
+                base,
+                add or [],
+                remove or [],
+                reason,
+                evidence or [],
+            )
+        if not operator:
+            raise BridgeError(
+                "Only the operator approves or rejects a plan revision, from "
+                "the project base checkout."
+            )
+        return plan.decide(directory, identity, action == "approve", reason)

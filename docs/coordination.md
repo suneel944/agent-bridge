@@ -302,6 +302,24 @@ no claim, no assignment, no gate. `plan diff` previews the edges first,
 apply is versioned by the file's digest, so an edge added by hand afterwards is
 reported as exactly that.
 
+A lane that discovers a missing prerequisite or an obsolete edge files a
+revision from its worktree: `agent-parley plan propose --base N --add 43:42
+--reason TEXT --evidence TEXT`, with `N` read from `plan proposals`. It applies
+unattended only inside the envelope the plan's `[revisions]` table declares:
+
+```toml
+[revisions]
+scope = ["17", "42", "43", "44"]
+max_changes = 2
+max_revisions = 5
+```
+
+Anything outside it, including a prerequisite no plan has authorized yet or an
+edge on another lane's claim, waits for `agent-parley plan approve ID` or
+`plan reject ID --reason TEXT` and changes nothing meanwhile. A revision only
+moves edges; it never claims, completes or verifies work, and an edge revised
+back and forth is escalated to the operator rather than flipped again.
+
 ## A peer can record a verdict, and it is still a claim
 
 A report is the reporting lane's own account. `agent-parley report review ID
