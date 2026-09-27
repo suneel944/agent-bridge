@@ -316,7 +316,7 @@ def test_a_deleted_ledger_reads_as_exhausted_not_as_none(bridge, repo, paired):
     assert "missing" in budgets.admit(directory, manifest, "claude")
 
 
-def test_reset_on_an_unreadable_ledger_offsets_the_use_read_so_far(
+def test_reset_on_an_unreadable_ledger_starts_from_the_present(
     bridge, repo, paired
 ):
     serve(bridge, actors(bridge, paired)["claude"], 3)
@@ -324,7 +324,8 @@ def test_reset_on_an_unreadable_ledger_offsets_the_use_read_so_far(
     (directory / budgets.LEDGER).write_text("{not json")
     budgets.resume(bridge.home, directory, manifest, reset=True)
     ledger = json.loads((directory / budgets.LEDGER).read_text())
-    assert ledger["offset"]["calls"] == 3
+    assert ledger["calls"]["total"] == 0
+    assert ledger["reset"] is True
     reading = budgets.account(bridge.home, directory, manifest)
     assert reading["used"]["calls"] == 0
     assert reading["exhausted"] is None
@@ -578,6 +579,96 @@ def test_every_transcript_is_read_to_its_end_from_a_durable_offset(
         budgets.account(bridge.home, directory, manifest)["used"]["tokens"]
         == 178
     )
+
+
+def test_a_limit_added_later_never_counts_earlier_tokens(bridge, repo, paired):
+    enforced(bridge, repo, calls=1_000)
+    live = transcript(Path(paired["lanes"]["claude"]), 900, "live.jsonl")
+    directory, manifest = enforced(bridge, repo, tokens=10_000)
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"] == 0
+    )
+    append(live, 7, "msg-after")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"] == 7
+    )
+
+
+def test_a_limit_added_later_never_counts_earlier_hours(bridge, repo, paired):
+    directory, _ = enforced(bridge, repo, calls=1_000)
+    live_session(directory, "claude", session_started=time.time() - 3600)
+    directory, manifest = enforced(bridge, repo, hours=100)
+    reading = budgets.account(bridge.home, directory, manifest)
+    assert reading["used"]["hours"] < 0.01
+
+
+def test_a_reset_after_a_lost_ledger_never_rereads_history(
+    bridge, repo, paired
+):
+    big = transcript(Path(paired["lanes"]["claude"]), 1, "big.jsonl")
+    with big.open("a") as handle:
+        for number in range(2 * records.MAX_READ // 100):
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "id": f"msg-{number}",
+                            "usage": {"input_tokens": 1},
+                            "pad": "x" * 40,
+                        },
+                    }
+                )
+                + "\n"
+            )
+    directory, manifest = enforced(bridge, repo, tokens=10**9)
+    (directory / budgets.LEDGER).unlink()
+    assert budgets.account(bridge.home, directory, manifest)["exhausted"]
+    budgets.resume(bridge.home, directory, manifest, reset=True)
+    for _ in range(3):
+        reading = budgets.account(bridge.home, directory, manifest)
+        assert reading["used"]["tokens"] == 0
+        assert reading["exhausted"] is None
+    append(big, 5, "msg-after")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"] == 5
+    )
+
+
+def test_a_hand_started_session_never_inherits_a_run_start(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    write_json(directory / "claude-identity.json", {"name": "claude"})
+    live_session(
+        directory,
+        "claude",
+        session_id="launched",
+        session_pid=2**22 + 1,
+        session_ticks=1,
+        session_started=time.time() - 7200,
+    )
+    _, manifest = enforced(bridge, repo, hours=100)
+    checkpoint(
+        bridge.home,
+        directory,
+        "claude",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "by-hand",
+            "cwd": str(lane),
+        },
+        session_process=process.ServerProcess(
+            os.getpid(), process.start_ticks(os.getpid())
+        ),
+    )
+    state = checkpoints.activity(directory, "claude")
+    assert state["session_pid"] == os.getpid()
+    assert "session_started" not in state
+    reading = budgets.account(bridge.home, directory, manifest)
+    assert reading["used"]["hours"] == 0
+    assert reading["missing"] == ["claude"]
 
 
 def test_calls_served_before_enforcement_never_count(bridge, repo, paired):

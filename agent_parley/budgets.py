@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -322,26 +323,80 @@ def _fresh(cursor: int = 0, started: float = 0.0) -> dict:
     }
 
 
-def start(home: Path, directory: Path, root: str) -> None:
-    """Writes the initial run ledger unless one is already recorded.
+def _baseline(
+    home: Path, directory: Path, manifest: dict, ledger: dict, fields: set
+) -> None:
+    """Starts counting the given fields at the present.
 
-    Called before a run budget is first recorded, so a ledger that is
-    missing while a run budget is enforced always means it was lost. The
-    ledger starts at the project's latest served call and at the present
-    instant, so calls and transcripts from before enforcement never count.
+    The call cursor moves to the project's latest served call. Every
+    transcript a lane's client already kept is recorded at its current end,
+    keeping the tokens counted so far, so a transcript that keeps growing
+    counts only what it gains from now on. The hours live sessions have
+    already run are folded in and offset.
 
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
-        root: Canonical project key registered with the store.
+        manifest: Project manifest.
+        ledger: Run ledger to update in place.
+        fields: Budget fields whose counting starts now.
     """
+    if "calls" in fields:
+        with contextlib.suppress(sqlite3.Error):
+            ledger["calls"]["cursor"] = store.served_since(
+                home, manifest["root"], 0
+            )[1]
+    if "tokens" in fields:
+        for name, participant in manifest["participants"].items():
+            sources = records.lane_sources(home, participant, {}, math.inf)
+            for source in sources or []:
+                key = f"{name}:{source['key']}"
+                ledger["tokens"].setdefault(key, 0)
+                ledger["cursors"][key] = {
+                    "offset": source["offset"],
+                    "last": "",
+                }
+    if "hours" in fields:
+        kept = {key: ledger[key] for key in ("missing", "reserved")}
+        _fold(home, directory, manifest, ledger, {"hours": 0})
+        ledger.update(kept)
+        ledger["offset"]["hours"] = _raw(ledger)["hours"]
+
+
+def _begin(home: Path, directory: Path, manifest: dict) -> dict:
+    """Returns a run ledger that counts only use from the present on."""
+    ledger = _fresh(0, time.time())
+    _baseline(home, directory, manifest, ledger, set(roster.BUDGET_FIELDS))
+    return ledger
+
+
+def start(
+    home: Path, directory: Path, manifest: dict, before: dict | None = None
+) -> None:
+    """Starts counting each newly enforced run limit at the present.
+
+    Called before a run budget is recorded, so a ledger that is missing
+    while a run budget is enforced always means it was lost. The first
+    limit writes a ledger that begins at the present; a limit added to a
+    run that already has one moves only that field's counting to the
+    present, since its use was not read while it was advisory. Either way
+    use from before enforcement never counts.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Project manifest naming the root, lanes and limits.
+        before: The limits enforced until now.
+    """
+    added = set(enforced(manifest)) - set(before or {})
     with lock(directory / "run-budget.lock", timeout=LOCK_SECONDS):
         if not (directory / LEDGER).exists():
-            try:
-                cursor = store.served_since(home, root, 0)[1]
-            except sqlite3.Error:
-                cursor = 0
-            write_json(directory / LEDGER, _fresh(cursor, time.time()))
+            write_json(directory / LEDGER, _begin(home, directory, manifest))
+            return
+        ledger, cause = _load(directory, manifest)
+        if added and not cause:
+            _baseline(home, directory, manifest, ledger, added)
+            write_json(directory / LEDGER, ledger)
 
 
 def _sound(data: object) -> bool:
@@ -681,9 +736,10 @@ def resume(
 ) -> str:
     """Clears a recorded run exhaustion on an operator's authority.
 
-    Current readings are folded in before anything is decided, so a reset
-    offsets the use recorded so far rather than whatever the ledger held,
-    and a resume is refused on the run's present standing.
+    Current readings are folded in before anything is decided, and a resume
+    is refused on the run's present standing. A reset begins a new ledger at
+    the present, as enforcement does, so no earlier call or transcript use
+    is read again, and offsets the hours live sessions have already run.
 
     Args:
         home: Private bridge state root.
@@ -710,6 +766,9 @@ def resume(
             )
         if cause:
             _set_aside(directory)
+        prior = ledger["exhausted"] or cause
+        if reset:
+            ledger = _begin(home, directory, manifest)
         _fold(home, directory, manifest, ledger, wanted)
         if reset:
             ledger["offset"] = _raw(ledger)
@@ -721,7 +780,6 @@ def resume(
                 + " limit. Raise it with agent-parley budget enforce, or "
                 "pass --reset to start a new accounting period."
             )
-        prior = ledger["exhausted"] or cause
         ledger.update(exhausted=None, resumed_at=time.time(), reset=reset)
         write_json(path, ledger)
     return (

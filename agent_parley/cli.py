@@ -2376,6 +2376,7 @@ class Bridge(
             state.update(activity="stopped", updated=time.time())
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
+            state.pop("session_started", None)
             state.pop("launcher_pid", None)
             state.pop("launcher_ticks", None)
             write_json(path, state)
