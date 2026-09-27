@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import checkpoints, cli, terminal
+from agent_parley import checkpoints, cli, lanes, roster, store, terminal
 from agent_parley.state import BridgeError, lock, write_json
 
 CONFIRMED = "12345678-abcd-1234-abcd-123456789abc"
@@ -98,6 +98,27 @@ def test_a_confirmed_native_session_replaces_the_resumable_identity(
         },
     )
     assert state(lane)["resumable_session"] == REPLACEMENT
+
+
+def test_a_launch_moves_a_lane_sampled_stopped_to_starting_at_once(
+    bridge, repo, lane, monkeypatch
+):
+    root = roster.read(lane)["root"]
+    with store.connect(bridge.home, write=True) as db:
+        lanes.transition(
+            db, root, "claude", lanes.STOPPED, evidence="liveness: stopped"
+        )
+    seen = []
+
+    def client(*args, **kwargs):
+        with store.connect(bridge.home) as db:
+            seen.append(lanes.read(db, root, "claude"))
+        return 0
+
+    monkeypatch.setattr(terminal, "run", client)
+    assert bridge.launch("claude", repo, terminal.PROMPT, resume=True) == 0
+    assert seen[0]["state"] == lanes.STARTING
+    assert seen[0]["evidence"].startswith("launch:")
 
 
 def test_a_lane_that_never_reported_a_session_refuses_to_resume(
