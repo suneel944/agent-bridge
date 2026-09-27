@@ -1680,7 +1680,10 @@ launch can take longer than the default.
 Releasing a claim with waiting peers creates a visible handoff reminder.
 The service also checks each claimed issue on the forge and reminds the holder
 when the issue closed inside the current claim, recording the pull request that
-closed it, its head branch and merge commit, whichever branch it came from. A
+closed it, its head branch and merge commit, whichever branch it came from.
+GitHub links a closing pull request only when it targets the default branch;
+for an issue closed by hand after a merge into another base, the issue timeline
+supplies the merged pull request whose body closes the issue by keyword. A
 closing pull request from another lane's branch is named in the reminder, and
 so is one from a per-issue branch that exactly one other lane's worktree
 checked out. Every lane pushes as the same forge account, so the pull request
