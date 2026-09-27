@@ -247,6 +247,32 @@ def test_a_delivered_claim_does_not_count_toward_the_cap(bridge, paired):
         bridge.issue(lane, "claim", "10")
 
 
+def test_a_claim_on_a_closed_issue_does_not_count_toward_the_cap(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    for number in ("7", "8"):
+        bridge.issue(lane, "claim", number)
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "9")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        for number in ("7", "8"):
+            ledger["issues"][number]["handoff_prompt"] = {
+                "trigger": issues.ENDED,
+                "holder": "claude",
+                "created": time.time(),
+                "responded_at": time.time(),
+            }
+        write_json(directory / "issues.json", ledger)
+    assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
+    assert bridge.issue(lane, "claim", "10")["owner"] == "claude"
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "11")
+
+
 def test_a_wake_waits_out_a_brief_setup_lock_holder(bridge, paired):
     registered(bridge, paired)
     directory = Path(paired["lanes"]["claude"]).parent

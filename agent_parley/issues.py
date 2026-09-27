@@ -198,6 +198,29 @@ def ended(record: dict) -> bool:
     )
 
 
+def closed(record: dict) -> bool:
+    """Reports whether a claim's issue closed inside its current generation.
+
+    Unlike `ended`, the reading holds after the holder answers the completion
+    reminder. Answering it reports the finished work; it does not reopen the
+    issue, so the claim stays work that already ended on the forge.
+
+    Args:
+        record: Published ledger record for one issue, or an empty mapping.
+
+    Returns:
+        Whether the claim is `ended`, or supervision observed its issue or
+        pull request end after the current owner's generation began.
+    """
+    prompt = record.get("handoff_prompt") or {}
+    return ended(record) or (
+        prompt.get("trigger") == ENDED
+        and bool(record.get("owner"))
+        and prompt.get("holder") == record.get("owner")
+        and float(prompt.get("created", 0) or 0) >= claimed_since(record)
+    )
+
+
 def unresolved_completion(record: dict) -> dict:
     """Derives the unresolved-completion escalation a claim reads as.
 
@@ -903,7 +926,9 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
     with how long each has gone without progress, so the lane can see which
     one to release or offer. A delivered claim does not count: it waits on
     verification and integration, not on its holder, and counting it would
-    stop every lane once nobody integrates.
+    stop every lane once nobody integrates. A claim whose issue closed does
+    not count either, as `closed` reads it: its work already ended on the
+    forge, so the lane has nothing left to do on it.
 
     Args:
         ledger: Issue records keyed by number, read under the ledger lock.
@@ -917,7 +942,9 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
         (
             number
             for number, item in ledger.items()
-            if item["owner"] == agent and not delivered(item)
+            if item["owner"] == agent
+            and not delivered(item)
+            and not closed(item)
         ),
         key=int,
     )
