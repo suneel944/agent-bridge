@@ -110,6 +110,8 @@ on standard output and export to a file.
 | `deadlines set` | Set `--claim`, `--offer`, `--ack` windows and `--attempts`. |
 | `budget show` | Show the advisory token, call and hour limits every lane of this project inherits. |
 | `budget set` | Set `--tokens`, `--calls` and `--hours` project defaults; a budget informs and does not gate. |
+| `budget enforce` | Show or set the opt-in run budget: aggregate `--tokens`, `--calls` and `--hours` across every lane; `0` removes one. Once used up, no wake, dispatch, retry or launch starts. A usage limit, not a billing cap. For the operator; refused from a lane's environment by accident guard, not enforcement. |
+| `budget resume` | Clear an exhausted run budget; refused while still over a limit. `--reset` starts a new accounting period. For the operator; refused from a lane's environment by accident guard, not enforcement. |
 | `verify show` | Show the project's configured pre-merge command. |
 | `verify set COMMAND` | Set that command; an empty string removes it. |
 | `unattended show` | Show the unattended integration policy, or that integration is operator-only. |

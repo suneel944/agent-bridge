@@ -229,12 +229,14 @@ reported.
             BridgeError: If the provider, account, or lane cannot be used, or
                 the participant already has a launcher, or the repository
                 lies on a mounted Windows drive under WSL, or the lane's
-                checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`.
+                checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`, or the
+                project's enforced run budget is exhausted.
         """
         from agent_parley.cli import (
             COPILOT_EVENTS,
             LAUNCH_LOCK_SECONDS,
             amp,
+            budgets,
             configure_copilot,
             delivery,
             dialogs,
@@ -254,6 +256,12 @@ reported.
 
         process.check_repository_host(repo)
         data = self.add_participant(repo, agent, provider, credential)
+        stopped = budgets.halted(self.project(repo, create=False)[1], data)
+        if stopped:
+            raise BridgeError(
+                f"The run budget is exhausted ({stopped['cause']}), so no "
+                f"lane is launched or resumed; {budgets.RESUME}."
+            )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
         account = roster.launch_environment(

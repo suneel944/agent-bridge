@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TypeGuard, cast
 
 from agent_parley import (
+    budgets,
     convergence,
     dialogs,
     forge,
@@ -32,7 +33,7 @@ from agent_parley import (
     store,
     terminal,
 )
-from agent_parley.state import BridgeError, lock, write_json
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 DEFAULTS = {
     "interval": 30,
@@ -4701,6 +4702,7 @@ def _poll(home: Path, directory: Path) -> None:
     }
     stage("lane states", settle_lanes, home, manifest, config, observations)
     stage("lane accounting", account_lanes, home, directory, manifest)
+    stage("run budget", budgets.account, home, directory, manifest)
     observations = recorded_observations(home, manifest, observations)
     stage("presence", _publish_presence, home, manifest, observations)
     with contextlib.suppress(BridgeError, sqlite3.Error):
@@ -5669,6 +5671,14 @@ def wake(
     exhausted lane is never woken this way, because only a later success, a
     reliable reset or a recorded probe can clear exhaustion.
 
+    A project that enforces a run budget admits each attempt through
+    `budgets.admit` last, inside the wake lock, so a wake, a work dispatch
+    and a capacity retry alike are refused once the run is exhausted or the
+    lane's use cannot be metered. A refusal spends no attempt and parks the
+    lane under that cause, even before its first attempt, so the refusal is
+    recorded rather than silent; a ledger lock that stays busy parks the
+    lane the same way instead of failing the wake.
+
     The launcher still owns native authentication, trust and approval prompts.
     A resumed process uses a real terminal, not an unattended permission mode.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
@@ -5840,6 +5850,16 @@ def wake(
         if time.time() < due:
             if record.get("result"):
                 _park_wake(home, directory, root, name, record, "", due)
+            return
+        try:
+            refused = budgets.admit(directory, manifest, name)
+        except LockBusy:
+            refused = (
+                "run budget: the ledger stayed busy, so admission waits for "
+                "the next poll"
+            )
+        if refused:
+            _park_wake(home, directory, root, name, record, refused, due)
             return
         result = WAKE_ATTENTION
         selected = _select_work_prompt(home, directory, name, work_offer)

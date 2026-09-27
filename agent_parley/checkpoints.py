@@ -2682,7 +2682,10 @@ def checkpoint(
                     parts.extend(mailed)
                     parts.append(footer)
                     text = "\n\n".join(parts)
-                    if event == "Stop" and not (issue_notice or work_notice):
+                    if event == "Stop" and (
+                        not (issue_notice or work_notice)
+                        or budgets.RUN in standing["crossed"]
+                    ):
                         output = {}
                     elif event == "Stop":
                         output = {"decision": "block", "reason": text}

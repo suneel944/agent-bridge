@@ -1304,6 +1304,27 @@ def budget_changes(args: argparse.Namespace) -> dict | None:
     return changes
 
 
+def operator_only(action: str) -> None:
+    """Refuses an operator-authority command run from inside a lane.
+
+    Every launched lane carries its registration token in its environment
+    and the operator's own shell does not, so the check stops a lane from
+    raising, removing or clearing its run budget by accident. It is not an
+    authority boundary: a process that drops the variable passes it.
+
+    Args:
+        action: Command named in the refusal.
+
+    Raises:
+        BridgeError: If the environment belongs to a launched lane.
+    """
+    if os.environ.get("AGENT_PARLEY_TOKEN"):
+        raise BridgeError(
+            f"{action} needs operator authority and is refused from a lane; "
+            "run it from the operator's own shell."
+        )
+
+
 def selected(args: argparse.Namespace) -> bool:
     """Reports whether the command line carries any lane selector."""
     return bool(
@@ -4609,6 +4630,34 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ceiling_set = ceiling_actions.add_parser("set")
     ceiling_set.add_argument("--repo", type=Path, default=Path.cwd())
     add_budget_flags(ceiling_set)
+    ceiling_enforce = ceiling_actions.add_parser(
+        "enforce",
+        help=(
+            "Show or set the opt-in run budget: aggregate limits across every "
+            "lane that stop new wakes, dispatch, retries and launches."
+        ),
+    )
+    ceiling_enforce.add_argument("--repo", type=Path, default=Path.cwd())
+    for field, kind in (("tokens", int), ("calls", int), ("hours", float)):
+        ceiling_enforce.add_argument(
+            f"--{field}",
+            type=kind,
+            metavar="N",
+            help=(
+                f"Enforced limit on the {field} every lane of the run "
+                "consumes together; 0 removes it."
+            ),
+        )
+    ceiling_resume = ceiling_actions.add_parser(
+        "resume",
+        help="Clear an exhausted run budget so the service dispatches again.",
+    )
+    ceiling_resume.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_resume.add_argument(
+        "--reset",
+        action="store_true",
+        help="Start a new accounting period; use so far stops counting.",
+    )
     shared = commands.add_parser(
         "resources",
         help="Show or declare the named resources lanes may reserve.",
@@ -5446,6 +5495,22 @@ def main() -> int:
                     views.render(
                         "budget",
                         {"root": data["root"], "budget": data["budget"]},
+                    )
+                )
+            elif args.action == "enforce":
+                changes = budget_changes(args)
+                if changes is not None:
+                    operator_only("budget enforce")
+                print(bridge.enforce(repository, changes))
+            elif args.action == "resume":
+                operator_only("budget resume")
+                _, directory = bridge.project(repository, create=False)
+                print(
+                    budgets.resume(
+                        bridge.home,
+                        directory,
+                        roster.read(directory),
+                        args.reset,
                     )
                 )
             else:

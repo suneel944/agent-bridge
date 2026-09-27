@@ -56,7 +56,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `views` | Machine-readable rendering of read-only command results, as one JSON document or as Prometheus exposition text |
 | `metrics` | Durable report records, the peer verdicts recorded beside them, and idle intervals and waiting times derived from retained records |
 | `evidence` | Review evidence built from a claim window's retained coordination records |
-| `budgets` | A lane's consumption against its advisory budget, from recorded tokens, served calls and session hours; crossing a limit marks and notifies, never stops |
+| `budgets` | A lane's consumption against its advisory budget, from recorded tokens, served calls and session hours; crossing a limit marks and notifies, never stops. Also the opt-in run budget: a durable per-project ledger of the same readings across lanes, restarts and retries, whose exhaustion `supervision` and `launch` consult before starting a turn |
 | `approvals` | Operator decisions bound to one report, commit, target and policy |
 | `history` | Read-only ownership history across the ledger, reports and store |
 | `watch` | Read-only stream of one lane's coordination events, tailed from the ledger, reports, store and hook event log |
