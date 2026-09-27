@@ -130,7 +130,9 @@ def _codex_cwd(path: Path, inode: int) -> str:
     """Remembers the working directory a rollout's first record names.
 
     A rollout's first record is written once, so the answer for one path and
-    inode never changes and each rollout is opened for it only once.
+    inode never changes and each rollout is opened for it only once. An empty
+    answer from a half-written first record is cached too, so callers reread
+    the rollout uncached through ``_codex_lane`` when this returns empty.
     """
     return _codex_lane(path)
 
@@ -168,7 +170,8 @@ def _codex_sources(config: Path, lane: Path) -> list[Path]:
     found = []
     for path in ordered[:CODEX_CANDIDATES]:
         try:
-            if _codex_cwd(path, path.stat().st_ino) == str(lane):
+            cwd = _codex_cwd(path, path.stat().st_ino) or _codex_lane(path)
+            if cwd == str(lane):
                 found.append(path)
         except OSError:
             continue

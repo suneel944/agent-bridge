@@ -1,5 +1,6 @@
 """Checks the opt-in run budget that gates wakes, dispatch and launches."""
 
+import datetime
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from agent_parley import (
     lanes,
     problems,
     process,
+    records,
     roster,
     store,
     supervision,
@@ -660,3 +662,15 @@ def test_an_exhausted_run_registers_no_new_lane(bridge, repo, paired):
     with pytest.raises(BridgeError, match="run budget is exhausted"):
         bridge.launch("gemini", repo, "start", "claude")
     assert "gemini" not in roster.read(directory)["participants"]
+
+
+def test_a_half_written_rollout_is_matched_once_complete(tmp_path):
+    lane = tmp_path / "lane"
+    day = datetime.date.today()
+    folder = tmp_path / "sessions" / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+    folder.mkdir(parents=True)
+    rollout = folder / "rollout-partial.jsonl"
+    rollout.write_text('{"payload": {"cw')
+    assert records._codex_sources(tmp_path, lane) == []
+    rollout.write_text(json.dumps({"payload": {"cwd": str(lane)}}) + "\n")
+    assert records._codex_sources(tmp_path, lane) == [rollout]
