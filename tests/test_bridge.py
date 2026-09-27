@@ -3109,6 +3109,10 @@ def test_merge_runs_the_repository_verification_command_first(
 
 
 GH_STUB = """#!/bin/sh
+if [ "$1" = "api" ]; then
+  echo operator
+  exit 0
+fi
 if [ "$1" = "issue" ]; then
   cat "$GH_ISSUE"
   exit 0
