@@ -36,6 +36,7 @@ gate failure on this path goes through.
 
 from __future__ import annotations
 
+import os
 import shlex
 import sqlite3
 import subprocess
@@ -60,6 +61,13 @@ FAILED = "failed"
 MAX_REASON = 2000
 """Characters of a refusal or failure explanation kept in a record."""
 
+LANE_TOKEN = "AGENT_PARLEY_TOKEN"
+"""Environment variable a launched lane and its children carry."""
+
+FORGE = "deferred to push"
+"""Where forge checks and reviews are enforced; the local merge never
+pushes, so they apply when the operator pushes the target branch."""
+
 
 def policy(manifest: dict) -> dict | None:
     """Reads the project's unattended integration authorization strictly.
@@ -81,7 +89,12 @@ def policy(manifest: dict) -> dict | None:
 
 
 def _operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
-    """Refuses an operator command run from inside an assigned worktree.
+    """Refuses an operator command run from a lane or a lane's shell.
+
+    A launched lane carries its coordination credential in `LANE_TOKEN`, and
+    every process it starts inherits it, so a lane that changes directory to
+    the base checkout is still refused. Like `approve`, this is the product's
+    command-line boundary, not an operating-system one.
 
     Args:
         repo: Checkout the command names.
@@ -90,8 +103,8 @@ def _operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
         action: What the refused command does, for the explanation.
 
     Raises:
-        BridgeError: If the command runs in a lane or names one as its
-            checkout.
+        BridgeError: If the command runs in a lane, names one as its
+            checkout, or runs with a lane's coordination credential.
     """
     from agent_parley.cli import git
 
@@ -100,11 +113,16 @@ def _operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
         Path(lane["lane"]).resolve()
         for lane in manifest["participants"].values()
     }
-    if here in lanes or roster.caller_lane(manifest):
+    if (
+        here in lanes
+        or roster.caller_lane(manifest)
+        or os.environ.get(LANE_TOKEN)
+    ):
         raise BridgeError(
-            f"{action} from the base checkout at {root}, never from an "
-            "assigned worktree, so a lane cannot grant or widen its own "
-            "integration authority."
+            f"{action} from an operator shell in the base checkout at "
+            f"{root}, never from an assigned worktree or a process holding "
+            f"a lane's {LANE_TOKEN}, so a lane cannot grant or widen its "
+            "own integration authority."
         )
 
 
@@ -270,29 +288,39 @@ def failed(
 def _replayed(directory: Path, name: str, key: tuple) -> dict | None:
     """Finds an earlier recorded integration this attempt would repeat.
 
+    Only an exact match counts: the same issue, claim generation and source
+    commit, all known, and the ledger recording that generation complete.
+    An attempt that read no claim or no source commit never matches, so it
+    falls through to a recorded refusal instead of reporting a success.
+
     Args:
         directory: Private state directory for the common repository.
         name: Participant whose lane is evaluated.
-        key: Claim generation and source commit, or None fields when the
-            lane holds no claim.
+        key: Issue, claim generation and source commit this attempt read.
 
     Returns:
         The earlier integrated decision, or None.
     """
     from agent_parley.cli import snapshot
 
+    if any(not part for part in key):
+        return None
     issues = snapshot(directory)["issues"]
     for record in reversed(metrics.report_records(directory, name)):
         if record.get("kind") != KIND or record.get("outcome") != INTEGRATED:
             continue
         evidence = record.get("evidence") or {}
-        bound = (evidence.get("claim_id"), evidence.get("source_commit"))
-        if key[0] is not None and bound != key:
+        bound = (
+            evidence.get("issue"),
+            evidence.get("claim_id"),
+            evidence.get("source_commit"),
+        )
+        if bound != key:
             continue
-        completed = lifecycle.state(issues.get(str(evidence.get("issue")), {}))
+        completed = lifecycle.state(issues.get(str(key[0]), {}))
         if (
             completed["state"] == lifecycle.COMPLETE
-            and completed["claim_id"] == bound[0]
+            and completed["claim_id"] == key[1]
         ):
             return record
     return None
@@ -302,6 +330,10 @@ def _evaluate(
     bridge: Bridge, root: Path, directory: Path, data: dict, name: str
 ) -> tuple[dict, str]:
     """Reads the inputs of one decision and names the first unmet condition.
+
+    An input that cannot be read, such as a missing ledger record or a Git
+    query that fails or times out, is itself an unmet condition, so the
+    attempt still leaves a recorded refusal.
 
     Args:
         bridge: Coordination runtime owning the project state.
@@ -314,6 +346,43 @@ def _evaluate(
         The evidence read so far, and the unmet condition, which is empty
         when the lane is eligible.
     """
+    evidence: dict = {"policy": POLICY, "participant": name, "forge": FORGE}
+    try:
+        unmet = _conditions(bridge, root, directory, data, name, evidence)
+    except (KeyError, BridgeError, OSError, subprocess.TimeoutExpired) as exc:
+        unmet = (
+            "An input of the decision could not be read, so eligibility "
+            f"cannot be established: {exc!r}. Repair it and run again."
+        )
+    return evidence, unmet
+
+
+def _conditions(
+    bridge: Bridge,
+    root: Path,
+    directory: Path,
+    data: dict,
+    name: str,
+    evidence: dict,
+) -> str:
+    """Checks each eligibility condition in order, filling in the evidence.
+
+    Args:
+        bridge: Coordination runtime owning the project state.
+        root: Common repository root, which is the base checkout.
+        directory: Private state directory for the common repository.
+        data: Project manifest read under the setup lock.
+        name: Participant whose lane is evaluated.
+        evidence: Mutable evidence, extended as each input is read.
+
+    Returns:
+        The first unmet condition, or an empty string when eligible.
+
+    Raises:
+        KeyError: If the ledger lacks the claimed issue's record.
+        BridgeError: If Git cannot answer a query.
+        subprocess.TimeoutExpired: If a Git query exceeds its timeout.
+    """
     from agent_parley.cli import (
         current_branch,
         exact_claim,
@@ -323,13 +392,12 @@ def _evaluate(
         store,
     )
 
-    evidence: dict = {"policy": POLICY, "participant": name}
     try:
         recorded = policy(data)
     except BridgeError as exc:
-        return evidence, f"{exc} Correct it with `agent-parley unattended set`."
+        return f"{exc} Correct it with `agent-parley unattended set`."
     if recorded is None:
-        return evidence, (
+        return (
             "This project records no unattended integration policy, so "
             "integration stays operator-only: run `participant merge`, or "
             "authorize issues with `agent-parley unattended set`."
@@ -338,13 +406,13 @@ def _evaluate(
     try:
         claim = exact_claim(directory, name)
     except BridgeError as exc:
-        return evidence, str(exc)
+        return str(exc)
     if claim["issue"] is None:
-        return evidence, f"{name} holds no claimed issue to integrate."
+        return f"{name} holds no claimed issue to integrate."
     issue = str(claim["issue"])
     evidence.update(issue=issue, claim_id=claim["claim_id"])
     if issue not in recorded["issues"]:
-        return evidence, (
+        return (
             f"Issue #{issue} is not listed in {POLICY}; an operator adds it "
             "with `agent-parley unattended set` or runs `participant merge`."
         )
@@ -352,27 +420,25 @@ def _evaluate(
     record = ledger["issues"][issue]
     execution = lifecycle.state(record)
     if execution["claim_id"] != claim["claim_id"]:
-        return evidence, (
-            f"Issue #{issue} changed claim generation while it was read."
-        )
+        return f"Issue #{issue} changed claim generation while it was read."
     if execution["state"] != lifecycle.READY:
-        return evidence, (
+        return (
             f"Issue #{issue} is {execution['state']}, not ready; the lane "
             "records a ready report first."
         )
     source = str(execution.get("source_commit") or execution["commit"] or "")
     evidence["source_commit"] = source
     if not lifecycle.COMMIT.fullmatch(source):
-        return evidence, f"Issue #{issue} names no ready source commit."
+        return f"Issue #{issue} names no ready source commit."
     lane = Path(data["participants"][name]["lane"])
     if git(lane, "rev-parse", "HEAD") != source:
-        return evidence, (
+        return (
             f"{name} committed since issue #{issue} was reported ready at "
             f"{source[:12]}; record a new ready report."
         )
     branch = current_branch(root)
     if branch != recorded["target"]:
-        return evidence, (
+        return (
             f"The base checkout has {branch} checked out, not the policy "
             f"target {recorded['target']}."
         )
@@ -382,12 +448,12 @@ def _evaluate(
         ledger, record
     ):
         waits = ", ".join(f"#{item}" for item in record.get("blocked_by", []))
-        return evidence, (
+        return (
             f"Issue #{issue} still waits on {waits or 'a dependency'} "
             "to be verified complete."
         )
     if not data["verify"]:
-        return evidence, (
+        return (
             "This project configures no verification command, so no green "
             "gate can authorize unattended integration. Set one with "
             "`agent-parley verify set`."
@@ -404,18 +470,18 @@ def _evaluate(
     try:
         held = store.active_reservations(bridge.home, data["root"])
     except (BridgeError, OSError, sqlite3.Error) as exc:
-        return evidence, (
+        return (
             "The advisory reservations could not be read, so no overlap "
             f"with a peer can be ruled out: {exc}"
         )
     held.pop(data["participants"][name]["display"], None)
     if overlaps := reserved_overlaps(changed, held):
-        return evidence, (
+        return (
             "A peer reservation covers what the work changed: "
             + "; ".join(overlaps[:5])
             + ". Hand the work over or wait for the release."
         )
-    return evidence, ""
+    return ""
 
 
 def integrate(bridge: Bridge, repo: Path, name: str) -> str:
@@ -457,6 +523,7 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
             data = bridge._project(root, directory, verify={name})
         evidence, unmet = _evaluate(bridge, root, directory, data, name)
         key = (
+            evidence.get("issue"),
             evidence.get("claim_id"),
             evidence.get("source_commit"),
         )
@@ -470,7 +537,13 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
         if unmet:
             raise refuse(directory, name, evidence, unmet)
         try:
-            merged = bridge._integrate_lane(root, directory, data, name)
+            merged = bridge._integrate_lane(
+                root,
+                directory,
+                data,
+                name,
+                expected=(evidence["claim_id"], evidence["source_commit"]),
+            )
         except subprocess.TimeoutExpired as exc:
             raise failed(
                 directory,

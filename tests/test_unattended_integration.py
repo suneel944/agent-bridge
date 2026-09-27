@@ -64,6 +64,7 @@ def execution(directory: Path, number: str = "42") -> dict:
 def ready(bridge, repo, paired, tmp_path, monkeypatch):
     """Leaves one lane claiming issue 42, committed and reported ready."""
     lane = Path(paired["lanes"]["codex"])
+    monkeypatch.delenv(unattended.LANE_TOKEN, raising=False)
     monkeypatch.setattr(
         "agent_parley.cli.forge.issue_title", lambda *args: None
     )
@@ -130,6 +131,7 @@ def test_an_authorized_lane_is_merged_verified_and_completed(
     assert evidence["integrated_commit"] == integrated
     assert evidence["verify"].endswith("gate-0.sh")
     assert evidence["changed_paths"] == 1
+    assert evidence["forge"] == "deferred to push"
 
 
 def test_a_replay_merges_and_completes_nothing_again(bridge, repo, ready):
@@ -139,14 +141,84 @@ def test_a_replay_merges_and_completes_nothing_again(bridge, repo, ready):
     integrated = git(repo, "rev-parse", "HEAD")
     history = issues.snapshot(directory)["issues"]["42"]["history"]
 
-    replay = unattended.integrate(bridge, repo, "codex")
+    with pytest.raises(BridgeError):
+        unattended.integrate(bridge, repo, "codex")
 
-    assert "nothing was merged again" in replay
     assert git(repo, "rev-parse", "HEAD") == integrated
     assert issues.snapshot(directory)["issues"]["42"]["history"] == history
     assert [record["outcome"] for record in decisions(directory)] == [
-        unattended.INTEGRATED
+        unattended.INTEGRATED,
+        unattended.REFUSED,
     ]
+
+
+def test_an_old_integration_never_stands_in_for_a_new_claim(
+    bridge, repo, ready
+):
+    directory = ready["directory"]
+    authorize(bridge, repo, ready)
+    unattended.integrate(bridge, repo, "codex")
+    unattended.configure(bridge, repo, ready["target"], [])
+    bridge.issue(ready["lane"], "claim", "43")
+    commit(ready["lane"], "second.txt")
+    bridge.report(ready["lane"], "ready", "Second", "", "make check: ok")
+    integrated = git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(BridgeError, match="operator-only"):
+        unattended.integrate(bridge, repo, "codex")
+
+    assert git(repo, "rev-parse", "HEAD") == integrated
+    assert not (repo / "second.txt").exists()
+    assert execution(directory, "43")["state"] == lifecycle.READY
+    last = decisions(directory)[-1]
+    assert last["outcome"] == unattended.REFUSED
+    assert last["evidence"]["forge"] == unattended.FORGE
+
+
+def test_a_claim_changed_after_evaluation_merges_nothing(
+    bridge, repo, ready, monkeypatch
+):
+    directory = ready["directory"]
+    authorize(bridge, repo, ready)
+    evaluate = unattended._evaluate
+
+    def then_supersede(*arguments):
+        outcome = evaluate(*arguments)
+        monkeypatch.setattr(
+            "agent_parley.cli.exact_claim",
+            lambda directory, name: {"issue": 42, "claim_id": "superseded"},
+        )
+        return outcome
+
+    monkeypatch.setattr(unattended, "_evaluate", then_supersede)
+
+    with pytest.raises(BridgeError, match="changed after the integration"):
+        unattended.integrate(bridge, repo, "codex")
+
+    assert not (repo / "feature.txt").exists()
+    assert execution(directory)["state"] == lifecycle.READY
+    [failure] = decisions(directory)
+    assert failure["outcome"] == unattended.FAILED
+
+
+def test_an_unreadable_input_is_refused_and_recorded(
+    bridge, repo, ready, monkeypatch
+):
+    directory = ready["directory"]
+    authorize(bridge, repo, ready)
+
+    def unreadable(*arguments):
+        raise BridgeError("git rev-parse failed")
+
+    monkeypatch.setattr("agent_parley.cli.current_branch", unreadable)
+
+    with pytest.raises(BridgeError, match="could not be read"):
+        unattended.integrate(bridge, repo, "codex")
+
+    assert not (repo / "feature.txt").exists()
+    [refusal] = decisions(directory)
+    assert refusal["outcome"] == unattended.REFUSED
+    assert "git rev-parse failed" in refusal["reason"]
 
 
 def test_an_unlisted_issue_is_refused(bridge, repo, ready):
@@ -336,6 +408,23 @@ def test_a_lane_cannot_set_or_run_the_policy(bridge, repo, ready):
         "target": ready["target"],
         "issues": ["42"],
     }
+
+
+def test_a_lane_token_in_the_base_checkout_is_refused(
+    bridge, repo, ready, monkeypatch
+):
+    authorize(bridge, repo, ready)
+    monkeypatch.setenv(unattended.LANE_TOKEN, "lane-token")
+
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        unattended.configure(bridge, repo, ready["target"], ["42", "43"])
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        unattended.integrate(bridge, repo, "codex")
+
+    assert not (repo / "feature.txt").exists()
+    assert unattended.policy(roster.read(ready["directory"]))["issues"] == [
+        "42"
+    ]
 
 
 def test_served_tools_cannot_alter_the_policy(bridge, repo, ready):

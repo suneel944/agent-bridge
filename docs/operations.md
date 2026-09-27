@@ -2617,7 +2617,11 @@ The policy is stored in `project.json` as
 Without it, which is every existing project, integration stays operator-only
 and `unattended run` refuses. An invalid policy refuses too, naming what is
 wrong, and the rest of the project keeps working. No served coordination tool
-can set or widen it, and `set` refuses inside an assigned worktree.
+can set or widen it. `set` and `run` refuse lane shells: inside an assigned
+worktree, or with a lane's `AGENT_PARLEY_TOKEN` in the environment even after
+changing directory to the base checkout. Like `approve`, that is a
+command-line boundary, not an OS-level one; when a lane must be unable to act
+as the operator, run lanes under a separate OS account.
 
 `unattended run NAME` merges the lane only when its claimed issue is listed,
 its claim generation is current, it is reported ready at the commit the lane
@@ -2628,9 +2632,13 @@ step, with the same locks, approvals and gates, so a concurrent attempt is
 refused as busy. Each attempt records a decision in the lane's report log with
 the claim generation, source and target commits, gate and outcome; a refusal
 says which condition failed and what resolves it, and a gate or merge failure
-is recorded as `failed` for recovery. Running it again after a recorded
-integration merges and completes nothing. It never pushes, so forge checks and
-reviews apply when you push the target branch. The supervision service does not
+is recorded as `failed` for recovery, and an input it cannot read is a refusal.
+If the claim or ready commit changes between the check and the merge, nothing
+is merged. Running it again after a recorded integration merges nothing; an
+earlier integration never stands in for a different issue, claim or commit.
+It never pushes and makes no forge calls: forge checks and reviews are enforced
+when you push the target branch, not at the local merge, and each decision
+records `forge: "deferred to push"`. The supervision service does not
 dispatch it automatically yet; that waits on the failed-integration recovery
 contract (#541).
 

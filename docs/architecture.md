@@ -810,10 +810,15 @@ merge` takes no such policy and stays an operator command.
 Unattended integration is a separate, opt-in authorization. The manifest key
 `integration.unattended` names a `target` branch and a bounded list of
 `issues` (at most 100), and `agent-parley unattended set` is the only command
-that writes it. That command replaces the whole policy, refuses to run from an
-assigned worktree for the reason `approve` does, and removes the policy when
-given no issues. No served coordination tool reads or writes it, so a lane
-cannot grant itself the authority or widen its scope. A manifest without the
+that writes it. That command replaces the whole policy and removes it when
+given no issues. It and `unattended run` refuse lane shells: a process inside
+an assigned worktree, or one whose environment holds a lane's
+`AGENT_PARLEY_TOKEN`, even after it changes directory to the base checkout.
+Like `approve`, this is a command-line boundary, not an operating-system one;
+where a lane must be unable to act as the operator, run lanes under a separate
+OS account from the operator. No served coordination tool reads or writes the
+policy, so a lane cannot grant itself the authority or widen its scope through
+coordination. A manifest without the
 key, which is every existing project, keeps integration operator-only. The
 manifest carries the value verbatim and every reader validates it strictly: an
 unknown key, a missing field, a malformed branch or issue number, or a
@@ -842,13 +847,21 @@ names the unmet condition and the command that resolves it, and nothing is
 merged. A merge or gate failure after eligibility is recorded as `failed` by
 `unattended.failed`, the single function the failed-integration recovery of
 issue #541 will hook into. Each attempt reads its inputs afresh, so a new
-commit, a moved target or a new claim generation is judged on its own. A replay
-finds the earlier `integrated` record bound to the same claim generation and
-source commit, confirms the ledger records that generation complete, and
-merges and completes nothing again. Integration stays local: nothing is pushed,
-so forge checks, review rules and native authentication apply unchanged when
-the operator pushes the target branch. Automatic dispatch from the supervision
-service is intentionally not wired until #541 defines the recovery path.
+commit, a moved target or a new claim generation is judged on its own. The
+merge step is bound to the evaluated claim generation and source commit: it
+rereads the claim under the session lock and merges nothing if either changed
+or the claim is gone. An input that cannot be read, such as a missing ledger
+entry or a failed git query, is recorded as a refusal, never skipped. A replay
+counts as already integrated only when an earlier `integrated` record matches
+the same issue, claim generation and source commit exactly and the ledger
+records that generation complete; any other attempt, including one after the
+policy is removed, is evaluated and refused on its own terms. Integration stays
+local and makes no forge calls: forge checks and reviews are enforced when the
+operator pushes the target branch, not at the local merge, and every decision
+records `forge: "deferred to push"` in its evidence to say so. Native
+authentication likewise applies unchanged at push. Automatic dispatch from the
+supervision service is intentionally not wired until #541 defines the recovery
+path.
 
 Manifests written by the earlier two-lane layout upgrade on first read. Migrated
 lanes keep their branches and registered identities, so existing mail, claims and
