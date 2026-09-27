@@ -2602,6 +2602,38 @@ both in the pull-request body and in the integration record kept in private
 project state. `participant merge` remains operator-only under every setting,
 and authentication is still the native `gh` CLI's own, with no added flag.
 
+A project can separately authorize unattended integration of named issues.
+From the base checkout, never from a lane:
+
+```bash
+agent-parley unattended set 42 43 --target main
+agent-parley unattended show
+agent-parley unattended run claude-1
+agent-parley unattended set          # remove it; operator-only again
+```
+
+The policy is stored in `project.json` as
+`"integration": {"unattended": {"target": "main", "issues": ["42", "43"]}}`.
+Without it, which is every existing project, integration stays operator-only
+and `unattended run` refuses. An invalid policy refuses too, naming what is
+wrong, and the rest of the project keeps working. No served coordination tool
+can set or widen it, and `set` refuses inside an assigned worktree.
+
+`unattended run NAME` merges the lane only when its claimed issue is listed,
+its claim generation is current, it is reported ready at the commit the lane
+still sits on, the base checkout is on the target branch, its dependencies are
+verified complete, a verification command is configured, and no peer
+reservation covers a changed path. The merge itself is the `participant merge`
+step, with the same locks, approvals and gates, so a concurrent attempt is
+refused as busy. Each attempt records a decision in the lane's report log with
+the claim generation, source and target commits, gate and outcome; a refusal
+says which condition failed and what resolves it, and a gate or merge failure
+is recorded as `failed` for recovery. Running it again after a recorded
+integration merges and completes nothing. It never pushes, so forge checks and
+reviews apply when you push the target branch. The supervision service does not
+dispatch it automatically yet; that waits on the failed-integration recovery
+contract (#541).
+
 `participant retire` removes one lane: it refuses while a session is running or
 the worktree is dirty, removes the worktree, invalidates that participant's
 coordination credential, and drops its manifest entry. Removing the worktree

@@ -2932,6 +2932,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "approval",
             "verify",
+            "unattended",
             "init",
             "branch",
             "forge",
@@ -4446,6 +4447,33 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     setting.add_argument("--repo", type=Path, default=Path.cwd())
+    standing = commands.add_parser(
+        "unattended",
+        help="Show, set or run the project's unattended integration policy.",
+    )
+    standings = standing.add_subparsers(dest="action", required=True)
+    standing_show = standings.add_parser("show")
+    standing_show.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_set = standings.add_parser("set")
+    standing_set.add_argument(
+        "issues",
+        nargs="*",
+        metavar="ISSUE",
+        help=(
+            "Issues whose ready work may be integrated without an operator; "
+            "pass none to remove the policy and stay operator-only."
+        ),
+    )
+    standing_set.add_argument(
+        "--target",
+        help="Branch the base checkout must have checked out.",
+    )
+    standing_set.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_run = standings.add_parser("run")
+    standing_run.add_argument(
+        "name", help="Participant whose ready work is integrated."
+    )
+    standing_run.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -5437,6 +5465,20 @@ def main() -> int:
                         args.steps if args.action == "set" else None,
                     )
                 )
+        elif args.command == "unattended":
+            from agent_parley import unattended
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                print(
+                    unattended.configure(
+                        bridge, repository, args.target, args.issues
+                    )
+                )
+            elif args.action == "run":
+                print(unattended.integrate(bridge, repository, args.name))
+            else:
+                print(unattended.describe(bridge, repository))
         elif args.command in ("verify", "init"):
             repository = args.repo.resolve()
             if getattr(args, "json", False):

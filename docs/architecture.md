@@ -2,8 +2,9 @@
 
 Agent Parley runs on one Linux or macOS host under one OS user. It coordinates participating
 agents; it does not execute model requests, enforce filesystem permissions or
-replace native approvals. It integrates a lane's branch only when an operator
-runs `participant merge`, and never on an agent's behalf.
+replace native approvals. It integrates a lane's branch when an operator runs
+`participant merge`, or through `unattended run` for issues the operator
+listed in an explicit project policy, and never on an agent's own authority.
 
 ## Responsibilities
 
@@ -14,6 +15,7 @@ runs `participant merge`, and never on an agent's behalf.
 | `core` | Base of the `Bridge` command object: the private state root and its configuration, the mail server's start, stop and readiness, the project manifest and the participant lanes it records |
 | `settings` | The per-project settings commands: verification and initialization commands, approval policy, branch naming, issue tracker, declared resources and lane budgets |
 | `integration` | The merge, preview and ordered integration commands, and the operator's approve and reject decisions that gate them |
+| `unattended` | The operator-recorded unattended integration policy, its eligibility checks, and the durable decision and refusal records of each attempt |
 | `claims` | The issue commands: claims, handoffs, recovery, assignment, resolution, the next-issue ranking and the recorded work plan |
 | `mail` | Operator mail: steering a lane, acknowledgements, the mailbox, and recorded decisions |
 | `reports` | Ready reports, their review, the event export, the state archive and ownership history |
@@ -804,6 +806,49 @@ peer entry in the store's active reservations overlapping the paths the branch
 changed. The conditions travel with the evidence record and the integration
 record, so a self-opened pull request states what authorized it. `participant
 merge` takes no such policy and stays an operator command.
+
+Unattended integration is a separate, opt-in authorization. The manifest key
+`integration.unattended` names a `target` branch and a bounded list of
+`issues` (at most 100), and `agent-parley unattended set` is the only command
+that writes it. That command replaces the whole policy, refuses to run from an
+assigned worktree for the reason `approve` does, and removes the policy when
+given no issues. No served coordination tool reads or writes it, so a lane
+cannot grant itself the authority or widen its scope. A manifest without the
+key, which is every existing project, keeps integration operator-only. The
+manifest carries the value verbatim and every reader validates it strictly: an
+unknown key, a missing field, a malformed branch or issue number, or a
+repeated issue refuses unattended integration and is never read as consent,
+while the rest of the project keeps working.
+
+`agent-parley unattended run NAME` is the entry point. It runs from the base
+checkout only, holds the project merge lock for the whole attempt, so a second
+attempt or an operator merge is refused as busy, and evaluates eligibility
+under that lock immediately before merging: the lane's claimed issue is listed,
+its claim generation is the ledger's current one, it is reported ready at a
+source commit the lane still sits on, the base checkout has the target branch
+checked out, every dependency is verified complete, a verification command is
+configured, and no peer's advisory reservation covers a path the work changed.
+An eligible lane is then merged by the same step `participant merge` uses, so
+the session lock, any required operator approval, the pre- and post-merge
+gates and the source-commit binding all still apply; the policy never merges
+on easier terms. Completion, and with it dependent reconciliation, is recorded
+by that step only after the verified integration.
+
+Every attempt appends a decision record of kind `unattended` to the lane's
+report log with bounded evidence: the policy, issue, claim generation, source
+commit, target branch and commit, verification command, changed path count,
+integrated commit, outcome and a reason capped at 2000 characters. A refusal
+names the unmet condition and the command that resolves it, and nothing is
+merged. A merge or gate failure after eligibility is recorded as `failed` by
+`unattended.failed`, the single function the failed-integration recovery of
+issue #541 will hook into. Each attempt reads its inputs afresh, so a new
+commit, a moved target or a new claim generation is judged on its own. A replay
+finds the earlier `integrated` record bound to the same claim generation and
+source commit, confirms the ledger records that generation complete, and
+merges and completes nothing again. Integration stays local: nothing is pushed,
+so forge checks, review rules and native authentication apply unchanged when
+the operator pushes the target branch. Automatic dispatch from the supervision
+service is intentionally not wired until #541 defines the recovery path.
 
 Manifests written by the earlier two-lane layout upgrade on first read. Migrated
 lanes keep their branches and registered identities, so existing mail, claims and
