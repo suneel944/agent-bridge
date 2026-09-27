@@ -319,6 +319,8 @@ edge on another lane's claim, waits for `agent-parley plan approve ID` or
 `plan reject ID --reason TEXT` and changes nothing meanwhile. A revision only
 moves edges; it never claims, completes or verifies work, and an edge revised
 back and forth is escalated to the operator rather than flipped again.
+`agent-parley problems` shows each escalated proposal with the approve and
+reject commands that settle it, and one row for the proposals still pending.
 
 ## A peer can record a verdict, and it is still a claim
 

@@ -1012,8 +1012,11 @@ claims, releases, completes or verifies work and never changes an owner or a
 claim generation. Each accepted revision counts against the edges it touched;
 a lane's proposal touching an edge already revised twice under the current plan
 version is `escalated` to the operator instead of applied, at most twenty
-proposals may await the operator, and the fifty most recent proposals are
-retained with their proposer, evidence, decision and note. Applying a plan file
+proposals may await the operator, and `problems` lists each escalated proposal
+as its own row with the `plan approve ID` and `plan reject ID` commands plus
+one row counting the pending ones that names `plan proposals`. The fifty most
+recent proposals are retained with their proposer, evidence, decision and
+note. Applying a plan file
 starts a new plan version and resets the automatic count and the contradiction
 record. Existing `plan.json` files need no migration: the proposal table and
 counters are added the first time they are used.
