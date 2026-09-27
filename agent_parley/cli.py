@@ -806,6 +806,87 @@ def shown_record(record: dict) -> str:
     return text
 
 
+CLIPPED_HINT = (
+    "Lines ending in … were clipped to fit; rerun with --json for full values."
+)
+DETAIL_LABELS = {
+    "home_env": "Config home variable",
+    "config_home": "Config home",
+    "env": "Environment",
+    "require_env": "Required from shell",
+    "unavailable_hooks": "Hooks unavailable",
+}
+
+
+def fitted(lines: Sequence[str], width: int | None) -> str:
+    """Joins output lines, clipping each to the terminal it prints on.
+
+    Args:
+        lines: Lines to print, each already free of line breaks.
+        width: Columns available, or None for a pipe or a file, which
+            receives every value in full.
+
+    Returns:
+        The text to print, ending in a hint naming ``--json`` whenever a line
+        was clipped, so a shortened value never reads as complete.
+    """
+    if width is None or all(len(line) <= width for line in lines):
+        return "\n".join(lines)
+    shown = [tables.fit(line, width).rstrip() for line in lines]
+    return "\n".join([*shown, CLIPPED_HINT])
+
+
+def detail_lines(record: dict) -> list[str]:
+    """Formats one definition as labeled fields, identity first.
+
+    Args:
+        record: Provider or credential document, already redacted.
+
+    Returns:
+        One ``Label: value`` line per field, with lists and mappings joined
+        on one line and an empty value reported as ``none``.
+    """
+    lines = []
+    for name, value in record.items():
+        if isinstance(value, dict):
+            joined = ", ".join(f"{key}={item}" for key, item in value.items())
+        elif isinstance(value, list):
+            joined = ", ".join(str(item) for item in value)
+        else:
+            joined = "" if value is None else str(value)
+        label = DETAIL_LABELS.get(name, name.replace("_", " ").capitalize())
+        lines.append(f"{label}: {' '.join(joined.split()) or 'none'}")
+    return lines
+
+
+def decision_lines(page: dict) -> list[str]:
+    """Formats one page of the decision log as compact rows.
+
+    Args:
+        page: Decision page as ``Bridge.decisions`` reports it.
+
+    Returns:
+        A heading line and a body preview per decision, newest first, or one
+        sentence saying no decision matched.
+    """
+    if not page["messages"]:
+        scope = f" matching {page['query']!r}" if page["query"] else ""
+        if page["since_seconds"]:
+            scope += f" in the last {tables.age(page['since_seconds'])}"
+        return [f"No decisions recorded{scope}."]
+    lines = []
+    for row in page["messages"]:
+        subject = " ".join(str(row["subject"]).split())
+        lines.append(
+            f"Decision {row['id']}  {row['created_ts']}  "
+            f"{row['sender']}  {subject}"
+        )
+        lines.append("  " + " ".join(str(row["body_md"]).split()))
+    if page["has_more"]:
+        lines.append("More decisions match; raise --limit or narrow the query.")
+    return lines
+
+
 def reported_lanes(report: dict) -> int:
     """Counts the lanes a narrowed status reading still holds."""
     return sum(len(project["participants"]) for project in report["projects"])
@@ -5052,7 +5133,7 @@ def main() -> int:
             print(
                 views.render("decision_list", decisions)
                 if args.json
-                else json.dumps(decisions, indent=2)
+                else fitted(decision_lines(decisions), terminal_width())
             )
         elif args.command == "participant":
             repository = args.repo.resolve()
@@ -5306,7 +5387,10 @@ def main() -> int:
                     "provider", views.provider_detail(args.name, inspected)
                 )
                 if args.json
-                else json.dumps({args.name: inspected}, indent=2)
+                else fitted(
+                    detail_lines(views.provider_detail(args.name, inspected)),
+                    terminal_width(),
+                )
             )
         elif args.command == "credentials" and args.action == "show":
             profile_shown = views.credential_detail(
@@ -5315,7 +5399,7 @@ def main() -> int:
             print(
                 views.render("credentials_show", profile_shown)
                 if args.json
-                else json.dumps(profile_shown, indent=2)
+                else fitted(detail_lines(profile_shown), terminal_width())
             )
         elif args.command == "provider":
             if args.action == "add":

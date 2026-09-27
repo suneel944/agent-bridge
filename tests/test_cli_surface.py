@@ -516,6 +516,176 @@ def test_credentials_show_redacts_every_recorded_value(
         "work",
     )
     assert "example.invalid" not in printed
+    assert "Credential: work" in printed
+    assert "Environment: ANTHROPIC_BASE_URL=<redacted>" in printed
+    assert "Required from shell: ANTHROPIC_API_KEY" in printed
+    assert "{" not in printed
+
+
+def test_provider_show_prints_labeled_fields(bridge, monkeypatch, capsys):
+    printed = text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "provider",
+        "show",
+        "deepseek",
+    )
+    lines = printed.splitlines()
+    assert lines[0] == "Provider: deepseek"
+    assert "Adapter: claude" in lines
+    assert "Environment: none" in lines
+    assert (
+        "Required from shell: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN" in lines
+    )
+    assert "{" not in printed
+    assert cli.CLIPPED_HINT not in printed
+
+
+def test_credentials_show_reports_an_empty_profile_in_words(
+    bridge, monkeypatch, capsys
+):
+    roster.define_credential(bridge.home, "bare", "", [], [])
+    printed = text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "credentials",
+        "show",
+        "bare",
+    )
+    assert printed.splitlines() == [
+        "Credential: bare",
+        "Config home: none",
+        "Environment: none",
+        "Required from shell: none",
+    ]
+
+
+def test_detail_clips_long_values_on_a_narrow_terminal(
+    bridge, monkeypatch, capsys
+):
+    home = str(bridge.home / ("deep" * 20))
+    roster.define_credential(bridge.home, "long", home, [], [])
+    monkeypatch.setattr(cli, "terminal_width", lambda: 30)
+    printed = text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "credentials",
+        "show",
+        "long",
+    )
+    lines = printed.splitlines()
+    assert lines[-1] == cli.CLIPPED_HINT
+    assert all(len(line) <= 30 for line in lines[:-1])
+    assert lines[1].startswith("Config home: ")
+    assert lines[1].endswith("…")
+    document = run(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "credentials",
+        "show",
+        "long",
+        "--json",
+    )
+    assert document["config_home"] == home
+
+
+def test_detail_keeps_every_value_when_piped(bridge, monkeypatch, capsys):
+    home = str(bridge.home / ("deep" * 20))
+    roster.define_credential(bridge.home, "long", home, [], [])
+    printed = text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "credentials",
+        "show",
+        "long",
+    )
+    assert f"Config home: {home}" in printed.splitlines()
+    assert cli.CLIPPED_HINT not in printed
+
+
+def decisions(bridge, paired, monkeypatch, capsys, *arguments):
+    """Runs ``decision list`` from a registered lane and returns its output."""
+    return text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "decision",
+        "list",
+        *arguments,
+        "--repo",
+        str(paired["lanes"]["codex"]),
+    )
+
+
+def registered(bridge, paired):
+    """Registers both paired lanes with a fresh coordination store."""
+    store.initialize(bridge.home)
+    for name in ("claude", "codex"):
+        store.register(
+            bridge.home, paired["root"], paired["participants"][name]["display"]
+        )
+
+
+def test_decision_list_prints_rows_and_keeps_its_document(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    registered(bridge, paired)
+    recorded = bridge.decide(repo, "Ship the lane merge\nbehind a flag.")
+    printed = decisions(bridge, paired, monkeypatch, capsys)
+    lines = printed.splitlines()
+    assert lines[0].startswith(f"Decision {recorded['id']}  ")
+    assert lines[0].endswith("Operator decision")
+    assert lines[1] == "  Ship the lane merge behind a flag."
+    assert "{" not in printed
+    document = envelope(
+        json.loads(decisions(bridge, paired, monkeypatch, capsys, "--json")),
+        "decision_list",
+    )
+    assert [row["id"] for row in document["messages"]] == [recorded["id"]]
+    assert document["messages"][0]["body_md"] == (
+        "Ship the lane merge\nbehind a flag."
+    )
+    assert document["has_more"] is False
+
+
+def test_decision_list_explains_an_empty_log(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    registered(bridge, paired)
+    assert (
+        decisions(bridge, paired, monkeypatch, capsys)
+        == "No decisions recorded.\n"
+    )
+    assert decisions(
+        bridge, paired, monkeypatch, capsys, "flag", "--since", "2h"
+    ) == ("No decisions recorded matching 'flag' in the last 2h.\n")
+
+
+def test_decision_list_clips_long_rows_and_names_more(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    registered(bridge, paired)
+    bridge.decide(repo, "first " * 40)
+    bridge.decide(repo, "second " * 40)
+    monkeypatch.setattr(cli, "terminal_width", lambda: 40)
+    lines = decisions(
+        bridge, paired, monkeypatch, capsys, "--limit", "1"
+    ).splitlines()
+    assert lines[1].endswith("…")
+    assert len(lines[1]) == 40
+    assert lines[2].startswith("More decisions match; raise --limit")
+    assert lines[-1] == cli.CLIPPED_HINT
 
 
 def test_policy_show_commands_print_documents(
