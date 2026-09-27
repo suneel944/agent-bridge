@@ -279,6 +279,8 @@ def issue_completion(repo: Path, number: str) -> dict | None:
         "commit": "",
     }
     if not linked:
+        linked = _closing_references(project, number, closed_at)
+    if not linked:
         return reading
     pull = _run(
         [
@@ -305,6 +307,59 @@ def issue_completion(repo: Path, number: str) -> dict | None:
     except (ValueError, TypeError, AttributeError):
         reading["pull_request"] = max(linked)
     return reading
+
+
+def _closing_references(project: str, number: str, closed_at: float) -> list:
+    """Finds merged pull requests that name an issue with a closing keyword.
+
+    GitHub links a closing pull request to an issue only when the pull
+    request targets the default branch. Work that lands on an integration
+    branch is closed by hand, so the link is empty. The issue timeline
+    still records each pull request that referenced the issue. A pull
+    request counts only when it merged in the same project no later than
+    the issue closed and its body closes this issue by keyword, so a pull
+    request that merely mentions the issue is never taken as its closer.
+
+    Args:
+        project: Forge project in `owner/name` form.
+        number: Bare repository issue number.
+        closed_at: Instant the issue closed, in Unix seconds.
+
+    Returns:
+        The matching pull request numbers, empty when none match or the
+        timeline cannot be read.
+    """
+    output = _run(
+        [
+            "gh",
+            "api",
+            f"repos/{project}/issues/{number}/timeline?per_page=100",
+        ],
+        5,
+    )
+    keyword = re.compile(
+        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{number}\b",
+        re.IGNORECASE,
+    )
+    try:
+        events = json.loads(output or "[]")
+        found = []
+        for event in events:
+            if event.get("event") != "cross-referenced":
+                continue
+            source = (event.get("source") or {}).get("issue") or {}
+            merged = (source.get("pull_request") or {}).get("merged_at")
+            home = (source.get("repository") or {}).get("full_name")
+            if (
+                merged
+                and home == project
+                and _epoch(merged) <= closed_at
+                and keyword.search(source.get("body") or "")
+            ):
+                found.append(int(source["number"]))
+        return found
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return []
 
 
 def open_pull_requests(repo: Path) -> list[dict] | None:
