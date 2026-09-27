@@ -806,11 +806,14 @@ class ClaimsMixin(ReportsMixin):
         Returns:
             The project root, the issue number, the published ledger and the
             issue's record in it, the reservation keys its owner holds, and
-            the history reading for the same issue.
+            the history reading for the same issue, and the convergence
+            account of an owned issue's current claim generation, or None
+            for an unowned issue.
 
         Raises:
             BridgeError: If the number is unusable or the project has none.
         """
+        from agent_parley import convergence
         from agent_parley.cli import parse_issue, roster, snapshot, store
 
         root, directory = self.project(repo, create=False)
@@ -833,6 +836,11 @@ class ClaimsMixin(ReportsMixin):
             "owner": owner,
             "reservations": held.get(identity, []),
             "history": self.history(repo, "issue", identifier),
+            "convergence": (
+                convergence.reading(directory, identifier, record["claim_id"])
+                if owner and record.get("claim_id")
+                else None
+            ),
         }
 
     def work_plan(

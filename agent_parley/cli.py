@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         budgets,
         checkpoints,
         completion,
+        convergence,
         evidence,
         forge,
         history,
@@ -131,6 +132,7 @@ DEFERRED_MODULES = (
     "budgets",
     "checkpoints",
     "completion",
+    "convergence",
     "copilot",
     "delivery",
     "dialogs",
@@ -3348,6 +3350,8 @@ def issue_lines(reading: dict) -> str:
         "Reservations held: "
         + (", ".join(reading["reservations"]) or "none recorded")
     )
+    if reading.get("convergence"):
+        lines.append(convergence.describe(reading["convergence"]))
     reported = reading["history"]
     lines.append(history.describe(reported["records"], reported["holdings"]))
     return "\n".join(lines)
@@ -5014,12 +5018,15 @@ def main() -> int:
             print(
                 views.render(
                     "issue",
-                    views.issue_detail(
-                        detail["ledger"],
-                        int(detail["issue"]),
-                        detail["reservations"],
-                        detail["history"],
-                    ),
+                    {
+                        **views.issue_detail(
+                            detail["ledger"],
+                            int(detail["issue"]),
+                            detail["reservations"],
+                            detail["history"],
+                        ),
+                        "convergence": detail["convergence"],
+                    },
                 )
                 if args.json
                 else issue_lines(detail)

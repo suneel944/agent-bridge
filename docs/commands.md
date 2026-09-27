@@ -46,7 +46,7 @@ on standard output and export to a file.
 | `say NAME TEXT` | Send as `operator`; `--ack` requests acknowledgement and `--key` controls deduplication. |
 | `say NAME TEXT --after 30m` | Record the message for later; `--at 18:00`, `--when-released N` and `--unless-reported` set the trigger, and `--every 1h --until 18:00` records a bounded repeat. |
 | `issue list` | Show claims, dependencies and handoff offers; each offer carries the offering lane's head commit, the reservations that move with it and its remaining work. |
-| `issue show NUMBER` | Show one issue: its owner, deadline, attempts, blockers, pending offer, the reservations its owner holds and its recorded history. |
+| `issue show NUMBER` | Show one issue: its owner, deadline, attempts, blockers, pending offer, the reservations its owner holds, its convergence account for the current claim and its recorded history. |
 | `issue next` | Rank the unclaimed, unblocked issues this lane could take next, each with the reason for its place: the plan group already under way, the issues it unblocks, the peer reservations and forecast collisions its likely paths run into, and the provider it declares. It claims nothing; `--limit` bounds the list. |
 | `issue match GOAL` | List the open issues whose recorded title or forge labels share subject words with a stated goal, marking the ones a peer already owns and naming the peer reservations those words run into. It is read only: a match is a reason to read the issue and claim or negotiate for it rather than open a second number for the same work, and no match is a recorded reason to open one. |
 | `issue claim NUMBER` | Claim an available issue from this lane. |
