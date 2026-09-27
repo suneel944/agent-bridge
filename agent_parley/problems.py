@@ -76,7 +76,7 @@ BY_SERVICE = "service"
 
 DIALOG = "busy:input"
 RETRY = "busy:repeat"
-APPROVAL = "busy:approval"
+BUSY_APPROVAL = "busy:approval"
 ATTENTION = "manual attention required"
 PAUSED = "paused"
 
@@ -85,7 +85,7 @@ WAKE_DETAILS = {
     RETRY: (
         "wake refused because the previous accepted wake produced no checkpoint"
     ),
-    APPROVAL: (
+    BUSY_APPROVAL: (
         "wake refused because the client is waiting for a native approval"
     ),
     ATTENTION: "wake requires operator attention",
