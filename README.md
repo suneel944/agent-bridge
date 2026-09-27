@@ -59,15 +59,19 @@
 ## See it
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A terminal recording of two lanes claiming an issue, colliding on a reservation, queueing a request, handing the issue over and being refused a branch switch">
+  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A nine-chapter terminal recording of Agent Parley 0.13.0: parallel claude and codex lanes, a shared work order, claims and a reservation collision, a native hook refusing a branch switch, a handoff, a plan revision, a run budget, unattended integration and the agent-parley top dashboard">
 </p>
 
-Every frame is captured command output, never typed prose. The coordination
-path is the shipped one; only the native client is a stand-in, so no model was
-called.
+Nine short chapters walk through 0.13.0: parallel lanes, the work order,
+claims and advisory reservations, hook guardrails, handoffs, plan revisions,
+run budgets, unattended integration and the operator dashboard. Every frame is
+captured command output, never typed prose. The coordination path is the
+shipped one; only the native client is a stand-in, so no model was called.
 [`scripts/record_demo.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_demo.py)
 drives that run against a temporary project and writes the animation, and
-`make demo` reproduces it.
+`make demo-stub` reproduces it. `make demo` records real `claude` and `codex`
+sessions instead, through
+[`scripts/record_live.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_live.py).
 
 One screen for every lane: session state, branch drift, issues owned, handoffs
 pending, unread mail, held reservations, delivered context, what enforcement
