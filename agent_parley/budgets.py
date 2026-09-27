@@ -358,9 +358,13 @@ def _baseline(
                 }
     if "hours" in fields:
         kept = {key: ledger[key] for key in ("missing", "reserved")}
+        before = _raw(ledger)["hours"]
         _fold(home, directory, manifest, ledger, {"hours": 0})
         ledger.update(kept)
-        ledger["offset"]["hours"] = _raw(ledger)["hours"]
+        ledger["offset"]["hours"] = round(
+            ledger["offset"].get("hours", 0) + _raw(ledger)["hours"] - before,
+            4,
+        )
 
 
 def _begin(home: Path, directory: Path, manifest: dict) -> dict:

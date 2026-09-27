@@ -602,6 +602,29 @@ def test_a_limit_added_later_never_counts_earlier_hours(bridge, repo, paired):
     assert reading["used"]["hours"] < 0.01
 
 
+def test_first_enforcement_counts_only_growth_of_a_live_transcript(
+    bridge, repo, paired
+):
+    live = transcript(Path(paired["lanes"]["claude"]), 900, "live.jsonl")
+    directory, manifest = enforced(bridge, repo, tokens=10_000)
+    append(live, 7, "msg-after")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"] == 7
+    )
+
+
+def test_a_re_enforced_hours_limit_keeps_hours_already_counted(
+    bridge, repo, paired
+):
+    directory, manifest = enforced(bridge, repo, calls=1_000, hours=100)
+    live_session(directory, "claude", session_started=time.time() - 3600)
+    counted = budgets.account(bridge.home, directory, manifest)["used"]
+    bridge.enforce(repo, {"hours": 0})
+    directory, manifest = enforced(bridge, repo, hours=100)
+    reading = budgets.account(bridge.home, directory, manifest)
+    assert reading["used"]["hours"] >= counted["hours"] > 0.99
+
+
 def test_a_reset_after_a_lost_ledger_never_rereads_history(
     bridge, repo, paired
 ):
