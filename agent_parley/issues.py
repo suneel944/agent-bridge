@@ -1341,7 +1341,7 @@ def _change(
                 elif action == "release":
                     retired = str(record.get("claim_id") or "")
                     retired_reason = f"issue #{issue} released"
-                    lifecycle.released(record)
+                    lifecycle.released(record, closed=closed(record))
                     attachments.remove(directory, record.get("attachment", ""))
                     record.pop("attachment", None)
                     inherited = record.pop("handoff", None) or {}

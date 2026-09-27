@@ -719,6 +719,7 @@ class ClaimsMixin(ReportsMixin):
         """
         from agent_parley.cli import (
             forge,
+            issues,
             lifecycle,
             parse_issue,
             roster,
@@ -733,6 +734,13 @@ class ClaimsMixin(ReportsMixin):
         holder = record.get("owner")
         if not holder:
             raise BridgeError(f"Issue #{issue} has no owner.")
+        if not issues.unresolved_completion(record)["unresolved"]:
+            raise BridgeError(
+                f"Issue #{issue} has no unresolved completion; the supervisor "
+                "escalates only after the holder leaves its completion "
+                f"reminders unanswered. {holder} can end the claim with "
+                f"issue release {issue}."
+            )
         participant = data["participants"].get(holder) or {}
         forge.select(repo, data)
         closing = forge.issue_completion(Path(data["root"]), issue)
