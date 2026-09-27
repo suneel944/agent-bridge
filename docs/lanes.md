@@ -125,8 +125,11 @@ agent-parley participant merge claude-2
 ```
 
 It always records a merge commit, refuses on a running session, a dirty tree or
-a drifted lane, and leaves a conflict in place for you to resolve. It never
-resets, cleans, stashes or force-switches.
+a drifted lane, and leaves a conflict in place for you to resolve. A conflict is
+recorded as an integration recovery that holds every further merge until it is
+resolved or aborted; see
+[Recovering an unverified integration](#recovering-an-unverified-integration).
+It never resets, cleans, stashes or force-switches.
 
 To see what that would bring in, and everything that would refuse it right now,
 ask for a preview first:
@@ -197,6 +200,50 @@ Groups whose every member is reported ready are marked by `plan show` and
 without asking each lane. A reported state is a lane's own account, never review
 or independent verification.
 
+## Running unattended
+
+A project can authorize, ahead of time, the integration of named issues so a
+ready lane need not wait for you to be at the terminal. From the base checkout:
+
+```sh
+agent-parley unattended set 42 43 --target main   # record the policy
+agent-parley unattended show                      # report it
+agent-parley unattended run claude-1              # integrate one lane under it
+agent-parley unattended set                       # remove it
+```
+
+`unattended run NAME` merges only when the lane's claimed issue is listed, its
+claim and ready commit are current, the base sits on the target branch, its
+dependencies are verified complete, a verification command is configured and
+no peer reservation covers a changed path. The merge is the
+`participant merge` step with the same locks, approvals and gate, and every
+attempt records a decision in the lane's report log. It never pushes, never
+repairs an unverified integration, and the service never runs it on its own:
+it is an operator command. The full policy is in
+[Operations](operations.md#requiring-a-recorded-approval).
+
+## Revising the plan
+
+A lane that finds a missing prerequisite or an obsolete edge in the applied
+plan files a revision from its worktree instead of asking you to edit the plan
+file:
+
+```sh
+agent-parley plan proposals
+agent-parley plan propose --base 3 --add 43:42 --reason 'Needs the schema first'
+agent-parley plan approve ID
+agent-parley plan reject ID --reason 'Keep them independent'
+```
+
+A revision applies on its own only inside the envelope the plan's `[revisions]`
+table declares: the issues in `scope`, at most `max_changes` edges per revision
+and at most `max_revisions` automatic revisions under one applied plan.
+Anything outside it waits for `plan approve` or `plan reject` and changes
+nothing meanwhile, and `problems` counts the proposals pending. A revision only
+moves dependency edges; it never claims, completes or verifies work. The
+envelope and escalation rules are in
+[Coordination](coordination.md#the-work-order-is-a-file-you-can-review).
+
 ## One command for many lanes
 
 With eight lanes, ending the day should not be eight commands. `say`,
@@ -244,11 +291,31 @@ agent-parley verify set ''             # remove the requirement
 With one configured, `participant merge` runs it in the base checkout first and
 streams the command's output, refusing the merge on a non-zero exit and
 reporting the exit status. It runs as an argument list, never through a shell,
-and no flag skips it. It reports the base checkout as it stands before the
-merge, which is not a claim about the merged result. In a `--all` or `--group`
-run it also runs after each member, so a set whose halves pass alone but fail
-together is caught; a failure there leaves the merge commit present and visibly
-unverified.
+and no flag skips it. It runs again on the merged commit, for a single lane and
+for each member of a `--all` or `--group` run, so a set whose halves pass alone
+but fail together is caught. A failure after the merge keeps the merge commit,
+records the base as carrying an unverified integration, and holds every further
+merge until `participant merge --verify-recovery` passes or the repairing lane
+retries, with `--renew-recovery` once its attempts are used.
+
+## Recovering an unverified integration
+
+While the base carries an unverified integration, `problems` shows one
+`integration unverified` row naming the lane that may repair it and the step
+that moves it on. Usually that lane fixes its branch, reports ready again, and
+you rerun its merge:
+
+```sh
+agent-parley participant merge claude-2                    # retry the repair
+agent-parley participant merge claude-2 --renew-recovery   # after attempts run out
+agent-parley participant merge --verify-recovery           # no lane can repair it
+```
+
+`--verify-recovery` merges nothing: it runs the recorded gate on the base as it
+stands, after you have fixed or reset it by hand, and clears the record only if
+the gate passes and leaves the tree clean. The attempt limits and every case
+are in
+[Operations](operations.md#recovering-an-unverified-integration).
 
 ## Requiring your own decision
 
@@ -274,8 +341,8 @@ cannot be read refuses integration rather than allowing it. A rejection
 delivers your reason to the lane as operator mail and the lane keeps working:
 only these two commands are gated. `status` shows `awaiting approval`,
 `approved` or `rejected` beside a ready report, `top` counts the lanes awaiting
-one, and `history --kind approval` lists the decisions with the rest of the
-chain.
+one, and `history participant NAME --kind approval` lists the decisions with
+the rest of the chain.
 
 `approve` and `reject` run from the base checkout and refuse to run inside an
 assigned worktree, so no lane records the approval of its own work through

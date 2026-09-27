@@ -31,11 +31,13 @@ Nothing from the recording machine survives into the asset. The temporary
 state directory, the demo repository and the operator's home are rewritten
 to a ``/home/dev`` shape before a frame is drawn.
 
-Regenerate with ``make demo``, or::
+Regenerate with ``make demo-stub``, or::
 
     uv run --locked python scripts/record_demo.py
 
-The result is written to ``docs/assets/demo.svg`` and committed. It is
+The result is written to ``docs/assets/demo.svg``. The published asset is
+recorded with real clients by ``scripts/record_live.py`` (``make demo``);
+this module needs no model quota and is the fallback. The asset is
 referenced from ``README.md`` through a pinned jsdelivr URL, because the
 README is also the PyPI long description and relative image paths do not
 resolve there.

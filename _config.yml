@@ -5,6 +5,7 @@ description: >-
   and explicit handoffs.
 url: https://suneel944.github.io
 baseurl: /agent-parley
+image: /docs/assets/agent-parley.png
 theme: jekyll-theme-primer
 plugins:
   - jekyll-sitemap

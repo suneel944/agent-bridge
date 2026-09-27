@@ -13,8 +13,8 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, and hands every other invocation to `cli` unchanged |
 | `cli` | Argument parsing and dispatch, plus the `Bridge` command object that joins the command groups below and keeps lane restore, pause, stop, restart, retirement, reclaim and pull requests |
 | `core` | Base of the `Bridge` command object: the private state root and its configuration, the mail server's start, stop and readiness, the project manifest and the participant lanes it records |
-| `settings` | The per-project settings commands: verification and initialization commands, approval policy, branch naming, issue tracker, declared resources and lane budgets |
-| `integration` | The merge, preview and ordered integration commands, and the operator's approve and reject decisions that gate them |
+| `settings` | The per-project settings commands: verification and initialization commands, approval policy, branch naming, issue tracker, declared resources, lane budgets and the limits of the enforced run budget (`budget enforce`) |
+| `integration` | The merge, preview and ordered integration commands, recovery of an integration the base has not verified (`--renew-recovery` grants the repairing lane more attempts, `--verify-recovery` clears the record once the base passes its gate), and the operator's approve and reject decisions that gate them |
 | `unattended` | The operator-recorded unattended integration policy, its eligibility checks, and the durable decision and refusal records of each attempt |
 | `claims` | The issue commands: claims, handoffs, recovery, assignment, resolution, the next-issue ranking and the recorded work plan |
 | `mail` | Operator mail: steering a lane, acknowledgements, the mailbox, and recorded decisions |
@@ -34,13 +34,13 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `lifecycle` | Execution state an issue's owner still owes, stored in the issue ledger so an ownership transition and its claim generation publish together, and the dependency settlement completion triggers |
 | `recovery` | Capture and restore of an abandoned claim's work as recovery checkpoints, operator-authorized takeover, and the persisted capacity recovery candidates |
 | `lanes` | The one authoritative state record of each lane in the store (`starting`, `working`, `idle`, `blocked` with its cause, `stopped`, `dead`, `reclaimed`), its closed transition table, and the event every accepted or refused transition appends; the per-lane files are evidence it reads, never a second answer. Hooks (`checkpoints.record`) and the dialog watcher submit evidence to a per-project spool (`lane-evidence.jsonl`) instead of waiting on the store; each poll applies it in arrival order before its liveness sample, and keeps it for the next poll when the store is busy. A session change is a transition that records both session ids. Each poll also charges the time since the last one to idle lane-minutes and unaccountable claim-minutes by state and cause, which `status` reports. A host restart moves every recorded session's row to `stopped` with the restart named as its evidence, which `rebooted` reads to refuse a resume until a new session clears it. The wake budget (attempts, backlog, next attempt, exhaustion, escalation) lives in the same store, seeded once from a lane's published `-wake.json` on upgrade |
-| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, the reclaim sweep and a project whose root checkout is gone |
-| `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends |
+| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, the reclaim sweep, a project whose root checkout is gone, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane |
+| `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends. Accounts are published per project in `convergence.json`; the thresholds are the supervision settings `convergence_repeats` (3 repeats of one failure by default) and `convergence_after` (14400 working seconds since the last milestone by default), and both responses are keyed mail, the escalation also notifying through `non_convergence` |
 | `roster` | Providers, credential profiles and project participants |
 | `retirement` | The withdrawal of one lane at its own request: the work it returns, the worktree it leaves only when Git reports it clean, and the durable retirement mark the supervisor and the operator views read |
 | `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees |
 | `policy` | Attribution rules shared by the lane hook, integration and the repository gate |
-| `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, and the ready-report comment posted there |
+| `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, the ready-report comment posted there, and one bounded reading of the check, review and merge state of up to `MAX_PULL_REQUESTS` (30) open pull requests on GitHub |
 | `forecast` | Bounded co-change history of the base checkout, cached per base commit, and the advisory collision forecast a reservation or claim carries |
 | `recommend` | Ranking of the unclaimed, unblocked issues a lane could take next, from the ledger, the recorded plan, the reservations peers hold and the collision forecast, with the reason for each place; it claims nothing |
 | `checkpoints` | Lifecycle observations and bounded context delivery |
@@ -53,10 +53,10 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `archive` | Consistent export of the store snapshot, ledgers, records and attachments as one validated tar archive without credentials, and its inspection and import |
 | `dashboard` | Read-only live operator view and metrics frames of every participant |
 | `tables` | Column names, width rule, cell formats and markers shared by `status` and `top` |
-| `views` | Machine-readable rendering of read-only command results, as one JSON document or as Prometheus exposition text |
+| `views` | Machine-readable rendering of read-only command results, as one JSON document or as Prometheus exposition text, and the one-line JSON `error` document a `--json` command prints on a runtime failure |
 | `metrics` | Durable report records, the peer verdicts recorded beside them, and idle intervals and waiting times derived from retained records |
 | `evidence` | Review evidence built from a claim window's retained coordination records |
-| `budgets` | A lane's consumption against its advisory budget, from recorded tokens, served calls and session hours; crossing a limit marks and notifies, never stops. Also the opt-in run budget: a durable per-project ledger of the same readings across lanes, restarts and retries, whose exhaustion `supervision` and `launch` consult before starting a turn |
+| `budgets` | A lane's consumption against its advisory budget, from recorded tokens, served calls and session hours; crossing a limit marks and notifies, never stops. Also the opt-in run budget: a durable per-project ledger, `run-budget.json`, of the same readings summed across lanes, restarts and retries. `supervision` admits every wake, work dispatch and capacity retry through it, `launch` refuses to launch or resume a lane while it is exhausted, and a `Stop` hook continuation (`checkpoints.continuation_refused`) is admitted through it like any other dispatch; exhaustion is recorded once and cleared only by the operator's `budget resume` |
 | `approvals` | Operator decisions bound to one report, commit, target and policy |
 | `history` | Read-only ownership history across the ledger, reports and store |
 | `watch` | Read-only stream of one lane's coordination events, tailed from the ledger, reports, store and hook event log |
@@ -697,8 +697,10 @@ start and no second merge can move the base. The setup lock is held only while
 the manifest is read, never across the gate, so other lanes launch and policy
 changes land while a gate runs; the merging lane's worktree and branch are
 checked again under its session lock. A non-zero exit
-refuses the merge, reporting the exit status and the last twenty lines of the
-command's combined output; a command that cannot run is a refusal, not a skip.
+refuses the merge and reports the exit status. The gate's output is not
+captured: it goes straight to the operator's terminal, and the refusal points
+there. Only lane initialization captures its command's output and reports the
+last twenty lines. A command that cannot run is a refusal, not a skip.
 No flag bypasses the gate, and removing it is an explicit `verify set ''`.
 The gate reports the base checkout as it stands before the merge, which is not
 a claim about the merged result, so the same command runs again on the merge
@@ -1236,7 +1238,8 @@ refusal is never posted to the service twice. A fallback that finds the
 published service record naming a process that is gone, as a reboot or a
 drift exit leaves, starts a detached `up` and waits for nothing; a stamp
 bounds that to once per 60 seconds, doubling after each failed start up to
-sixteen times, so a start that keeps failing never disables relaunch.
+sixteen times that interval (960 seconds), so a start that keeps failing never
+disables relaunch.
 
 A state write that fails because storage is full, over quota, read-only or
 failing allows the call and names the failure on stderr, because a denial

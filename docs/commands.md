@@ -57,7 +57,6 @@ on standard output and export to a file.
 | `issue accept NUMBER --offer-id ID` | Accept the current offer addressed to this lane; the offered reservations move with the issue. |
 | `issue decline NUMBER --offer-id ID` | Decline the current offer addressed to this lane. |
 | `issue cancel NUMBER` | Cancel this lane's pending handoff offer. |
-| `issue request NUMBER` | Ask the holder to hand an issue to this lane, with `--summary` saying why; a holder that neither answers nor records progress within `takeover_grace` has the request granted as an offer. |
 | `issue assign NUMBER NAME` | Offer an issue to a lane as `operator`; `--reason` travels with the offer and `--unassign` withdraws one no lane accepted. |
 | `issue recover NUMBER --reason TEXT` | As `operator`, approve stopping the live owner of a claim once a matching exhausted-capacity observation is published; the approval alone moves nothing. Refused inside an assigned worktree. |
 | `issue resolve NUMBER` | End a claim whose holder never filed the completion its pull request already landed, as `operator` and never as the lane. The forge is read at that moment: the issue must have closed inside the current claim, with its closing pull request recorded whichever branch it came from, or, when the forge cannot say, the lane branch pull request must have been opened inside it, and the supervisor must already have escalated the claim as an unresolved completion, so an answering holder is never resolved out from under it. `--reason` is kept beside the recorded evidence, and `--release` returns the work to the queue instead, which a pull request closed without merging requires. |
@@ -73,7 +72,7 @@ on standard output and export to a file.
 | `doctor` | Report launcher, plugin, store and running-service versions and their fit; non-zero exit on a mismatch. |
 | `problems` | List every lane, claim and store condition that needs attention, oldest first, one row per lane per cause with its count and the remedy the lane's state allows; rows the supervision service is handling say so, `--ack-after` sets the acknowledgement age, `--json` prints it for scripts, exit 1 when any row exists. |
 | `problems ack ID` | Record your own acknowledgement of one message a lane left unanswered. It clears that condition and nothing else: no ownership moves, no reservation is released and no lane is woken. |
-| `issue ... --idempotency-key KEY` | Retry any transition safely; the repeat returns the first result. |
+| `issue ... --idempotency-key KEY` | Retry a transition safely; the repeat returns the first result. `issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`, `unblock` and `request`, and `report`, accept it; `issue recover`, `resolve` and `assign` do not. |
 | `participant list` | List the project's lanes and their identities. |
 | `participant show NAME` | Show one lane: its branch, worktree, provider, account profile, advisory budget, current claims, reported outcome and last coordination. |
 | `participant add NAME` | Create a lane with an optional provider and credential profile. |

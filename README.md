@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  Run several coding agents at once and know who owns what.<br>
-  Every claim, handoff and refusal is recorded, attributed and visible.
+  Run several coding agents on one repository, attended or not, and know who owns what.<br>
+  Every claim, handoff, wake and refusal is recorded, attributed and visible.
 </p>
 
 <p align="center">
@@ -32,12 +32,31 @@
 
 ---
 
-## See it
+- **Lanes keep moving without you.** Idle lanes are woken, planned issues are
+  dispatched, and a claim whose holder went silent moves to the fittest peer
+  with its recovery checkpoint.
+- **Plans change inside bounds you set.** A lane proposes a change with
+  `plan propose`; it applies on its own only inside the plan's `[revisions]`
+  envelope, and otherwise waits for `plan approve`.
+- **An optional run budget.** `budget enforce` caps the tokens, calls or hours
+  every lane spends together; once reached, nothing new starts until
+  `budget resume`.
+- **Pull requests wake their lane.** Finished checks, a new review or a merge
+  conflict reach the owning lane as mail.
+- **Unattended integration only by policy.** `unattended set` names the issues
+  and the target branch; `unattended run` merges on the same gate as
+  `participant merge`, and a failed integration holds every other merge until
+  it is verified.
+- **Churn is caught per issue.** An issue whose verification keeps failing is
+  flagged in `issue show`, `problems` and a notification.
+- **Ownership stays explicit.** Atomic claims, accepted handoffs, advisory
+  reservations that name the blocking owner, and native hooks that refuse a
+  branch switch before it runs.
+- **Readable by people and scripts.** `status`, `top` and `problems` show what
+  needs you; the readers take `--json`, and a failure prints one `error`
+  document.
 
-Under ninety seconds of one real run: two lanes on two providers, a claim, an
-advisory reservation, the collision a second lane meets on the same path and
-the request it queues instead, a handoff offered and accepted with its
-reservations, the dashboard, and a native hook refusing a branch switch.
+## See it
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A terminal recording of two lanes claiming an issue, colliding on a reservation, queueing a request, handing the issue over and being refused a branch switch">
@@ -211,15 +230,17 @@ head is on the base, their lane retired, or they went untouched past
 `inactive_after` with every commit on their upstream. A worktree no lane made
 is never touched. Uncommitted files and unpushed commits are only reported,
 with the worktree's size, unless `--force` removes them after writing a
-recovery checkpoint. `status` shows each project's state directory size and
-how many worktrees a reclaim would remove.
+recovery checkpoint. `status --table` shows each project's state directory
+size and how many worktrees a reclaim would remove.
 
 A repository can also authorize the second of those for the lane itself, with
 `pull_request.self_service` in its private project settings. It is off by
 default; with it on, a lane opens the pull request for its own work only after
 a ready report, a configured gate that passes, its own assigned branch and no
 peer reservation over the paths it changed, and every such pull request records
-what authorized it. Merging stays an operator step either way.
+what authorized it. Merging stays an operator step either way:
+`participant merge`, or `unattended run` for the issues a recorded
+`unattended` policy lists.
 
 A lane that crashed, hung or lost its host comes back with one command:
 
@@ -263,7 +284,9 @@ and the setup command every new lane runs.
   checkpoint, then release to the pool. A claim whose pull request already
   ended is observed complete and never moved: its holder is reminded to send
   the completion, and `agent-parley issue resolve` ends it with the forge
-  evidence. A budget informs; it does not gate.
+  evidence. An attempt budget and a lane budget inform; only an opt-in run
+  budget, set with `agent-parley budget enforce`, gates, and it stops new
+  wakes, dispatch, retries and launches until `agent-parley budget resume`.
 - **Reservations are advisory.** Conflicts name the blocking owner and that
   owner's declared reason; nothing on disk is locked.
 - **Mail stays private; a decision does not.** Only a message a lane marks as a
@@ -314,10 +337,12 @@ fresh claim. Agent Parley can forward that moment to a Telegram bot or an email
 address, outbound only: nothing comes back, no command arrives over the channel,
 and a native permission prompt is still answered only in your terminal.
 
-Five changes notify, and nothing else: a handoff offered to a lane, a lane
-blocked on a native permission prompt, a lane idle with no claim past the
-project's `stalled_after` grace period, a lane run that finished, and a hook
-refusal such as a branch switch or detected drift. A situation that has not
+Nine changes notify, and nothing else: a handoff offered to a lane, a lane
+blocked on a native permission prompt, a lane held by a native dialog, a lane
+idle with no claim past the project's `stalled_after` grace period, other
+issues waiting on an idle claim, an issue that is not converging, the enforced
+run budget running out, a lane run that finished, and a hook refusal such as a
+branch switch or detected drift. A situation that has not
 changed sends nothing further. Sending never blocks a hook or a tool call, a
 failed send is recorded in the lane's event log and dropped, and nothing is
 queued for a retry.
@@ -392,15 +417,18 @@ inbound status queries are off.
 ## What it does not do
 
 Worktrees and reservations are coordination boundaries, not OS sandboxes. Agent
-Parley integrates a lane only when you run `participant merge`, and it approves
+Parley integrates a lane only when you run `participant merge`, or
+`unattended run` for an issue the project's recorded `unattended` policy lists,
+on the same gate, approval and reservation terms, and it approves
 no command on an agent's behalf, with one opt-in exception: with
 `approve_bridge_tools` on, a launched `claude` lane is allowed this bridge's
 own MCP tools and its own coordination CLI, so a resumed lane does not park on
 a prompt nobody is there to answer. With `auto_mode` on, a launched `claude`
 lane starts in the client's own auto permission mode, whose classifier still
-decides each command. The runtime can wake an idle lane to review
-pending mail, with global and per-lane opt-outs and a bounded number of
-attempts per backlog. Reported `ready` is ready for review, not verified
+decides each command. The runtime can wake an idle lane for pending mail, a
+change in its pull request's checks, reviews or merge state, or authorized
+work to take, with global and per-lane opt-outs, a bounded number of attempts
+per backlog, and an optional run budget that stops new wakes once spent. Reported `ready` is ready for review, not verified
 completion. Token usage still depends on the native agents: `CONTEXT` reports
 the bytes coordination itself injects and `TOKENS` repeats what a lane's own
 client counted, and neither is billed spend or a claim about a token-saving
@@ -437,13 +465,13 @@ remembered.
 
 | Page | What it covers |
 | --- | --- |
-| [Running lanes](https://github.com/suneel944/agent-parley/blob/main/docs/lanes.md) | Launching, steering, pausing, merging, pull requests, gates and approvals. |
+| [Running lanes](https://github.com/suneel944/agent-parley/blob/main/docs/lanes.md) | Launching, steering, pausing, merging, unattended integration, pull requests, gates and approvals. |
 | [Coordination](https://github.com/suneel944/agent-parley/blob/main/docs/coordination.md) | Claims, handoffs, reservations, mail, hooks, deadlines, budgets and history. |
 | [Monitoring](https://github.com/suneel944/agent-parley/blob/main/docs/monitoring.md) | `status`, `top`, `problems`, `metrics`, `watch` and the three presence states. |
 | [Providers](https://github.com/suneel944/agent-parley/blob/main/docs/providers.md) | Which native CLI drives a lane, adapters, accounts and credential profiles. |
 | [Accounts](https://github.com/suneel944/agent-parley/blob/main/docs/providers.md#accounts) | Provider, account and participant; a second account of one provider, end to end. |
 | [Commands](https://github.com/suneel944/agent-parley/blob/main/docs/commands.md) | The whole command surface, the MCP tools and the `--json` contract. |
-| [Operations](https://github.com/suneel944/agent-parley/blob/main/docs/operations.md) | The operator reference: install, platforms, recovery, plugins and releases. |
+| [Operations](https://github.com/suneel944/agent-parley/blob/main/docs/operations.md) | The operator reference: install, platforms, run budgets, integration recovery, JSON errors, plugins and releases. |
 | [Architecture](https://github.com/suneel944/agent-parley/blob/main/docs/architecture.md) | Module boundaries, protocol, persistence and stated limits. |
 
 ## Contributing
