@@ -468,11 +468,10 @@ class SettingsMixin(BridgeCore):
         if changes is not None:
             with lock(directory / "setup.lock"):
                 data = roster.read(directory)
-                data["run_budget"] = roster.merged_budget(
-                    data.get("run_budget") or {}, changes
-                )
+                before = dict(data.get("run_budget") or {})
+                data["run_budget"] = roster.merged_budget(before, changes)
                 if data["run_budget"]:
-                    budgets.start(self.home, directory, data["root"])
+                    budgets.start(self.home, directory, data, before)
                 else:
                     data.pop("run_budget")
                 write_json(directory / "project.json", data)

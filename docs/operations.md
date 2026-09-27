@@ -816,8 +816,12 @@ a lane's client kept is read from a byte offset stored in the ledger, not only
 the newest, so usage appended just before a session switched transcripts, and
 sessions that ran while the service was down, are still counted. `budget
 enforce` writes the initial ledger before it records the first limit, starting
-the call cursor at the project's latest served call and skipping transcripts
-not modified since, so use from before enforcement does not count.
+the call cursor at the project's latest served call and recording every
+transcript a lane's client already kept at its current end, so use from before
+enforcement does not count, even in a transcript that keeps growing. A limit
+added to a run that already has a ledger starts the same way for its own
+field: tokens from the current end of every transcript, calls from the latest
+served call, and hours offset by what live sessions have already run.
 
 Counting can err both ways. Over: a resumed session that writes a new
 transcript replaying earlier messages is a new source, so the replayed usage
@@ -872,7 +876,8 @@ whose token records cannot be read, including every lane on a provider whose
 transcripts Parley cannot parse, is refused wakes and resumes, because an
 unmetered lane would otherwise be unlimited. The same holds while an hours
 limit is enforced for a lane with a live session that `agent-parley run` did
-not start, since its start time is unknown; `budget enforce` lists those
+not start, since its start time is unknown, even when an earlier `run` session
+recorded one; `budget enforce` lists those
 lanes as unmetered, and `problems` shows each as a `run budget unmetered` row,
 whether or not the service ever woke it before. A ledger that cannot be read,
 or is missing while a run budget is enforced, is moved aside to
@@ -893,7 +898,11 @@ limit applies. Recording a new limit never
 clears an exhaustion; `budget resume` does, and refuses while the run is still
 at or over a limit, so raise the limit first. Both read current usage first.
 `budget resume --reset` starts a new accounting period in which consumption so
-far, including use read at the moment of the reset, no longer counts. Removing every enforced limit returns the project to advisory budgets.
+far, including use read at the moment of the reset, no longer counts. It begins
+a new ledger the way `budget enforce` does, so a reset after a lost or
+unreadable ledger never rereads transcript history as new use, and it offsets
+the hours live sessions have already run. Removing every enforced limit returns
+the project to advisory budgets.
 
 **Migration.** Existing projects keep their advisory budgets unchanged and
 carry no run budget. To adopt enforcement, pick aggregate limits for the whole
