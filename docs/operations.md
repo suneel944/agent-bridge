@@ -100,7 +100,36 @@ lane that holds the issue, because only that lane can hand it on.
 
 ### Reading status
 
-`status` prints the server line, the code line, the state directory, and then
+`status` answers who is working on which open issue and whether it moves. Run
+inside a project checkout or one of its lane worktrees, it reports that project
+only and says how many others it left out; `--all-projects` reports every
+project. Outside any project it reports every project except dormant ones: a
+project whose root is gone, or whose lanes have all been stopped for over 24
+hours, is hidden behind one line and listed last under `--all-projects`.
+
+Each project prints one table of open work, `ISSUE`, `TITLE` (clipped to 40
+characters), `OWNER`, `STATE` of the owning lane, `LAST EVENT` as the age of the
+claim's last progress, and `PR` as the cached open pull request with its check
+verdict and any conflict. Then one line per lane: `LANE`, `STATE`, `CLAIMS` as
+its live claims, and `TASK` from the lane's own last report or registered task,
+never the operator's last prompt. A claim whose issue is no longer open on the
+forge, or whose pull request ended, while still owned is left out of the table
+and named on one line with `agent-parley issue resolve N`; `--all` lists those
+rows too.
+
+Titles and open state come from one bounded read of the project's open GitHub
+issues, the same list `issue list` reads, with a 5-second timeout. The reading
+is cached as `forge-issues.json` in the project's state directory for 300
+seconds, so repeated `status` calls reuse it. When the read fails, `status`
+answers from the last cached reading, prints one `Forge:` line with its age,
+and waits 60 seconds before trying again. With no reading at all, or no GitHub
+forge, the `Forge:` line says so and claims on closed issues are not hidden.
+Last, `Needs action:` lists each orphaned or overdue claim with the
+command that resolves it, `agent-parley issue claim N --take-orphaned` run from
+a peer lane or `agent-parley issue assign N LANE --reason TEXT`.
+
+`status --table`, a participant name, or any lane filter prints the full lane
+table instead: the server line, the code line, the state directory, and then
 one table per
 project with a row per participant: `PARTICIPANT`, `PROVIDER`, `ACCOUNT`,
 `SESSION`, `BRANCH` with `!` when the lane left its assigned branch, `OUTCOME`,

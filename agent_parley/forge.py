@@ -572,11 +572,29 @@ def open_issues(repo: Path, limit: int = MAX_OPEN_ISSUES) -> dict[str, dict]:
     Returns:
         Bare issue number to its recorded title and label names.
     """
+    return open_issue_catalog(repo, limit) or {}
+
+
+def open_issue_catalog(
+    repo: Path, limit: int = MAX_OPEN_ISSUES, timeout: int = 15
+) -> dict[str, dict] | None:
+    """Reads the forge's open issues, telling absence apart from none open.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        limit: Most open issues to read in the one call.
+        timeout: Seconds the one client call may take.
+
+    Returns:
+        Bare issue number to its recorded title and label names, an empty
+        mapping when the forge reports no open issue, or None when the
+        project has no GitHub forge, no client, or the call failed.
+    """
     if _implementation(repo) != "github":
-        return {}
+        return None
     project = _reachable(repo)
     if project is None:
-        return {}
+        return None
     output = _run(
         [
             "gh",
@@ -591,10 +609,10 @@ def open_issues(repo: Path, limit: int = MAX_OPEN_ISSUES) -> dict[str, dict]:
             "--json",
             "number,title,labels",
         ],
-        15,
+        timeout,
     )
     if output is None:
-        return {}
+        return None
     catalog: dict[str, dict] = {}
     try:
         for record in json.loads(output):
@@ -607,7 +625,7 @@ def open_issues(repo: Path, limit: int = MAX_OPEN_ISSUES) -> dict[str, dict]:
                 ),
             }
     except (ValueError, TypeError, KeyError, AttributeError):
-        return {}
+        return None
     return catalog
 
 
