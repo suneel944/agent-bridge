@@ -3384,7 +3384,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     stopping.add_argument("--json", action="store_true", help=JSON_HELP)
     health = commands.add_parser(
-        "status", help="Show server health and registered workspaces."
+        "status",
+        help=(
+            "Show server health and registered workspaces as one table; "
+            "`top` draws the live dashboard and `watch` follows one lane."
+        ),
     )
     health.add_argument("--json", action="store_true", help=JSON_HELP)
     add_status_filters(health)
@@ -3399,7 +3403,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "top",
         help=(
             "Draw the dashboard of every participant's live coordination "
-            "state; `watch` follows one lane's events as a stream."
+            "state; `status` prints one table and `watch` follows one "
+            "lane's events as a stream."
         ),
     )
     watch.add_argument(
@@ -3811,7 +3816,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "--idempotency-key", default="", metavar="KEY", help=RETRY_HELP
     )
     steer = commands.add_parser(
-        "say", help="Send one lane a coordination message as the operator."
+        "say",
+        help=(
+            "Send one lane a coordination message as the operator; "
+            "`mail send` is a compatibility alias."
+        ),
     )
     add_say_arguments(steer)
     issue = commands.add_parser(
@@ -4058,7 +4067,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         aliases=["reclaim"],
         help=(
             "Reclaim the lane worktrees and branches whose work has landed, "
-            "keeping and reporting every lane that still holds any."
+            "keeping and reporting every lane that still holds any; "
+            "`reclaim` is a compatibility alias."
         ),
     )
     collecting.add_argument("--repo", type=Path, default=Path.cwd())
@@ -4118,7 +4128,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             command.add_argument("--json", action="store_true", help=JSON_HELP)
     mail = commands.add_parser(
         "mail",
-        help="Read mail, or list and cancel pending operator items.",
+        help=(
+            "Read mail, or list and cancel pending operator items; "
+            "`mail send` is an alias of `say`."
+        ),
     )
     letters = mail.add_subparsers(dest="action", required=True)
     reading = letters.add_parser("thread")
@@ -4159,8 +4172,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     sending = letters.add_parser(
         "send",
         help=(
-            "Send one lane a coordination message as the operator; the same "
-            "command as `say`."
+            "Compatibility alias of `say`, the canonical command; it takes "
+            "the same arguments and sends the same message."
         ),
     )
     add_say_arguments(sending)
@@ -4176,7 +4189,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     dropping.add_argument("--repo", type=Path, default=Path.cwd())
     dropping.add_argument("--json", action="store_true", help=JSON_HELP)
     deciding = commands.add_parser(
-        "decide", help="Record one decision every lane of the project reads."
+        "decide",
+        help=(
+            "Record one decision every lane of the project reads; "
+            "`decision` queries the recorded ones."
+        ),
     )
     deciding.add_argument("text", help="Decision text participants read.")
     deciding.add_argument("--repo", type=Path, default=Path.cwd())
@@ -4193,7 +4210,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     deciding.add_argument("--json", action="store_true", help=JSON_HELP)
     decision = commands.add_parser(
-        "decision", help="Read the decisions recorded for this project."
+        "decision",
+        help=(
+            "Read the decisions recorded for this project; `decide` records "
+            "a new one."
+        ),
     )
     decision_actions = decision.add_subparsers(dest="action", required=True)
     decision_list = decision_actions.add_parser("list")

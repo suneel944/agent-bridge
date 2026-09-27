@@ -384,6 +384,38 @@ def test_mail_send_delivers_the_same_message_as_say(
     assert listed["messages"][0]["id"] == document["message"]["id"]
 
 
+@pytest.mark.parametrize(
+    ("canonical", "alias"),
+    [
+        (
+            ("say", "claude", "Rebase", "--key", "k", "--json"),
+            ("mail", "send", "claude", "Rebase", "--key", "k", "--json"),
+        ),
+        (("say", "claude", "Rebase"), ("mail", "send", "claude", "Rebase")),
+        (("gc", "--apply", "--force"), ("reclaim", "--apply", "--force")),
+        (("gc",), ("reclaim",)),
+    ],
+)
+def test_an_alias_parses_to_the_canonical_arguments(canonical, alias):
+    parser, _ = cli.root_parser(None)
+    expected = vars(parser.parse_args(list(canonical)))
+    parsed = vars(parser.parse_args(list(alias)))
+    for key in ("command", "action"):
+        expected.pop(key, None)
+        parsed.pop(key, None)
+    assert parsed == expected
+
+
+def test_help_names_the_canonical_command_for_each_alias(monkeypatch, capsys):
+    printed = " ".join(text(monkeypatch, capsys).split())
+    assert "`mail send` is a compatibility alias" in printed
+    assert "`reclaim` is a compatibility alias" in printed
+    assert "`decision` queries the recorded ones" in printed
+    assert "`decide` records a new one" in printed
+    assert "`top` draws the live dashboard" in printed
+    assert "`status` prints one table" in printed
+
+
 def test_say_reports_the_delivered_message_as_json(
     bridge, repo, paired, monkeypatch, capsys
 ):
