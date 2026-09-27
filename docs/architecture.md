@@ -744,6 +744,23 @@ attempts and is accepted only from the base checkout. Nothing is ever reset,
 reverted, cleaned or stashed; undoing an integration stays the operator's own
 Git action.
 
+When no lane may repair a record, because its issue is unheld or already
+complete, its lane retired, or its attempts are used, the one operator path is
+`participant merge --verify-recovery`, accepted only from the base checkout.
+It merges nothing. It refuses while the base holds a merge in progress or
+uncommitted changes, runs the recorded gate command on the base's current
+HEAD, and removes the record only if the gate passes, HEAD stays put and the
+tree stays clean; otherwise the record stands. An operator who fixed or reset
+the base by hand releases the hold this way, and a `gate failed` or
+`interrupted` record, which never clears on its own, clears the same way. The
+issue ledger is left unchanged. Every remedy for an unowned or exhausted
+record names this command. A merge that stopped with `MERGE_HEAD` but no
+unmerged paths, such as one killed by its timeout, is recorded as
+`interrupted`, not `conflict`; a merge that timed out before changing the base
+withdraws its attempt and restores the record it replaced. Moving the claim
+into `recovery` is best effort: if the issue ledger is busy the record still
+stands, the failure is still reported, and the claim stays `ready`.
+
 The record is a new file, so no store migration applies: a state directory
 from an earlier release has none and reads as carrying no unverified
 integration, and an earlier release ignores the file. A record that cannot be

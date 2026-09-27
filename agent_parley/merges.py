@@ -9,7 +9,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from agent_parley import policy, process, roster
+from agent_parley import lifecycle, policy, process, roster
 from agent_parley.checkpoints import (
     activity,
     current_branch,
@@ -29,6 +29,8 @@ CONFLICT = "conflict"
 GATE_FAILED = "gate failed"
 INTERRUPTED = "interrupted"
 INTEGRATION_KINDS = (CONFLICT, GATE_FAILED, INTERRUPTED)
+VERIFY_RECOVERY = "agent-parley participant merge --verify-recovery"
+"""Operator command that verifies the base as it stands and clears a record."""
 
 
 def session_busy(name: str) -> str:
@@ -692,8 +694,10 @@ def integration_owner(directory: Path, record: dict) -> str:
     Repair follows ownership rather than the lane that merged: when the
     integration carried an issue, whichever lane holds that issue now, by
     claim, handoff or approved recovery, repairs it, and nobody does while
-    the issue is unheld. An integration that carried no issue stays with
-    the lane that merged it.
+    the issue is unheld or already complete. An integration that carried no
+    issue stays with the lane that merged it while that lane is an active
+    participant. When no lane may repair it, only the operator's
+    `VERIFY_RECOVERY` releases the base.
 
     Args:
         directory: Private state directory for the common repository.
@@ -703,12 +707,21 @@ def integration_owner(directory: Path, record: dict) -> str:
         The lane that may retry the integration, or empty when none may.
     """
     if not record.get("issue"):
+        try:
+            lanes = roster.read(directory)["participants"]
+        except (BridgeError, OSError):
+            return ""
+        lane = lanes.get(str(record["lane"]))
+        if lane is None or roster.retired(lane):
+            return ""
         return str(record["lane"])
     try:
         ledger = json.loads((directory / "issues.json").read_text())
     except (OSError, ValueError):
         return ""
     held = ledger.get("issues", {}).get(str(record["issue"])) or {}
+    if lifecycle.state(held)["state"] == lifecycle.COMPLETE:
+        return ""
     return str(held.get("owner") or "")
 
 
@@ -743,6 +756,25 @@ def integration_holds(root: Path, record: dict) -> bool:
         or merging(root)
         or git(root, "rev-parse", "HEAD") != record["base"]
     )
+
+
+def unmerged(root: Path) -> bool:
+    """Reports whether the base checkout holds paths a merge left unmerged.
+
+    A merge that stopped on a conflict leaves unmerged paths. One killed
+    before it finished can leave `MERGE_HEAD` without any, which is an
+    interruption rather than a conflict for a lane to resolve.
+
+    Args:
+        root: Common repository root, which is always the base checkout.
+
+    Returns:
+        Whether any path is still unmerged.
+
+    Raises:
+        BridgeError: If Git cannot read the base checkout.
+    """
+    return bool(git(root, "diff", "--name-only", "--diff-filter=U"))
 
 
 def clear_integration(directory: Path, attempt: int, result: str) -> bool:
@@ -796,12 +828,25 @@ def integration_remedy(
     """
     lane = record["lane"] if owner is None else owner
     quoted = shlex.quote(str(root))
+    verify = (
+        f"Once the base at {root} is fixed or reset by hand, run "
+        f"`{VERIFY_RECOVERY}` from the base checkout; it runs the recorded "
+        "gate on the base as it stands and clears the record only if it "
+        "passes and leaves the tree clean."
+    )
     if not lane:
+        if not record.get("issue"):
+            return (
+                f"{record['lane']} is no longer an active participant, so no "
+                f"lane may repair this integration. {verify}"
+            )
         return (
-            f"Issue #{record['issue']} is unheld, so no lane may repair its "
-            "integration. Have a lane claim it with `agent-parley issue "
-            f"claim {record['issue']}` in that lane, then run `agent-parley "
-            "participant merge <that lane>`."
+            f"Issue #{record['issue']} is unheld or already complete, so no "
+            "lane may repair its integration. Have a lane claim it with "
+            f"`agent-parley issue claim {record['issue']}` in that lane, "
+            "report ready there with `agent-parley report --state ready "
+            "--summary <change> --evidence <gate>`, then run `agent-parley "
+            f"participant merge <that lane>`. Otherwise: {verify}"
         )
     retry = f"`agent-parley participant merge {lane}`"
     if integration_exhausted(record):
@@ -810,7 +855,7 @@ def integration_remedy(
             f"used. Inspect `git -C {quoted} show --stat "
             f"{record['result'] or 'HEAD'}` and the gate output, fix the "
             "lane or the base, then run `agent-parley participant merge "
-            f"{lane} --renew-recovery` from the base checkout."
+            f"{lane} --renew-recovery` from the base checkout. {verify}"
         )
     if record["kind"] == CONFLICT:
         return (
@@ -822,6 +867,11 @@ def integration_remedy(
         return (
             f"{lane} repairs its branch and reports ready again, then run "
             f"{retry}; it verifies the exact repaired result."
+        )
+    if not record["result"]:
+        return (
+            f"If `git -C {quoted} status` shows a merge in progress, run "
+            f"`git -C {quoted} merge --abort`; then run {retry}."
         )
     return (
         f"Run {retry}; it verifies the base again before anything is "

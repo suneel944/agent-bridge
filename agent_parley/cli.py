@@ -1754,6 +1754,21 @@ def merged_lanes(
         or args.idle
         or getattr(args, "over_budget", False)
     )
+    if getattr(args, "verify_recovery", False):
+        if (
+            preview
+            or args.name
+            or selected(args)
+            or args.group
+            or getattr(args, "renew_recovery", False)
+        ):
+            raise BridgeError(
+                "`participant merge --verify-recovery` verifies the base "
+                "checkout as it stands and names no lane; drop the lane name, "
+                "--preview, --renew-recovery, --all, --group and the "
+                "selectors."
+            )
+        return bridge.verify_recovery(repo)
     renew = getattr(args, "renew_recovery", False)
     if renew and (preview or not args.name or selected(args) or args.group):
         raise BridgeError(
@@ -4315,6 +4330,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                     "Grant the named lane's recorded unverified integration "
                     "a fresh set of attempts, then retry it. Accepted only "
                     "from the base checkout."
+                ),
+            )
+            command.add_argument(
+                "--verify-recovery",
+                action="store_true",
+                help=(
+                    "Run the recorded gate on the base checkout as it stands "
+                    "and clear the unverified-integration record only if it "
+                    "passes and leaves the tree clean. Merges nothing; "
+                    "accepted only from the base checkout."
                 ),
             )
             scope = command.add_mutually_exclusive_group()

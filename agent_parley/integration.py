@@ -13,6 +13,8 @@ moved method reads. This module never imports `cli` at import time, because
 from __future__ import annotations
 
 import contextlib
+import shlex
+import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -107,6 +109,77 @@ class IntegrationMixin(MailMixin):
                 "work."
             )
 
+    def verify_recovery(self, repo: Path) -> str:
+        """Clears the recorded integration once the base as it stands passes.
+
+        This is the operator's path when no lane may repair the record: its
+        issue is unheld or complete, its lane retired, or its attempts are
+        used. It merges nothing and resets nothing. It runs the recorded gate
+        command on the base checkout's current HEAD and removes the record
+        only if the gate passes, HEAD stays put and the tree stays clean.
+        The issue ledger is left as it is.
+
+        Args:
+            repo: Checkout the command runs in; must be the base checkout.
+
+        Returns:
+            An account of the verified commit and the record it cleared.
+
+        Raises:
+            BridgeError: If run from an assigned worktree, if the base holds
+                a merge in progress or uncommitted changes, if the gate
+                fails, or if the gate moves HEAD or changes the tree. The
+                record stands in every case.
+            subprocess.TimeoutExpired: If verification exceeds its timeout.
+        """
+        from agent_parley.cli import git, lock, merges, roster, verify_base
+
+        root, directory = self.project(repo, create=False)
+        roster.read(directory)
+        quoted = shlex.quote(str(root))
+        with lock(directory / "merge.lock", MERGE_BUSY):
+            with lock(directory / "setup.lock"):
+                data = self._project(root, directory, verify=set())
+            self._from_base(repo, root, data, "Recovery verification is")
+            held = merges.integration_record(directory)
+            if held is None:
+                return (
+                    f"The base checkout at {root} carries no unverified "
+                    "integration, so nothing was verified."
+                )
+            stands = "The recovery record stands."
+            if merges.merging(root):
+                raise BridgeError(
+                    f"The base checkout at {root} holds a merge in progress. "
+                    f"Finish it with `git -C {quoted} merge --continue` or "
+                    f"`git -C {quoted} merge --abort` first. {stands}"
+                )
+            if git(root, "status", "--porcelain"):
+                raise BridgeError(
+                    f"The base checkout at {root} has uncommitted changes. "
+                    f"Commit or remove them yourself first. {stands}"
+                )
+            head = git(root, "rev-parse", "HEAD")
+            if held["command"]:
+                try:
+                    verify_base(root, held["command"], integrated=True)
+                except BridgeError as failure:
+                    raise BridgeError(f"{failure}\n{stands}") from None
+            if git(root, "rev-parse", "HEAD") != head or git(
+                root, "status", "--porcelain"
+            ):
+                raise BridgeError(
+                    "Verification changed the base checkout, so the base is "
+                    f"not verified. {stands}"
+                )
+            merges.clear_integration(directory, held["attempt"], held["result"])
+            return (
+                f"Verified the base at {head[:12]} with the recorded gate and "
+                f"cleared {held['lane']}'s {held['kind']} record from attempt "
+                f"{held['attempt']} of {held['limit']}. Other lanes may "
+                "integrate again; the issue ledger is unchanged."
+            )
+
     def _held_integration(
         self,
         root: Path,
@@ -170,9 +243,13 @@ class IntegrationMixin(MailMixin):
         directory: Path,
         entry: dict,
         kind: str,
-        failure: BridgeError,
+        failure: Exception,
     ) -> BridgeError:
         """Records a failed attempt and returns the repair work to its owner.
+
+        Moving the claim into repair is best effort: if the issue ledger is
+        busy, the durable record still stands and the failure is still
+        reported, and the claim stays ready for its owner to retry.
 
         Args:
             root: Common repository root, which is always the base checkout.
@@ -193,18 +270,21 @@ class IntegrationMixin(MailMixin):
         remedy = merges.integration_remedy(
             root, recorded, merges.integration_owner(directory, recorded)
         )
+        changed = False
         if (
             kind != merges.INTERRUPTED
             and recorded["issue"]
             and recorded["claim_id"]
-            and lifecycle.integration_failed(
-                directory,
-                recorded["issue"],
-                recorded["claim_id"],
-                recorded["detail"],
-                recorded["result"],
-            )
         ):
+            with contextlib.suppress(BridgeError, OSError):
+                changed = lifecycle.integration_failed(
+                    directory,
+                    recorded["issue"],
+                    recorded["claim_id"],
+                    recorded["detail"],
+                    recorded["result"],
+                )
+        if changed:
             with contextlib.suppress(BridgeError, OSError):
                 self.say(
                     root,
@@ -354,10 +434,15 @@ class IntegrationMixin(MailMixin):
                     participant["branch"],
                     source_commit,
                 )
-            except BridgeError as failure:
+            except (BridgeError, subprocess.TimeoutExpired) as failure:
                 if merges.merging(root):
+                    kind = (
+                        merges.CONFLICT
+                        if merges.unmerged(root)
+                        else merges.INTERRUPTED
+                    )
                     raise self._unverified(
-                        root, directory, entry, merges.CONFLICT, failure
+                        root, directory, entry, kind, failure
                     ) from None
                 if git(root, "rev-parse", "HEAD") == before:
                     merges.withdraw_integration(directory, entry, held)

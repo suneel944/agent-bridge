@@ -2,6 +2,7 @@
 
 import json
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -323,3 +324,178 @@ def test_an_unreadable_record_holds_integration(bridge, repo, paired):
     with pytest.raises(BridgeError, match="cannot be read"):
         bridge.merge(repo, "claude")
     assert "Merge lane branch" not in git(repo, "log", "--pretty=%s")
+
+
+def repair_base(repo):
+    """Commits an operator fix on the base that makes the gate pass."""
+    git(repo, "rm", "--quiet", "broken.txt")
+    commit(repo, "Operator repair on the base")
+    return git(repo, "rev-parse", "HEAD")
+
+
+def test_a_completed_issue_releases_only_through_the_operator(
+    bridge, repo, paired, gated, failed
+):
+    directory = bridge.project(repo)[1]
+    held = merges.integration_record(directory)
+    lifecycle.complete(
+        directory,
+        "42",
+        held["claim_id"],
+        held["result"],
+        held["command"],
+        held["source_commit"],
+    )
+
+    assert merges.integration_owner(directory, held) == ""
+    remedy = merges.integration_remedy(repo, held, "")
+    assert "report --state ready" in remedy
+    assert merges.VERIFY_RECOVERY in remedy
+    rows = problems._integration_rows(directory, str(repo), time.time())
+    assert merges.VERIFY_RECOVERY in rows[0]["command"]
+
+    repair_base(repo)
+    report = bridge.verify_recovery(repo)
+
+    assert "cleared claude's gate failed record" in report
+    assert merges.integration_record(directory) is None
+    ready(bridge, paired, "codex", "43", {"other.txt": "fine\n"})
+    assert "Merged" in bridge.merge(repo, "codex")
+
+
+def test_a_retired_lane_on_a_record_without_an_issue(
+    bridge, repo, paired, gated
+):
+    directory = bridge.project(repo)[1]
+    head = git(repo, "rev-parse", "HEAD")
+    merges.record_integration(
+        directory,
+        {
+            "kind": merges.INTERRUPTED,
+            "lane": "retired-lane",
+            "branch": "bridge/retired-lane",
+            "issue": None,
+            "claim_id": "",
+            "source_commit": head,
+            "base": head,
+            "result": head,
+            "command": [sys.executable, "-c", GATE, str(gated)],
+            "attempt": 1,
+            "limit": 3,
+            "detail": "",
+            "recorded_at": time.time(),
+        },
+    )
+    held = merges.integration_record(directory)
+
+    assert merges.integration_owner(directory, held) == ""
+    assert "no longer an active participant" in merges.integration_hold(
+        repo, directory, held
+    )
+    assert merges.VERIFY_RECOVERY in merges.integration_hold(
+        repo, directory, held
+    )
+    ready(bridge, paired, "codex", "43", {"other.txt": "fine\n"})
+    with pytest.raises(BridgeError, match="no other lane is integrated"):
+        bridge.merge(repo, "codex")
+
+    assert "cleared retired-lane's" in bridge.verify_recovery(repo)
+    assert "Merged" in bridge.merge(repo, "codex")
+
+
+def test_the_operator_path_clears_only_on_a_passing_gate(
+    bridge, repo, paired, gated, failed
+):
+    directory = bridge.project(repo)[1]
+    with pytest.raises(BridgeError, match="from the base checkout"):
+        bridge.verify_recovery(failed["lane"])
+    with pytest.raises(BridgeError, match="record stands"):
+        bridge.verify_recovery(repo)
+    assert merges.integration_record(directory)["attempt"] == 1
+
+    (repo / "scratch.txt").write_text("uncommitted\n")
+    with pytest.raises(BridgeError, match="uncommitted changes"):
+        bridge.verify_recovery(repo)
+    (repo / "scratch.txt").unlink()
+    assert merges.integration_record(directory) is not None
+
+    repaired = repair_base(repo)
+    report = bridge.verify_recovery(repo)
+
+    assert f"Verified the base at {repaired[:12]}" in report
+    assert merges.integration_record(directory) is None
+    assert git(repo, "rev-parse", "HEAD") == repaired
+    assert "carries no unverified" in bridge.verify_recovery(repo)
+
+
+def test_a_busy_issue_ledger_never_masks_the_failure(
+    bridge, repo, paired, gated, monkeypatch
+):
+    def busy(*args):
+        raise BridgeError("issues.lock is busy")
+
+    monkeypatch.setattr(lifecycle, "integration_failed", busy)
+    ready(bridge, paired, "claude", "42", {"broken.txt": "bad\n"})
+
+    with pytest.raises(BridgeError, match="gate failed on attempt 1 of 3"):
+        bridge.merge(repo, "claude")
+
+    held = merges.integration_record(bridge.project(repo)[1])
+    assert held["kind"] == merges.GATE_FAILED
+    assert execution(bridge, repo, "42")["state"] == lifecycle.READY
+
+
+def test_a_merge_timeout_before_any_change_burns_no_attempt(
+    bridge, repo, paired, gated, failed, monkeypatch
+):
+    directory = bridge.project(repo)[1]
+    before = merges.integration_record(directory)
+
+    def slow(*args):
+        raise subprocess.TimeoutExpired(["git", "merge"], 1)
+
+    monkeypatch.setattr(cli, "merge_branch", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        bridge.merge(repo, "claude")
+
+    after = merges.integration_record(directory)
+    assert after["attempt"] == before["attempt"] == 1
+    assert after["kind"] == merges.GATE_FAILED
+    assert after["result"] == before["result"]
+
+
+def test_a_first_merge_timeout_leaves_no_record(
+    bridge, repo, paired, monkeypatch
+):
+    ready(bridge, paired, "claude", "42", {"work.txt": "good\n"})
+
+    def slow(*args):
+        raise subprocess.TimeoutExpired(["git", "merge"], 1)
+
+    monkeypatch.setattr(cli, "merge_branch", slow)
+    with pytest.raises(subprocess.TimeoutExpired):
+        bridge.merge(repo, "claude")
+
+    assert merges.integration_record(bridge.project(repo)[1]) is None
+
+
+def test_merge_head_without_unmerged_paths_is_an_interruption(
+    bridge, repo, paired, monkeypatch
+):
+    ready(bridge, paired, "claude", "42", {"work.txt": "good\n"})
+
+    def killed(root, lane, name, branch, source):
+        git(root, "merge", "--no-ff", "--no-commit", branch)
+        raise subprocess.TimeoutExpired(["git", "merge"], 1)
+
+    monkeypatch.setattr(cli, "merge_branch", killed)
+    with pytest.raises(BridgeError, match="interrupted on attempt 1"):
+        bridge.merge(repo, "claude")
+
+    held = merges.integration_record(bridge.project(repo)[1])
+    assert merges.merging(repo)
+    assert not merges.unmerged(repo)
+    assert held["kind"] == merges.INTERRUPTED
+    assert held["result"] == ""
+    assert "merge --abort" in merges.integration_remedy(repo, held)
+    assert execution(bridge, repo, "42")["state"] == lifecycle.READY
