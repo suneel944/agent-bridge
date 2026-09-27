@@ -844,9 +844,12 @@ report log with bounded evidence: the policy, issue, claim generation, source
 commit, target branch and commit, verification command, changed path count,
 integrated commit, outcome and a reason capped at 2000 characters. A refusal
 names the unmet condition and the command that resolves it, and nothing is
-merged. A merge or gate failure after eligibility is recorded as `failed` by
-`unattended.failed`, the single function the failed-integration recovery of
-issue #541 will hook into. Each attempt reads its inputs afresh, so a new
+merged. A merge or gate failure after eligibility leaves the merge step's
+durable integration recovery record, which moves the claim to repair, and
+`unattended.failed` records the decision as `failed` beside it. While the base
+carries an unverified integration that still holds, every attempt is refused:
+unattended integration never repairs, and repair stays with the owning lane or
+the operator. Each attempt reads its inputs afresh, so a new
 commit, a moved target or a new claim generation is judged on its own. The
 merge step is bound to the evaluated claim generation and source commit: it
 rereads the claim under the session lock and merges nothing if either changed
@@ -860,8 +863,7 @@ local and makes no forge calls: forge checks and reviews are enforced when the
 operator pushes the target branch, not at the local merge, and every decision
 records `forge: "deferred to push"` in its evidence to say so. Native
 authentication likewise applies unchanged at push. Automatic dispatch from the
-supervision service is intentionally not wired until #541 defines the recovery
-path.
+supervision service is intentionally not wired.
 
 Manifests written by the earlier two-lane layout upgrade on first read. Migrated
 lanes keep their branches and registered identities, so existing mail, claims and

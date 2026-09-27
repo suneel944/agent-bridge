@@ -11,6 +11,7 @@ from agent_parley import (
     cli,
     issues,
     lifecycle,
+    merges,
     metrics,
     roster,
     store,
@@ -342,6 +343,39 @@ def test_a_failing_gate_records_a_durable_failure(
     assert failure["outcome"] == unattended.FAILED
     assert failure["evidence"]["source_commit"] == ready["source"]
     assert failure["reason"]
+
+
+def test_an_unverified_base_is_refused_and_never_repaired(bridge, repo, ready):
+    directory = ready["directory"]
+    authorize(bridge, repo, ready)
+    base = git(repo, "rev-parse", "HEAD")
+    merges.record_integration(
+        directory,
+        {
+            "lane": "claude",
+            "branch": "bridge/claude",
+            "issue": "",
+            "claim_id": "",
+            "source": base,
+            "base": base,
+            "result": base,
+            "gate": "make check",
+            "attempt": 1,
+            "limit": merges.REPAIR_ATTEMPTS,
+            "kind": merges.GATE_FAILED,
+            "detail": "gate failed",
+        },
+    )
+
+    with pytest.raises(BridgeError, match="never repairs"):
+        unattended.integrate(bridge, repo, "codex")
+
+    assert git(repo, "rev-parse", "HEAD") == base
+    assert execution(directory)["state"] == lifecycle.READY
+    assert merges.integration_record(directory)["attempt"] == 1
+    [refusal] = decisions(directory)
+    assert refusal["outcome"] == unattended.REFUSED
+    assert "claude's integration" in refusal["reason"]
 
 
 def test_an_unconfigured_gate_is_refused(bridge, repo, ready):

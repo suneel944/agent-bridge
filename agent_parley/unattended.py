@@ -28,10 +28,12 @@ inputs afresh, so a changed commit, a moved base or a new claim generation is
 judged on its own and never inherits an earlier decision. A replay after a
 recorded integration merges and completes nothing.
 
-Integration dispatch from the supervision service is deliberately not wired
-here. It waits on the durable failed-integration recovery contract of issue
-#541, which is expected to hook into `failed`, the one function every merge or
-gate failure on this path goes through.
+A merge or gate failure goes through the merge step's durable recovery record,
+which holds every other lane and moves the claim to repair; `failed` then
+records the unattended decision beside it. Unattended integration never
+repairs: while the base carries an unverified integration, every attempt is
+refused and repair stays with the lane owner or the operator. Integration
+dispatch from the supervision service is deliberately not wired here.
 """
 
 from __future__ import annotations
@@ -265,9 +267,9 @@ def failed(
     Every failure after eligibility was established goes through here: a
     busy session, a missing approval, a failing verification gate, a merge
     conflict or post-merge verification that leaves the integration
-    standing but not complete. The failed-integration recovery path of
-    issue #541 is expected to hook in here before any automatic dispatch is
-    enabled.
+    standing but not complete. The merge step has already written the
+    failed-integration recovery record for a conflict or a failed gate, so
+    this adds the unattended decision and never a second recovery path.
 
     Args:
         directory: Private state directory for the common repository.
@@ -387,6 +389,7 @@ def _conditions(
         current_branch,
         exact_claim,
         git,
+        merges,
         reserved_overlaps,
         snapshot,
         store,
@@ -444,6 +447,12 @@ def _conditions(
         )
     target_commit = git(root, "rev-parse", "HEAD")
     evidence["target_commit"] = target_commit
+    standing = merges.integration_record(directory)
+    if standing and merges.integration_holds(root, standing):
+        return (
+            "Unattended integration never repairs an unverified base. "
+            + merges.integration_hold(root, directory, standing)
+        )
     if record.get("blocked_by") or not lifecycle.dependencies_complete(
         ledger, record
     ):
