@@ -14,6 +14,7 @@ from agent_parley import (
     cli,
     completion,
     dashboard,
+    dialogs,
     issues,
     problems,
     protocol,
@@ -382,6 +383,26 @@ def test_an_escalated_native_dialog_is_a_row_naming_it(
     )
     assert row["command"] == "answer the prompt in claude's terminal"
     assert row["seconds"] >= 40
+
+
+def test_a_held_permission_prompt_is_a_waiting_on_approval_row(
+    bridge, repo, paired, served
+):
+    alive(
+        bridge.project(repo)[1],
+        "claude",
+        activity="waiting for approval: Bash",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    [row] = rows(bridge, "waiting on approval")
+    assert row["participant"] == "claude"
+    assert row["detail"] == "the client is waiting for approval of Bash"
+    assert row["command"] == "answer the prompt in claude's terminal"
+    assert problems.APPROVAL == "waiting on approval"
 
 
 def test_a_paused_lane_is_resumed_rather_than_spoken_to(
