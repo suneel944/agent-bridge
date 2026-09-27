@@ -46,6 +46,7 @@ OVERDUE = "overdue claim"
 OVER_CAP = "claims over cap"
 OFFER = "unanswered offer"
 UNRESOLVED = "unresolved completion"
+DIVERGING = "not converging"
 ACK = "awaiting acknowledgement"
 BOUNCE = "bounced share"
 RETIRED = "shares to a retired lane"
@@ -439,6 +440,43 @@ def _unresolved_rows(
     ]
 
 
+def _diverging_rows(
+    record: dict, name: str, repo: str, root: str
+) -> list[dict]:
+    """Reports each claim whose convergence account escalated.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+
+    Returns:
+        One row per claim whose repeated verified failures outlasted the
+        request to change approach. The holder keeps the claim; any handoff
+        or reassignment is the operator's or the holder's explicit act.
+    """
+    rows = []
+    for claim in record["claims"]:
+        shown = claim.get("convergence") or {}
+        if shown.get("stage") != "escalated":
+            continue
+        rows.append(
+            _row(
+                DIVERGING,
+                f"issue #{claim['issue']}: {shown['failures']} failing "
+                f"verification results, signature {shown['signature']} "
+                f"x{shown['repeats']}, no verified improvement for "
+                f"{shown['since_milestone_seconds']}s",
+                f"agent-parley issue show {claim['issue']} {repo}",
+                int(shown["since_milestone_seconds"]),
+                name,
+                root,
+            )
+        )
+    return rows
+
+
 def _ack_rows(
     record: dict,
     name: str,
@@ -663,6 +701,7 @@ def _lane_rows(
         _retire_rows(record, name, repo, root, config["orphan_retire_after"])
     )
     rows.extend(_unresolved_rows(record, name, repo, root, now))
+    rows.extend(_diverging_rows(record, name, repo, root))
     rows.extend(_ack_rows(record, name, repo, root, ack_after, waking))
     refused = (record.get("mail") or {}).get("refused") or []
     if quiet and refused:

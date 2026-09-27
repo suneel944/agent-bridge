@@ -1633,8 +1633,63 @@ The private project manifest accepts `"supervision"` with `interval` (default
 `start_deadline` (30 seconds),
 `completion_reminders` (3 reminders, 1 to 100), `orphan_retire_after`
 (3600 seconds), `claim_idle_after` (3600 seconds), `takeover_grace`
-(300 seconds), `max_claims_per_lane` (2 claims, 1 to 100), `prompts`, `wake`,
+(300 seconds), `max_claims_per_lane` (2 claims, 1 to 100),
+`convergence_repeats` (3 failures, 1 to 100), `convergence_after`
+(14400 seconds), `prompts`, `wake`,
 `reclaim` and `titles` (all true). Numeric second values range from 1 to 86400 seconds.
+
+Issue convergence is accounted separately from wakes and liveness.
+`convergence.py` keeps one account per owned issue and claim generation in
+`convergence.json` beside the project state. Its evidence is the lane's own
+report log: the evidence text of `agent-parley report ... --issue N`, bound to
+the claim and the commit the report was filed at, and pass or fail peer review
+verdicts, which inherit the issue, claim and commit of the report they judge.
+Each piece of evidence is classified as passing, failing or carrying no
+verification evidence. A failure is reduced to a normalized signature: paths
+become base names, hex and numbers are masked, and the result is hashed.
+The account stores only that hash, never report text or logs.
+
+Only verified improvement resets the account: a passing gate line in a
+report of any state, or a passing review of a report no older than the latest
+recorded failure; a failure is a non-zero failure or error count, pytest's
+`FAILED`, a traceback, an `AssertionError`, `not ok` or a non-zero exit
+status, never prose such as `fixed error handling`. Improvement records a
+milestone with its commit. Commits, reservations, reports without
+verification evidence and failing reports never reset it, so a lane that keeps
+editing, reserving and reporting while the same gate fails is still counted.
+The same failure restated at the same commit counts once. A different failure
+starts a new repeat run but keeps the failure count, so alternating failures
+cannot pass for progress. A report with no verification evidence is shown as
+`no verification evidence` and is counted as neither failure nor success.
+Blocked work (waiting on an issue or an external check) and ready work
+(waiting on verification) freeze the account, and time spent waiting is not
+counted against it.
+
+Past `convergence_repeats` repeats of one failure, twice that many failures,
+or `convergence_after` working seconds since the last milestone with a
+failure recorded, the holder is asked once to change approach. If the same
+threshold is met again after that request, the operator is told the issue is
+not converging, through mail and the `non_convergence` notification event, with
+the `issue offer` and `issue assign` commands that would hand it over;
+`problems` lists it under `not converging`. Nothing moves automatically: the
+issue keeps its owner, offer and reservations, and native approvals apply to
+whatever the operator does next. There are at most two responses per
+milestone and six per generation, and each message and notification is sent
+once per issue, claim, milestone and stage. The escalation says the operator
+was notified only when a notification was sent. With `prompts` off the
+accounts are still kept on every poll but no response is sent. A new claim
+generation, a release or a
+completion drops the old account, so reports from a stale generation are never
+counted. The file holds at most 256 issues, 16 failure keys and 64 report ids
+per issue. `issue show` and each claim in `status --json` carry the current
+generation's account under `convergence`.
+
+Report records written before this version carry no commit and are accounted
+without one; an upgraded service starts every account empty and leaves wake
+accounting unchanged. Classification reads free text a lane supplies, so it
+is a heuristic: a lane that reports no gate result is never escalated for
+failure, only shown as unverified. Its effect on live model behavior is not
+verified by the test suite.
 
 Claim liveness is measured per claim, not per lane. A claim advances on its
 own generation start and on `agent-parley report ... --issue N` naming it; a
