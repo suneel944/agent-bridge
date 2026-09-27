@@ -4119,6 +4119,153 @@ def branch_lane(manifest: dict, branch: str) -> str:
     return owners[0] if len(owners) == 1 else ""
 
 
+PULL_REQUEST_SECONDS = 60.0
+PULL_REQUEST_RECORD = "pull-requests.json"
+
+
+def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
+    """Tells a lane once when its open pull request's checks or reviews change.
+
+    A lane that opens a pull request ends its turn to wait, and nothing used
+    to tell it when the checks finished, a review landed or the pull request
+    became mergeable. The forge is read at most once per
+    `PULL_REQUEST_SECONDS`, and each open pull request's last reading is
+    kept in `PULL_REQUEST_RECORD`. A pull request whose checks finished green
+    or red on a head commit not yet reported, which gained a review, or
+    whose merge state moved between mergeable and conflicting, is announced
+    to its lane as supervisor mail naming the number, head commit and new
+    state, with the failing check names on a red run. Unread mail is a wake
+    reason, so the ordinary wake path gives the lane its turn. A pull request
+    seen for the first time with finished checks or reviews is announced
+    once as well.
+
+    A pull request belongs to the lane whose branch is its head, else to the
+    one lane owning every claimed issue it closes, else to the lane
+    `branch_lane` attributes its head branch to. One no lane can be named
+    for is recorded and announced to nobody. A forge that is missing,
+    offline or unreadable leaves the record as it was and wakes nobody.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    path = directory / PULL_REQUEST_RECORD
+    try:
+        seen = json.loads(path.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
+    now = time.time()
+    if now - float(seen.get("read_at") or 0) < PULL_REQUEST_SECONDS:
+        return
+    readings = forge.open_pull_requests(Path(manifest["root"]))
+    if readings is None:
+        return
+    before = seen.get("pull_requests") or {}
+    ledger = issues.snapshot(directory)["issues"]
+    for reading in readings:
+        changes = _pull_request_changes(
+            before.get(str(reading["number"])) or {}, reading
+        )
+        name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        if not name:
+            continue
+        body = (
+            f"Pull request #{reading['number']} {reading['url']} at head "
+            f"{reading['sha']}: {'; '.join(changes)}. Take the next step "
+            "yourself: merge it, fix it or answer the review. Nothing was "
+            "merged, changed or answered for you."
+        )
+        digest = hashlib.sha256(
+            f"{reading['number']}\x00{name}\x00{body}".encode()
+        ).hexdigest()[:32]
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            store.speak(
+                home,
+                manifest["root"],
+                manifest["participants"][name]["display"],
+                f"Pull request #{reading['number']} changed",
+                body,
+                f"pull-request:{digest}",
+            )
+    write_json(
+        path,
+        {
+            "read_at": now,
+            "pull_requests": {
+                str(reading["number"]): reading for reading in readings
+            },
+        },
+    )
+
+
+def _pull_request_changes(before: dict, after: dict) -> list[str]:
+    """Describes what changed between two readings of one pull request.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading from `forge.open_pull_requests`.
+
+    Returns:
+        One phrase per change worth a wake, empty when nothing changed.
+    """
+    changes: list[str] = []
+    finished = after["checks"] in {"green", "red"}
+    if finished and (
+        before.get("checks"),
+        before.get("sha"),
+        before.get("failing"),
+    ) != (after["checks"], after["sha"], after["failing"]):
+        changes.append(
+            "checks passed"
+            if after["checks"] == "green"
+            else f"checks failed: {', '.join(after['failing'])}"
+        )
+    known = before.get("reviews") or []
+    added = [review for review in after["reviews"] if review not in known]
+    if added:
+        listed = ", ".join(
+            f"{review['author'] or 'unknown'} {review['state']}"
+            for review in added
+        )
+        changes.append(f"review submitted: {listed}")
+    settled = {"MERGEABLE", "CONFLICTING"}
+    if (
+        before.get("mergeable") in settled
+        and after["mergeable"] in settled
+        and before["mergeable"] != after["mergeable"]
+    ):
+        changes.append(f"merge state is now {after['mergeable']}")
+    return changes
+
+
+def _pull_request_lane(manifest: dict, ledger: dict, reading: dict) -> str:
+    """Names the lane a pull request belongs to, as `pull_request_wakes` says.
+
+    Args:
+        manifest: Current participant manifest.
+        ledger: Issue records by number.
+        reading: One reading from `forge.open_pull_requests`.
+
+    Returns:
+        The participant name, or an empty string when no single lane owns it.
+    """
+    participants = manifest["participants"]
+    for name, participant in participants.items():
+        if reading["branch"] and participant["branch"] == reading["branch"]:
+            return name
+    owners = {
+        ledger[number].get("owner")
+        for number in reading["issues"]
+        if number in ledger and ledger[number].get("owner") in participants
+    }
+    if len(owners) == 1:
+        return str(owners.pop())
+    return branch_lane(manifest, reading["branch"]) if reading["branch"] else ""
+
+
 def reported_since(directory: Path, name: str, since: float) -> bool:
     """Reports whether a lane filed a report after a recorded instant.
 
@@ -4554,6 +4701,7 @@ def _poll(home: Path, directory: Path) -> None:
             stage,
         )
         stage("work", work, home, directory, manifest, config)
+        stage("pull requests", pull_request_wakes, home, directory, manifest)
         stage(
             "overdue claims",
             overdue_claims,
