@@ -13,6 +13,47 @@ from pathlib import Path
 from agent_parley import BridgeError, recommend
 from agent_parley.reports import ReportsMixin
 
+FORGE_MARKS = "forge-assigned.json"
+
+
+def forge_mark(directory: Path, number: str, *, added: bool) -> bool:
+    """Records or takes the mark of a forge assignment a claim added.
+
+    Every lane shares the operator's forge account, so the forge cannot
+    tell an assignee a person set by hand from one a claim added. A claim
+    marks the issue only when it added the assignment, and a release
+    removes the assignment only when it takes such a mark. A claim recorded
+    before marks existed carries none, so its release leaves the assignee.
+    A mark that cannot be read or written reads as absent, which keeps an
+    assignee rather than removing one.
+
+    Args:
+        directory: Private project state directory.
+        number: Bare repository issue number.
+        added: Whether to leave the issue marked after this call.
+
+    Returns:
+        Whether the issue carried the mark before this call.
+    """
+    from agent_parley.cli import json, lock, write_json
+
+    path = directory / FORGE_MARKS
+    try:
+        with lock(directory / f"{FORGE_MARKS}.lock", timeout=5):
+            try:
+                marks = json.loads(path.read_text())
+            except (OSError, ValueError):
+                marks = {}
+            if not isinstance(marks, dict):
+                marks = {}
+            held = marks.pop(number, None) is True
+            if added:
+                marks[number] = True
+            write_json(path, marks)
+    except (BridgeError, OSError):
+        return False
+    return held
+
 
 class ClaimsMixin(ReportsMixin):
     """Issue ledger transitions, claim forecasts and the work-order plan.
@@ -240,14 +281,18 @@ class ClaimsMixin(ReportsMixin):
             if recovery.current_take(record):
                 record = recovery.restore(directory, repo, record)
             record = self._free_orphaned(data, record)
-            forge.assign(repo, parse_issue(number))
+            if not forge.assigned(repo, parse_issue(number)) and forge.assign(
+                repo, parse_issue(number)
+            ):
+                forge_mark(directory, parse_issue(number), added=True)
             likely = self._claim_forecast(
                 repo, directory, data, agent, parse_issue(number)
             )
             if likely:
                 record = {**record, "forecast": likely}
         elif action == "release":
-            forge.unassign(repo, parse_issue(number))
+            if forge_mark(directory, parse_issue(number), added=False):
+                forge.unassign(repo, parse_issue(number))
         return record
 
     def _carry(

@@ -1760,8 +1760,11 @@ def test_claim_and_release_mirror_onto_the_forge_after_the_ledger(
         "agent_parley.cli.forge.issue_title", lambda directory, number: None
     )
     monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: False
+    )
+    monkeypatch.setattr(
         "agent_parley.cli.forge.assign",
-        lambda directory, number: mirrored.append(("assign", number)),
+        lambda directory, number: not mirrored.append(("assign", number)),
     )
     monkeypatch.setattr(
         "agent_parley.cli.forge.unassign",
@@ -1780,6 +1783,40 @@ def test_claim_and_release_mirror_onto_the_forge_after_the_ledger(
     with pytest.raises(AssertionError):
         bridge.issue(claude, "claim", "432")
     assert bridge.issue(repo, "list")["issues"]["432"]["owner"] == "claude"
+
+
+def test_a_release_keeps_an_assignee_the_claim_did_not_add(
+    bridge, repo, paired, monkeypatch
+):
+    claude = Path(paired["lanes"]["claude"])
+    mirrored = []
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.issue_title", lambda directory, number: None
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: True
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assign",
+        lambda directory, number: not mirrored.append(("assign", number)),
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.unassign",
+        lambda directory, number: mirrored.append(("unassign", number)),
+    )
+    bridge.issue(claude, "claim", "568")
+    bridge.issue(claude, "release", "568")
+    assert mirrored == []
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: False
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assign",
+        lambda directory, number: mirrored.append(("assign", number)),
+    )
+    bridge.issue(claude, "claim", "568")
+    bridge.issue(claude, "release", "568")
+    assert mirrored == [("assign", "568")]
 
 
 def test_a_report_requires_one_claim_and_comments_on_that_issue(
