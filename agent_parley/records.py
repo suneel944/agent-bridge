@@ -15,6 +15,7 @@ must not fail on a client's private file format.
 from __future__ import annotations
 
 import datetime
+import functools
 import hashlib
 import json
 import os
@@ -113,10 +114,25 @@ def _config_home(home: Path, entry: dict, profile: str | None) -> Path | None:
     return Path(selected).expanduser() if selected else None
 
 
+def _claude_sources(config: Path, lane: Path) -> list[Path]:
+    """Lists every Claude transcript recorded for one lane."""
+    directory = config / "projects" / UNSAFE.sub("-", str(lane))
+    return sorted(directory.glob("*.jsonl"))
+
+
 def _claude_records(config: Path, lane: Path) -> Path | None:
     """Finds the newest Claude transcript recorded for one lane."""
-    directory = config / "projects" / UNSAFE.sub("-", str(lane))
-    return _newest(directory.glob("*.jsonl"))
+    return _newest(_claude_sources(config, lane))
+
+
+@functools.lru_cache(maxsize=1024)
+def _codex_cwd(path: Path, inode: int) -> str:
+    """Remembers the working directory a rollout's first record names.
+
+    A rollout's first record is written once, so the answer for one path and
+    inode never changes and each rollout is opened for it only once.
+    """
+    return _codex_lane(path)
 
 
 def _codex_lane(path: Path) -> str:
@@ -134,8 +150,13 @@ def _codex_lane(path: Path) -> str:
     return str(source.get("cwd", ""))
 
 
-def _codex_records(config: Path, lane: Path) -> Path | None:
-    """Finds a recent Codex rollout whose own record names this lane."""
+def _codex_sources(config: Path, lane: Path) -> list[Path]:
+    """Lists the recent Codex rollouts whose own record names this lane.
+
+    Only rollouts from the last ``CODEX_DAYS`` days, and among them the
+    ``CODEX_CANDIDATES`` most recently modified, are considered, newest
+    first.
+    """
     root = config / "sessions"
     today = datetime.date.today()
     candidates: list[Path] = []
@@ -144,13 +165,19 @@ def _codex_records(config: Path, lane: Path) -> Path | None:
         directory = root / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
         candidates.extend(directory.glob("rollout-*.jsonl"))
     ordered = sorted(candidates, key=_mtime, reverse=True)
+    found = []
     for path in ordered[:CODEX_CANDIDATES]:
         try:
-            if _codex_lane(path) == str(lane):
-                return path
+            if _codex_cwd(path, path.stat().st_ino) == str(lane):
+                found.append(path)
         except OSError:
             continue
-    return None
+    return found
+
+
+def _codex_records(config: Path, lane: Path) -> Path | None:
+    """Finds a recent Codex rollout whose own record names this lane."""
+    return next(iter(_codex_sources(config, lane)), None)
 
 
 def _fold_claude(record: dict, reading: dict) -> None:
@@ -166,6 +193,7 @@ def _fold_claude(record: dict, reading: dict) -> None:
         if identifier in reading["seen"]:
             return
         reading["seen"].add(identifier)
+        reading["last"] = identifier
     for name in CLAUDE_FIELDS:
         value = usage.get(name)
         if isinstance(value, int) and not isinstance(value, bool):
@@ -190,6 +218,10 @@ def _fold_codex(record: dict, reading: dict) -> None:
 ADAPTERS: dict[str, tuple[Finder, Fold]] = {
     "claude": (_claude_records, _fold_claude),
     "codex": (_codex_records, _fold_codex),
+}
+SOURCES: dict[str, Callable[[Path, Path], list[Path]]] = {
+    "claude": _claude_sources,
+    "codex": _codex_sources,
 }
 
 
@@ -641,3 +673,75 @@ def reported_tokens(home: Path, participant: dict, cache: dict) -> int | None:
         return None
     cache[key] = reading
     return int(reading["tokens"])
+
+
+def lane_sources(
+    home: Path, participant: dict, known: dict, since: float
+) -> list[dict] | None:
+    """Advances every session record a lane's own native client wrote.
+
+    Unlike ``reported_tokens``, which follows only the newest record, this
+    reads each record the lane's client kept, resuming where the caller's
+    durable reading of it stopped, so records that ended between two
+    readings, or were written while nobody was reading, are still counted.
+    Each record is advanced by at most ``MAX_READ`` bytes per call.
+
+    Args:
+        home: Private bridge state root.
+        participant: Manifest entry naming the lane, provider and account.
+        known: Previous reading per ``path:inode`` key, each carrying the
+            byte ``offset``, the ``tokens`` read so far and the ``last``
+            message identifier folded.
+        since: A record absent from ``known`` and last modified before this
+            instant is taken as already consumed, so history from before the
+            caller began counting is skipped rather than read.
+
+    Returns:
+        One reading per record with its ``key``, ``offset``, ``tokens`` and
+        ``last``, or None when this lane has no readable session records.
+    """
+    try:
+        entry = roster.provider(home, str(participant.get("provider", "")))
+        adapter = str(entry.get("adapter", ""))
+        fold = ADAPTERS[adapter][1]
+        config = _config_home(home, entry, participant.get("credential"))
+        if config is None:
+            return None
+        paths = SOURCES[adapter](config, Path(str(participant.get("lane", ""))))
+    except (BridgeError, KeyError, OSError, ValueError):
+        return None
+    readings = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            key = f"{path}:{stat.st_ino}"
+            prior = known.get(key)
+            base = {"path": str(path), "inode": stat.st_ino, "seen": set()}
+            if prior is not None:
+                last = str(prior.get("last", ""))
+                reading = _advance(
+                    path,
+                    fold,
+                    {
+                        **base,
+                        "offset": int(prior["offset"]),
+                        "tokens": int(prior["tokens"]),
+                        "seen": {last} if last else set(),
+                        "last": last,
+                    },
+                )
+            elif stat.st_mtime < since:
+                reading = {**base, "offset": stat.st_size, "tokens": 0}
+            else:
+                reading = _advance(path, fold, {})
+        except (KeyError, OSError, TypeError, ValueError):
+            continue
+        readings.append(
+            {
+                "key": key,
+                "offset": int(reading["offset"]),
+                "tokens": int(reading["tokens"]),
+                "last": str(reading.get("last", "")),
+            }
+        )
+    return readings or None

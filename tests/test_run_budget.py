@@ -12,6 +12,7 @@ import pytest
 
 from agent_parley import (
     budgets,
+    checkpoints,
     cli,
     lanes,
     problems,
@@ -149,10 +150,9 @@ def test_concurrent_admissions_share_one_allowance(
     bridge, repo, paired, monkeypatch
 ):
     identities = actors(bridge, paired)
-    serve(bridge, identities["claude"], 2)
-    serve(bridge, identities["codex"], 2)
     directory, manifest = enforced(bridge, repo, calls=5)
-    serve(bridge, identities["codex"], 1)
+    serve(bridge, identities["claude"], 2)
+    serve(bridge, identities["codex"], 3)
     escalations = []
     monkeypatch.setattr(
         budgets.notify,
@@ -184,8 +184,9 @@ def test_concurrent_admissions_share_one_allowance(
 
 
 def test_concurrent_accounting_never_double_counts(bridge, repo, paired):
-    serve(bridge, actors(bridge, paired)["claude"], 3)
+    identities = actors(bridge, paired)
     directory, manifest = enforced(bridge, repo, calls=100)
+    serve(bridge, identities["claude"], 3)
     threads = [
         threading.Thread(
             target=budgets.account, args=(bridge.home, directory, manifest)
@@ -204,6 +205,7 @@ def test_concurrent_accounting_never_double_counts(bridge, repo, paired):
 def test_exhaustion_blocks_wakes_and_retries_without_spending_attempts(
     bridge, repo, paired, monkeypatch
 ):
+    enforced(bridge, repo, calls=1000)
     calls, config, observed = idle_codex(bridge, paired, monkeypatch)
     directory, manifest = enforced(bridge, repo, calls=1000)
     supervision.wake(
@@ -229,11 +231,10 @@ def test_exhaustion_survives_restart_and_is_one_actionable_record(
     bridge, repo, paired
 ):
     lane = Path(paired["lanes"]["claude"])
-    transcript(lane, 600)
     directory, manifest = enforced(bridge, repo, tokens=500)
+    transcript(lane, 600)
     first = budgets.account(bridge.home, directory, manifest)
     assert first["used"]["tokens"] == 600
-    budgets._READINGS.clear()
     second = budgets.account(bridge.home, directory, manifest)
     assert second["used"]["tokens"] == 600
     assert second["exhausted"]["at"] == first["exhausted"]["at"]
@@ -244,8 +245,8 @@ def test_exhaustion_survives_restart_and_is_one_actionable_record(
 
 def test_lane_replacement_and_retries_keep_counting(bridge, repo, paired):
     lane = Path(paired["lanes"]["claude"])
-    old = transcript(lane, 300)
     directory, manifest = enforced(bridge, repo, tokens=10_000)
+    old = transcript(lane, 300)
     assert (
         budgets.account(bridge.home, directory, manifest)["used"]["tokens"]
         == 300
@@ -294,8 +295,10 @@ def test_missing_or_corrupt_usage_never_grants_allowance(bridge, repo, paired):
 
 
 def test_a_deleted_ledger_reads_as_exhausted_not_as_none(bridge, repo, paired):
-    serve(bridge, actors(bridge, paired)["claude"], 3)
+    identities = actors(bridge, paired)
     directory, manifest = enforced(bridge, repo, calls=100)
+    serve(bridge, identities["claude"], 3)
+    budgets.account(bridge.home, directory, manifest)
     ledger = json.loads((directory / budgets.LEDGER).read_text())
     assert ledger["calls"]["total"] == 3
     assert budgets.halted(directory, manifest) is None
@@ -328,8 +331,10 @@ def test_reset_on_an_unreadable_ledger_offsets_the_use_read_so_far(
 def test_concurrent_admissions_at_the_last_call_admit_exactly_one(
     bridge, repo, paired
 ):
-    serve(bridge, actors(bridge, paired)["claude"], 4)
+    identities = actors(bridge, paired)
     directory, manifest = enforced(bridge, repo, calls=5)
+    serve(bridge, identities["claude"], 4)
+    budgets.account(bridge.home, directory, manifest)
     refusals: list[str] = []
     threads = [
         threading.Thread(
@@ -410,8 +415,8 @@ def test_in_flight_lanes_are_asked_to_checkpoint_and_stop(bridge, repo, paired):
         },
     )
     write_json(directory / "claude-identity.json", {"name": "claude"})
-    serve(bridge, identities["claude"], 2)
     _, manifest = enforced(bridge, repo, calls=1)
+    serve(bridge, identities["claude"], 2)
     budgets.account(bridge.home, directory, manifest)
     event = {
         "session_id": "claude-run",
@@ -447,8 +452,9 @@ def test_in_flight_lanes_are_asked_to_checkpoint_and_stop(bridge, repo, paired):
 def test_only_the_operator_resumes_or_raises_the_run(
     bridge, repo, paired, monkeypatch, capsys
 ):
-    serve(bridge, actors(bridge, paired)["claude"], 3)
+    identities = actors(bridge, paired)
     directory, manifest = enforced(bridge, repo, calls=2)
+    serve(bridge, identities["claude"], 3)
     budgets.account(bridge.home, directory, manifest)
     with pytest.raises(BridgeError, match="run budget is exhausted"):
         bridge.launch("claude", repo, "continue")
@@ -494,3 +500,163 @@ def test_only_the_operator_resumes_or_raises_the_run(
         bridge.home, directory, manifest, reset=True
     )
     assert budgets.admit(directory, manifest, "claude") == ""
+
+
+def live_session(directory, name, **fields):
+    """Records a live native session for one lane, owned by this process."""
+    write_json(
+        directory / f"{name}-activity.json",
+        {
+            "activity": "working",
+            "updated": time.time(),
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+            **fields,
+        },
+    )
+
+
+def append(path, tokens, identifier):
+    """Appends one more reported message to a transcript."""
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": identifier,
+                        "usage": {"input_tokens": tokens},
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def test_hours_count_a_run_session_and_refuse_an_unstarted_one(
+    bridge, repo, paired
+):
+    directory, manifest = enforced(bridge, repo, hours=100)
+    live_session(directory, "claude", session_started=time.time() - 3600)
+    live_session(directory, "codex")
+    reading = budgets.account(bridge.home, directory, manifest)
+    assert 0.99 <= reading["used"]["hours"] <= 1.01
+    assert reading["missing"] == ["codex"]
+    assert budgets.admit(directory, manifest, "claude") == ""
+    assert "cannot be metered" in budgets.admit(directory, manifest, "codex")
+    rows = problems._run_rows(directory, manifest, paired["root"], time.time())
+    assert [row["participant"] for row in rows] == ["codex"]
+
+
+def test_every_transcript_is_read_to_its_end_from_a_durable_offset(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    history = transcript(lane, 999, "history.jsonl")
+    os.utime(history, (time.time() - 3600, time.time() - 3600))
+    directory, manifest = enforced(bridge, repo, tokens=10_000)
+    first = transcript(lane, 100, "first.jsonl")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"]
+        == 100
+    )
+    append(first, 50, "msg-late")
+    second = transcript(lane, 20, "second.jsonl")
+    os.utime(first, (time.time() - 60, time.time() - 60))
+    transcript(lane, 5, "offline.jsonl")
+    reading = budgets.account(bridge.home, directory, manifest)
+    assert reading["used"]["tokens"] == 175
+    append(second, 7, "msg-second.jsonl")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"]
+        == 175
+    )
+    append(second, 3, "msg-next")
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["tokens"]
+        == 178
+    )
+
+
+def test_calls_served_before_enforcement_never_count(bridge, repo, paired):
+    identities = actors(bridge, paired)
+    serve(bridge, identities["claude"], 3)
+    directory, manifest = enforced(bridge, repo, calls=100)
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["calls"] == 0
+    )
+    serve(bridge, identities["codex"], 2)
+    assert (
+        budgets.account(bridge.home, directory, manifest)["used"]["calls"] == 2
+    )
+
+
+def test_stop_continuation_is_admitted_through_the_run_budget(
+    bridge, repo, paired
+):
+    actors(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    live_session(directory, "claude")
+    write_json(directory / "claude-identity.json", {"name": "claude"})
+    stop = {
+        "hook_event_name": "Stop",
+        "session_id": "claude-run",
+        "cwd": str(lane),
+    }
+    _, manifest = enforced(bridge, repo, tokens=1000)
+    assert budgets.unmetered(directory, manifest) == ["claude", "codex"]
+    write_json(directory / "issues.json", {"revision": 1, "issues": {}})
+    assert checkpoint(bridge.home, directory, "claude", stop) == {}
+    bridge.enforce(repo, {"tokens": 0, "calls": 5, "hours": None})
+    manifest = roster.read(directory)
+    budgets.account(bridge.home, directory, manifest)
+    write_json(directory / "issues.json", {"revision": 2, "issues": {}})
+    reply = checkpoint(bridge.home, directory, "claude", stop)
+    assert reply.get("decision") == "block"
+    ledger = json.loads((directory / budgets.LEDGER).read_text())
+    assert ledger["reserved"] == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "refused"),
+    [
+        ("env -u AGENT_PARLEY_TOKEN agent-parley budget resume", True),
+        ("AGENT_PARLEY_TOKEN= agent-parley budget enforce --calls 9", True),
+        ("true && /usr/bin/agent-parley budget resume --reset", True),
+        ("bash -c 'agent-parley budget enforce --tokens 0'", True),
+        ("rtk proxy agent-parley budget --repo . resume", True),
+        ("agent-parley budget show", False),
+        ("agent-parley status", False),
+        ("echo budget resume", False),
+    ],
+)
+def test_a_lane_cannot_lift_its_own_run_budget(
+    bridge, repo, paired, command, refused
+):
+    lane = Path(paired["lanes"]["claude"])
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "claude-run",
+        "cwd": str(lane),
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    }
+    assert checkpoints.lifts_run_budget(payload) is refused
+    if refused:
+        reply = checkpoint(bridge.home, lane.parent, "claude", payload)
+        details = reply["hookSpecificOutput"]
+        assert details["permissionDecision"] == "deny"
+        assert (
+            "not an authority boundary" in (details["permissionDecisionReason"])
+        )
+
+
+def test_an_exhausted_run_registers_no_new_lane(bridge, repo, paired):
+    identities = actors(bridge, paired)
+    directory, manifest = enforced(bridge, repo, calls=1)
+    serve(bridge, identities["claude"], 1)
+    budgets.account(bridge.home, directory, manifest)
+    with pytest.raises(BridgeError, match="run budget is exhausted"):
+        bridge.launch("gemini", repo, "start", "claude")
+    assert "gemini" not in roster.read(directory)["participants"]

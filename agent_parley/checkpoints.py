@@ -182,6 +182,7 @@ class Reason(StrEnum):
     CHECKPOINT_FAILED = "checkpoint_failed"
     WAKE_REQUESTED = "wake_requested"
     ATTRIBUTION_REFUSED = "attribution_refused"
+    BUDGET_REFUSED = "budget_refused"
     OPERATOR_PAUSED = "operator_paused"
     OPERATOR_RESUMED = "operator_resumed"
     OPERATOR_STOPPED = "operator_stopped"
@@ -865,6 +866,68 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
             if len(positional) > 1 and positional[0] == "HEAD":
                 return True
     return False
+
+
+def lifts_run_budget(payload: dict, depth: int = 2) -> bool:
+    """Reports whether a native tool command changes the run budget.
+
+    Recording or resuming a run budget is the operator's decision, so a
+    lane's own command tool is refused it even when the lane's credential
+    is removed from the environment. This is a guard against a lane
+    lifting its own limit by accident, not an authority boundary: a lane
+    that hides the command well enough can still run it.
+
+    Args:
+        payload: Native lifecycle hook payload.
+        depth: How many levels of quoted shell text are searched.
+
+    Returns:
+        Whether any simple command runs ``agent-parley budget enforce`` or
+        ``agent-parley budget resume``.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return False
+    command = str(tool_input.get("command", tool_input.get("cmd", "")))
+    for segment in shell_segments(command):
+        for index, word in enumerate(segment):
+            if Path(word).name in {"agent-parley", "agent_parley"} and (
+                segment[index + 1 : index + 2] == ["budget"]
+                and any(
+                    argument in {"enforce", "resume"}
+                    for argument in segment[index + 2 :]
+                )
+            ):
+                return True
+            if depth and any(character.isspace() for character in word):
+                nested = {"tool_input": {"command": word}}
+                if lifts_run_budget(nested, depth - 1):
+                    return True
+    return False
+
+
+def continuation_refused(directory: Path, manifest: dict, agent: str) -> bool:
+    """Decides whether a Stop hook may keep a lane working on new notices.
+
+    Blocking a Stop to deliver issue or work notices starts another turn,
+    so it is admitted through the run budget like any other dispatch, and
+    an admitted continuation reserves a call where a calls limit applies.
+
+    Args:
+        directory: Private state directory for the common repository.
+        manifest: Project manifest.
+        agent: Participant that owns the lane.
+
+    Returns:
+        Whether the continuation is refused, including when the run ledger
+        stays busy.
+    """
+    from agent_parley import budgets
+
+    try:
+        return bool(budgets.admit(directory, manifest, agent))
+    except LockBusy:
+        return True
 
 
 def option_values(args: list[str], options: tuple[str, ...]) -> list[str]:
@@ -2394,6 +2457,21 @@ def checkpoint(
         }
         record(directory, agent, payload, Reason.ATTRIBUTION_REFUSED, refused)
         return refused
+    if event == "PreToolUse" and lifts_run_budget(payload):
+        refused = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Recording or resuming the run budget is the operator's "
+                    "decision; a lane does not run agent-parley budget "
+                    "enforce or resume. Report the need and stop. This is a "
+                    "guard, not an authority boundary."
+                ),
+            }
+        }
+        record(directory, agent, payload, Reason.BUDGET_REFUSED, refused)
+        return refused
     if payload.get("agent_id"):
         record(directory, agent, payload, Reason.OBSERVED, None)
         return {}
@@ -2684,7 +2762,7 @@ def checkpoint(
                     text = "\n\n".join(parts)
                     if event == "Stop" and (
                         not (issue_notice or work_notice)
-                        or budgets.RUN in standing["crossed"]
+                        or continuation_refused(directory, manifest, agent)
                     ):
                         output = {}
                     elif event == "Stop":

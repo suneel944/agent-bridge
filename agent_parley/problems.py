@@ -1126,17 +1126,20 @@ def _run_rows(
 
     Returns:
         One row while the run budget is exhausted; otherwise one row per
-        lane refused because its token use cannot be read, or none.
+        lane refused because its use cannot be metered, or none.
     """
     stopped = budgets.halted(directory, manifest)
     if not stopped:
         return [
             _row(
                 RUN_UNMETERED,
-                f"{name} has no readable token records while a token limit is "
-                "enforced; no wake, dispatch or retry starts for it",
-                f"agent-parley budget enforce --tokens 0 --repo {root} (or "
-                "launch the lane on a provider whose transcripts Parley reads)",
+                f"{name} cannot be metered: no readable token records while "
+                "a token limit is enforced, or a live session not started by "
+                "agent-parley run while an hours limit is; no wake, dispatch "
+                "or retry starts for it",
+                f"agent-parley budget enforce --tokens 0 --hours 0 --repo "
+                f"{root} (or relaunch the lane with agent-parley run on a "
+                "provider whose transcripts Parley reads)",
                 participant=name,
                 project=root,
             )

@@ -255,13 +255,18 @@ reported.
         )
 
         process.check_repository_host(repo)
-        data = self.add_participant(repo, agent, provider, credential)
-        stopped = budgets.halted(self.project(repo, create=False)[1], data)
+        directory = self.project(repo, create=False)[1]
+        stopped = (
+            budgets.halted(directory, roster.read(directory))
+            if (directory / "project.json").exists()
+            else None
+        )
         if stopped:
             raise BridgeError(
                 f"The run budget is exhausted ({stopped['cause']}), so no "
                 f"lane is launched or resumed; {budgets.RESUME}."
             )
+        data = self.add_participant(repo, agent, provider, credential)
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
         account = roster.launch_environment(

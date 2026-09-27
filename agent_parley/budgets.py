@@ -14,10 +14,15 @@ the same three readings, summed over every lane of the project, a gate on
 what the service starts: wakes, work dispatch, capacity retries and
 launches. The sum lives in a durable ledger that keeps the highest reading
 of each source, a transcript or a session, so a restart, a replaced lane or
-a retried session never resets it. A resumed session whose new transcript
-replays earlier messages is counted again, which can only exhaust the run
-early, never late. Reaching a limit
-records one exhaustion that only an operator's resume clears; running
+a retried session never resets it. Every transcript a lane's client kept is
+read from a durable byte offset, so records that ended between polls or
+were written while the service was down still count, while history from
+before the run budget was recorded does not. A resumed session whose new
+transcript replays earlier messages is counted again. Counting is still an
+observation, not a meter: tokens appended to a transcript deleted before
+the next poll and Codex rollouts outside the most recent ones ``records``
+considers are not seen, so the run can exhaust late by that much. Reaching a
+limit records one exhaustion that only an operator's resume clears; running
 sessions are asked to checkpoint and stop at their next hook event, and
 nothing is killed, discarded or approved on a lane's behalf.
 """
@@ -39,7 +44,6 @@ LEDGER = "run-budget.json"
 RUN = "run"
 LOCK_SECONDS = 10.0
 RESUME = "an operator resumes it with agent-parley budget resume"
-_READINGS: dict = {}
 
 
 def limits(home: Path, manifest: dict, name: str) -> dict:
@@ -297,31 +301,47 @@ def enforced(manifest: dict) -> dict:
     return dict(manifest.get("run_budget") or {})
 
 
-def _fresh() -> dict:
-    """Returns an empty run ledger."""
+def _fresh(cursor: int = 0, started: float = 0.0) -> dict:
+    """Returns an empty run ledger.
+
+    Args:
+        cursor: Highest event identifier already accounted for.
+        started: Instant counting began; transcripts untouched since are
+            history and not counted.
+    """
     return {
         "tokens": {},
         "hours": {},
-        "calls": {"cursor": 0, "total": 0},
+        "calls": {"cursor": cursor, "total": 0},
         "offset": {},
+        "cursors": {},
+        "started": started,
         "exhausted": None,
         "missing": [],
         "reserved": 0,
     }
 
 
-def start(directory: Path) -> None:
+def start(home: Path, directory: Path, root: str) -> None:
     """Writes the initial run ledger unless one is already recorded.
 
     Called before a run budget is first recorded, so a ledger that is
-    missing while a run budget is enforced always means it was lost.
+    missing while a run budget is enforced always means it was lost. The
+    ledger starts at the project's latest served call and at the present
+    instant, so calls and transcripts from before enforcement never count.
 
     Args:
+        home: Private bridge state root.
         directory: Private project state directory.
+        root: Canonical project key registered with the store.
     """
     with lock(directory / "run-budget.lock", timeout=LOCK_SECONDS):
         if not (directory / LEDGER).exists():
-            write_json(directory / LEDGER, _fresh())
+            try:
+                cursor = store.served_since(home, root, 0)[1]
+            except sqlite3.Error:
+                cursor = 0
+            write_json(directory / LEDGER, _fresh(cursor, time.time()))
 
 
 def _sound(data: object) -> bool:
@@ -330,8 +350,17 @@ def _sound(data: object) -> bool:
         return False
     calls = data.get("calls")
     exhausted = data.get("exhausted")
+    cursors = data.get("cursors", {})
     return (
-        all(
+        isinstance(cursors, dict)
+        and all(
+            isinstance(value, dict)
+            and type(value.get("offset")) is int
+            and isinstance(value.get("last", ""), str)
+            for value in cursors.values()
+        )
+        and type(data.get("started", 0)) in (int, float)
+        and all(
             isinstance(data.get(key), dict)
             and all(type(value) in (int, float) for value in data[key].values())
             for key in ("tokens", "hours", "offset")
@@ -365,7 +394,13 @@ def _load(directory: Path, manifest: dict) -> tuple[dict, str]:
     except (OSError, ValueError):
         data = None
     if _sound(data):
-        return {"missing": [], "reserved": 0, **data}, ""
+        return {
+            "missing": [],
+            "reserved": 0,
+            "cursors": {},
+            "started": 0.0,
+            **data,
+        }, ""
     return _fresh(), "the run ledger was unreadable, so prior use is unknown"
 
 
@@ -394,7 +429,7 @@ def halted(directory: Path, manifest: dict) -> dict | None:
 
 
 def unmetered(directory: Path, manifest: dict) -> list[str]:
-    """Names the lanes the last accounting found without token evidence.
+    """Names the lanes the last accounting found it could not meter.
 
     Args:
         directory: Private project state directory.
@@ -418,11 +453,13 @@ def _fold(
     Each token source is keyed by lane, transcript path and inode, and each
     session by lane and start time, and only its highest reading is kept,
     so rereading the same source after a restart never counts it twice and
-    a replaced lane's sources stay counted after it is gone. A new
-    transcript is a new source even when it replays messages an earlier
-    one recorded, so a resumed session can be counted twice; that only
-    exhausts the run early. The fold also records the unmetered lanes and
-    releases the calls reserved by admissions, whose use it has now read.
+    a replaced lane's sources stay counted after it is gone. Every
+    transcript of a lane is advanced from the byte offset the ledger
+    recorded for it, so a transcript that stopped growing between polls is
+    read to its end. A new transcript is a new source even when it replays
+    messages an earlier one recorded, so a resumed session can be counted
+    twice. The fold also records the unmetered lanes and releases the calls
+    reserved by admissions, whose use it has now read.
 
     Args:
         home: Private bridge state root.
@@ -432,34 +469,53 @@ def _fold(
         wanted: Enforced limits; unlimited fields are not read.
 
     Returns:
-        Lanes that are not retired and have no readable token records while
-        a token limit is enforced.
+        Lanes that are not retired and cannot be metered: without readable
+        token records while a token limit is enforced, or with a live
+        session whose start was never recorded while an hours limit is.
     """
     now = time.time()
     missing = []
     for name, participant in manifest["participants"].items():
+        unmetered = False
         if "tokens" in wanted:
-            tokens = records.reported_tokens(home, participant, _READINGS)
-            source = _READINGS.get(str(participant.get("lane", ""))) or {}
-            if tokens is None or not source:
-                if not roster.retired(participant):
-                    missing.append(name)
-            else:
-                key = f"{name}:{source['path']}:{source['inode']}"
+            prefix = f"{name}:"
+            known = {
+                key.removeprefix(prefix): {
+                    **cursor,
+                    "tokens": ledger["tokens"].get(key, 0),
+                }
+                for key, cursor in ledger["cursors"].items()
+                if key.startswith(prefix)
+            }
+            sources = records.lane_sources(
+                home, participant, known, float(ledger["started"])
+            )
+            unmetered = sources is None
+            for source in sources or []:
+                key = prefix + source["key"]
                 ledger["tokens"][key] = max(
-                    ledger["tokens"].get(key, 0), tokens
+                    ledger["tokens"].get(key, 0), source["tokens"]
                 )
+                ledger["cursors"][key] = {
+                    "offset": source["offset"],
+                    "last": source["last"],
+                }
         if "hours" in wanted:
             state = checkpoints.activity(directory, name)
             started = state.get("session_started")
-            if isinstance(started, (int, float)) and process.alive(
+            if process.alive(
                 state.get("session_pid"), state.get("session_ticks")
             ):
-                key = f"{name}:{started}"
-                ledger["hours"][key] = max(
-                    ledger["hours"].get(key, 0),
-                    round(max(0.0, now - float(started)) / 3600, 4),
-                )
+                if isinstance(started, (int, float)):
+                    key = f"{name}:{started}"
+                    ledger["hours"][key] = max(
+                        ledger["hours"].get(key, 0),
+                        round(max(0.0, now - float(started)) / 3600, 4),
+                    )
+                else:
+                    unmetered = True
+        if unmetered and not roster.retired(participant):
+            missing.append(name)
     if "calls" in wanted:
         served, cursor = store.served_since(
             home, manifest["root"], ledger["calls"]["cursor"]
@@ -517,8 +573,8 @@ def account(home: Path, directory: Path, manifest: dict) -> dict:
         manifest: Project manifest.
 
     Returns:
-        The enforced ``limits``, the ``used`` amounts, the lanes ``missing``
-        token evidence and the ``exhausted`` record or None; all empty when
+        The enforced ``limits``, the ``used`` amounts, the unmetered lanes
+        ``missing`` and the ``exhausted`` record or None; all empty when
         nothing is enforced.
     """
     wanted = enforced(manifest)
@@ -586,8 +642,10 @@ def admit(directory: Path, manifest: dict, name: str) -> str:
         Why the turn is refused, empty when it may start or nothing is
         enforced. An exhausted run, or a ledger that is missing or
         unreadable, refuses every lane; a lane the last fold found without
-        readable token records is refused while a token limit is enforced,
-        because an unmetered lane would otherwise be unlimited.
+        readable token records while a token limit is enforced, or with a
+        live session started outside ``agent-parley run`` while an hours
+        limit is, is refused, because an unmetered lane would otherwise be
+        unlimited.
 
     Raises:
         LockBusy: If the ledger lock stays held for ``LOCK_SECONDS``.
@@ -602,8 +660,9 @@ def admit(directory: Path, manifest: dict, name: str) -> str:
             return f"run budget exhausted ({stopped['cause']}); {RESUME}"
         if name in ledger["missing"]:
             return (
-                f"run budget: {name} has no readable token records, so its "
-                "use cannot be metered"
+                f"run budget: {name} has no readable token records or a live "
+                "session with no recorded start, so its use cannot be "
+                "metered"
             )
         if "calls" in wanted:
             if _used(ledger)["calls"] + ledger["reserved"] >= wanted["calls"]:

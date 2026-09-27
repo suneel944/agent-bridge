@@ -472,7 +472,7 @@ class SettingsMixin(BridgeCore):
                     data.get("run_budget") or {}, changes
                 )
                 if data["run_budget"]:
-                    budgets.start(directory)
+                    budgets.start(self.home, directory, data["root"])
                 else:
                     data.pop("run_budget")
                 write_json(directory / "project.json", data)

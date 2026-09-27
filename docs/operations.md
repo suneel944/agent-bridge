@@ -426,7 +426,7 @@ condition, that count, its age and what clears it:
 | `dirty worktree` | The lane holds uncommitted work and is not active, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |
 | `over budget` | The lane crossed an advisory token, call or hour limit. | `agent-parley participant budget NAME` |
 | `run budget exhausted` | The project's enforced run budget is used up or its ledger was unreadable or missing; no wake, dispatch, retry or launch starts. | `agent-parley budget resume` after raising the limit, or `--reset` |
-| `run budget unmetered` | A lane has no readable token records while a token limit is enforced, so it is refused wakes, dispatch and retries. | `agent-parley budget enforce --tokens 0`, or launch the lane on a provider whose transcripts Parley reads |
+| `run budget unmetered` | A lane has no readable token records while a token limit is enforced, or a live session not started by `agent-parley run` while an hours limit is, so it is refused wakes, dispatch and retries. | `agent-parley budget enforce --tokens 0 --hours 0`, or relaunch the lane with `agent-parley run` on a provider whose transcripts Parley reads |
 
 A retired lane reports nothing but that kept worktree. Its quiet is the state
 it was asked for, so it raises no stall, no inactivity and no acknowledgement
@@ -811,12 +811,21 @@ state directory, keeps the highest reading of each token source (a lane's
 transcript path and inode) and each session (a lane and its start time), and
 counts served calls past a durable event cursor, so retired events are never
 lost and none is counted twice. A restart, a replaced or removed lane and a
-retried session therefore add to the run and never reset it. One known
-over-count remains: a resumed session that writes a new transcript replaying
-earlier messages is a new source, so the replayed usage is counted again. That
-exhausts the run early, never late; message identifiers are not deduplicated
-across transcripts, and Codex rollouts carry none. `budget enforce` writes the
-initial ledger before it records the first limit.
+retried session therefore add to the run and never reset it. Every transcript
+a lane's client kept is read from a byte offset stored in the ledger, not only
+the newest, so usage appended just before a session switched transcripts, and
+sessions that ran while the service was down, are still counted. `budget
+enforce` writes the initial ledger before it records the first limit, starting
+the call cursor at the project's latest served call and skipping transcripts
+not modified since, so use from before enforcement does not count.
+
+Counting can err both ways. Over: a resumed session that writes a new
+transcript replaying earlier messages is a new source, so the replayed usage
+is counted again; message identifiers are not deduplicated across transcripts,
+and Codex rollouts carry none. Under: tokens appended to a transcript that is
+deleted before the next poll reads them, and Codex rollouts older than two days
+or outside the 16 most recently modified, are never seen, so the run can
+exhaust late by that much.
 
 The ledger is refreshed once by every supervision poll, under its lock, so
 concurrent lanes and services see one sequence of readings and the first
@@ -861,7 +870,9 @@ Native authentication, trust and approval prompts are untouched.
 **Missing or corrupt evidence.** While a token limit is enforced, a lane
 whose token records cannot be read, including every lane on a provider whose
 transcripts Parley cannot parse, is refused wakes and resumes, because an
-unmetered lane would otherwise be unlimited; `budget enforce` lists those
+unmetered lane would otherwise be unlimited. The same holds while an hours
+limit is enforced for a lane with a live session that `agent-parley run` did
+not start, since its start time is unknown; `budget enforce` lists those
 lanes as unmetered, and `problems` shows each as a `run budget unmetered` row,
 whether or not the service ever woke it before. A ledger that cannot be read,
 or is missing while a run budget is enforced, is moved aside to
@@ -871,9 +882,14 @@ and recorded as exhausted, so unknown prior use never reads as none.
 **Resume and reset.** Raising, removing or clearing a limit is an operator
 action. `budget enforce` and `budget resume` refuse to run when
 `AGENT_PARLEY_TOKEN` is set, as it is in a launched lane's environment, and no
-MCP tool changes the run budget. Nothing here is enforcement: the refusal only
-prevents accidental use from a lane, is not an authority boundary, and a
-process that unsets the variable is not stopped. Recording a new limit never
+MCP tool changes the run budget. A lane's hook also denies a shell command that
+runs `agent-parley budget enforce` or `budget resume`, so unsetting the
+variable in the same command does not slip past. Nothing here is enforcement:
+both refusals only prevent accidental use from a lane, are not an authority
+boundary, and a process that hides the command well enough is not stopped.
+A Stop hook that would keep a lane working on new issue or work notices is
+admitted through the run budget like a wake, and reserves a call where a calls
+limit applies. Recording a new limit never
 clears an exhaustion; `budget resume` does, and refuses while the run is still
 at or over a limit, so raise the limit first. Both read current usage first.
 `budget resume --reset` starts a new accounting period in which consumption so
