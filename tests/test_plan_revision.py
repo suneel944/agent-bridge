@@ -478,3 +478,32 @@ def test_a_busy_ledger_leaves_an_approval_open(bridge, repo, paired):
     [still] = bridge.plan_revision(repo, "proposals")["proposals"]
     assert still["status"] == "pending"
     assert "60" not in ledger(bridge, repo)
+
+
+def test_a_lane_cannot_propose_from_a_peer_worktree(
+    bridge, repo, paired, monkeypatch
+):
+    base = applied(bridge, repo)
+    monkeypatch.chdir(paired["lanes"]["codex"])
+    with pytest.raises(BridgeError, match="cannot propose from"):
+        proposed(bridge, paired["lanes"]["claude"], base, add=["43:42"])
+    assert ledger(bridge, repo)["43"]["blocked_by"] == ["17"]
+    record = proposed(bridge, paired["lanes"]["codex"], base, add=["43:42"])
+    assert record["by"] == "codex"
+
+
+def test_a_replay_after_retention_drops_the_record_changes_nothing(
+    bridge, repo, paired
+):
+    base = applied(bridge, repo)
+    lane = paired["lanes"]["claude"]
+    record = proposed(bridge, lane, base, add=["43:42"])
+    directory = bridge.project(repo)[1]
+    history = json.loads((directory / plan.PLAN).read_text())
+    del history["proposals"][record["id"]]
+    state.write_json(directory / plan.PLAN, history)
+    again = proposed(bridge, lane, base, add=["43:42"])
+    assert again["replayed"]
+    assert again["status"] == "accepted"
+    assert bridge.plan_revision(repo, "proposals")["revision"] == base + 1
+    assert ledger(bridge, repo)["43"]["blocked_by"] == ["17", "42"]

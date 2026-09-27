@@ -907,7 +907,9 @@ class ClaimsMixin(ReportsMixin):
 
         A proposal run from an assigned worktree is that lane's; one run from
         the project base checkout, outside every lane, is the operator's.
-        Only the operator approves or rejects, so a lane can never widen the
+        A lane running inside its own worktree cannot name a peer's worktree
+        as `--repo`, so it never proposes under the peer's name. Only the
+        operator approves or rejects, so a lane can never widen the
         authority its own proposal needs.
 
         Args:
@@ -938,9 +940,16 @@ class ClaimsMixin(ReportsMixin):
             roster.caller_lane(data)
         )
         if action == "propose":
+            by = roster.OPERATOR if operator else roster.resolve(data, lane)
+            caller = roster.caller_lane(data)
+            if not operator and caller not in (None, by):
+                raise BridgeError(
+                    f"{caller} cannot propose from {by}'s worktree; run the "
+                    "proposal from your own worktree."
+                )
             return plan.propose(
                 directory,
-                roster.OPERATOR if operator else roster.resolve(data, lane),
+                by,
                 base,
                 add or [],
                 remove or [],

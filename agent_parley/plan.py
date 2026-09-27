@@ -779,7 +779,7 @@ def _accept(history: dict, proposal: dict, operator: bool) -> None:
     }
     for change in proposal["changes"]:
         waits = dependencies.setdefault(change["issue"], [])
-        if change["op"] == "add":
+        if change["op"] == "add" and change["blocker"] not in waits:
             waits.append(change["blocker"])
         elif change["blocker"] in waits:
             waits.remove(change["blocker"])
@@ -815,6 +815,9 @@ def _accept(history: dict, proposal: dict, operator: bool) -> None:
         },
     ][-MAX_VERSIONS:]
     history["revision"] += 1
+    history["accepted"] = [*history.get("accepted", []), proposal["id"]][
+        -MAX_APPLIED_IDS:
+    ]
     flips = history.setdefault("flips", {})
     for item in proposal["changes"]:
         key = f"{item['issue']}:{item['blocker']}"
@@ -919,6 +922,8 @@ def propose(
         proposals = history.setdefault("proposals", {})
         if identity in proposals:
             return {**proposals[identity], "replayed": True}
+        if identity in history.get("accepted", []):
+            return {"id": identity, "status": ACCEPTED, "replayed": True}
         if not history["versions"]:
             raise BridgeError(
                 "No plan is applied; apply one with "
