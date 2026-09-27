@@ -149,6 +149,14 @@ Field names are documented in
 promise as the flags. `events export` and `watch --json` stay JSON Lines,
 because each is a stream rather than a snapshot.
 
+Without `--json`, `decision list` prints one row per decision — its ID, time,
+sender and subject — with a one-line body preview, and `provider show` and
+`credentials show` print one labeled field per line, identity first. An empty
+log or an empty field is stated in words. On a terminal narrower than a line,
+the line is clipped with `…` and a closing hint names `--json` for the full
+values; a pipe or a file receives every value in full. Credential values stay
+redacted in both modes.
+
 ## MCP tools
 
 Authentication supplies the lane identity; tool arguments cannot select another
