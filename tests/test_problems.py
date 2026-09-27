@@ -472,6 +472,59 @@ def test_an_overdue_claim_names_the_release(bridge, repo, paired, served):
     assert row["count"] == 1
 
 
+def test_a_refused_recovery_names_its_reason_while_the_claim_stands(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    claim_id = issues.snapshot(directory)["issues"]["42"]["claim_id"]
+    refusal = directory / "recovery" / "issue-42-refusal.json"
+    refusal.parent.mkdir(exist_ok=True)
+    write_json(
+        refusal,
+        {
+            "issue": "42",
+            "claim_id": claim_id,
+            "reason": "Claim owner is waiting for operator input.",
+            "refused_at": time.time() - 120,
+        },
+    )
+    [row] = rows(bridge, problems.REFUSED)
+    assert row["participant"] == "claude"
+    assert row["seconds"] >= 120
+    assert row["detail"] == (
+        "issue #42: approved recovery refused: "
+        "Claim owner is waiting for operator input."
+    )
+
+    write_json(refusal, {**json.loads(refusal.read_text()), "claim_id": "x"})
+    assert not rows(bridge, problems.REFUSED)
+
+
+def test_a_missing_root_names_the_live_lanes_it_keeps(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    assert not rows(bridge, problems.ROOT)
+    write_json(
+        directory / supervision.ROOT_PUBLICATION,
+        {
+            "since": time.time() - 600,
+            "retired": None,
+            "state_directory": str(directory),
+            "lanes": [],
+            "live": ["claude"],
+        },
+    )
+    [row] = rows(bridge, problems.ROOT)
+    assert row["participant"] == ""
+    assert row["project"] == paired["root"]
+    assert row["seconds"] >= 600
+    assert row["detail"] == (
+        "project root is gone; live lanes kept from retirement: claude"
+    )
+
+
 def test_two_overdue_claims_on_one_lane_are_one_row(
     bridge, repo, paired, served
 ):

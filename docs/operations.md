@@ -386,6 +386,8 @@ condition, that count, its age and what clears it:
 | `awaiting acknowledgement` | Messages needing acknowledgement have waited past `--ack-after`, which defaults to `stalled_after`. | Whatever the lane's state allows, from the remedy table below. |
 | `holding a refused key` | A lane that is not active refused a peer a reserved key and still holds it. The row names the refused lanes and how long the holder has been quiet. | Whatever the lane's state allows, from the remedy table below; an expired lease of a holder observed idle past `inactive_after` is also reclaimed by the next sweep. |
 | `bounced share` | A share the sender is still waiting on reached a recipient that cannot act on it. The row sits on the sender's lane. | Whatever the first blocked recipient's state allows, from the remedy table below. |
+| `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
+| `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `ready to retire` | Every claim the lane holds has been orphaned for longer than `orphan_retire_after` and no peer took it. | `agent-parley participant retire NAME` |
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
 | `dirty worktree` | The lane holds uncommitted work and is not active, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |
@@ -1945,8 +1947,9 @@ When the project root itself disappears, the first poll records
 lane still registered is captured for recovery, retired and has its
 reservations revoked. The marker names, per lane, the claims released and the
 checkpoint each one left, and the state directory for the operator to remove.
-The project then leaves `status`, `top` and `metrics`; a root that
-returns clears the marker on the next poll. When the service starts, it
+A lane whose session is still live is kept, and `agent-parley problems` names
+it under `root missing` until its session ends. The project then leaves
+`status`, `top` and `metrics`; a root that returns clears the marker on the next poll. When the service starts, it
 removes every wake socket in its home that no launcher is listening on.
 
 ## Other agent CLIs

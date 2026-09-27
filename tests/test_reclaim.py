@@ -828,6 +828,10 @@ def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     published = json.loads(marker.read_text())
     assert published["live"] == ["claude"]
     assert [lane["participant"] for lane in published["lanes"]] == ["codex"]
+    [row] = [
+        row for row in bridge.problems() if row["condition"] == problems.ROOT
+    ]
+    assert row["detail"].endswith("kept from retirement: claude")
 
 
 def test_a_missing_root_never_retires_an_unreadable_lane(bridge, repo, paired):
