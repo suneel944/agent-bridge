@@ -2986,6 +2986,9 @@ def _overdue_peer(
 ) -> str | None:
     """Chooses the peer an overdue claim is offered to.
 
+    Only undelivered claims count toward a peer's cap and load, as they do
+    where the cap is enforced.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -3018,7 +3021,11 @@ def _overdue_peer(
             config["inactive_after"],
         )["fit"]:
             continue
-        owned = sum(1 for record in ledger if record.get("owner") == name)
+        owned = sum(
+            1
+            for record in ledger
+            if record.get("owner") == name and not issues.delivered(record)
+        )
         if owned >= config["max_claims_per_lane"]:
             continue
         candidates.append((owned, name))
@@ -5294,8 +5301,13 @@ def _write_work_dispatch(
 
 
 def _wake_flags(home: Path, directory: Path, name: str) -> dict:
-    """Reads the persisted wake gates used to fence prompt admission."""
-    with lock(directory / "setup.lock"):
+    """Reads the persisted wake gates used to fence prompt admission.
+
+    The read waits up to one second for the setup lock, as the terminal's
+    own gate read does, because lanes take that lock briefly all the time
+    and refusing the wake on any holder logs a fault for a routine overlap.
+    """
+    with lock(directory / "setup.lock", timeout=1):
         manifest = roster.read(directory)
         participants = manifest.get("participants", {})
         participant = participants.get(name) or {}
