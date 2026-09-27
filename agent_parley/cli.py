@@ -3392,6 +3392,27 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     health.add_argument("--json", action="store_true", help=JSON_HELP)
     add_status_filters(health)
+    health.add_argument(
+        "--all",
+        action="store_true",
+        help="Also list claims whose issue or pull request ended on the forge.",
+    )
+    health.add_argument(
+        "--all-projects",
+        action="store_true",
+        help=(
+            "Report every project, not only the one the working directory "
+            "belongs to, with dormant projects listed last."
+        ),
+    )
+    health.add_argument(
+        "--table",
+        action="store_true",
+        help=(
+            "Print the full per-lane table instead of the open-work view. "
+            "Any lane filter or a named participant prints it too."
+        ),
+    )
     commands.add_parser(
         "title",
         help=(
@@ -4627,12 +4648,19 @@ def root_parser(
 
 
 def _plain_status() -> int:
-    """Runs the unfiltered status command without building its parser."""
+    """Runs the bare status command without building its parser.
+
+    The reading is the open-work view scoped to the project the working
+    directory belongs to, or every live project outside any project.
+    """
     home = Path(
         os.environ.get("AGENT_PARLEY_HOME", "~/.local/state/agent-parley")
     )
     try:
-        Bridge(home).status(Selection(), terminal_width())
+        bridge = Bridge(home)
+        bridge.board(
+            Selection(project=bridge.project_at(Path.cwd())), terminal_width()
+        )
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"agent-parley: {exc}", file=sys.stderr)
         return 1
@@ -5494,7 +5522,23 @@ def main() -> int:
                 print(views.render("status", narrowed))
                 matched = reported_lanes(narrowed)
             else:
-                matched = bridge.status(selection, terminal_width())
+                every_project = getattr(args, "all_projects", False)
+                if not selection.project and not every_project:
+                    selection = selection._replace(
+                        project=bridge.project_at(Path.cwd())
+                    )
+                if (
+                    getattr(args, "table", False)
+                    or selection._replace(project="").filtered()
+                ):
+                    matched = bridge.status(selection, terminal_width())
+                else:
+                    matched = bridge.board(
+                        selection,
+                        terminal_width(),
+                        every_claim=getattr(args, "all", False),
+                        every_project=every_project,
+                    )
             if matched and (
                 selection.drifted or selection.pending or selection.over_budget
             ):
