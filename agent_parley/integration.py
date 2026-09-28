@@ -322,9 +322,10 @@ class IntegrationMixin(MailMixin):
         command merges it on.
 
         An attempt is recorded before the merge starts and cleared only when
-        the exact resulting commit passes the post-merge gate, so a conflict,
-        a failed gate or a crash leaves a durable account of an unverified
-        base. While it stands no other lane is integrated, and a retry by the
+        the exact resulting commit passes the post-merge gate and the claim
+        is recorded complete, so a conflict, a failed gate, a crash or a busy
+        issue ledger leaves a durable account the lane's retry finishes.
+        While it stands no other lane is integrated, and a retry by the
         lane that may repair it skips the pre-merge gate, whose failure the
         record already names, and verifies the exact result instead.
 
@@ -499,20 +500,35 @@ class IntegrationMixin(MailMixin):
                             "complete."
                         ),
                     )
+            if claim["issue"] is not None and claim["claim_id"]:
+                try:
+                    lifecycle.complete(
+                        directory,
+                        str(claim["issue"]),
+                        claim["claim_id"],
+                        integrated,
+                        data["verify"],
+                        source_commit,
+                    )
+                except (BridgeError, OSError) as failure:
+                    detail = merges.diagnostic(
+                        f"verified but not recorded complete: {failure}"
+                    )
+                    merges.record_integration(
+                        directory, {**entry, "detail": detail}
+                    )
+                    raise BridgeError(
+                        f"{merged}\nThe merge at {integrated[:12]} passed "
+                        f"the gate, but issue #{claim['issue']} could not "
+                        f"be recorded complete: {failure}\nThe integration "
+                        f"record stands; run `agent-parley participant "
+                        f"merge {name}` again to record the completion."
+                    ) from None
             merges.clear_integration(directory, entry["attempt"], integrated)
             if held:
                 merged += (
                     f" Recovery verified {integrated[:12]} on attempt "
                     f"{entry['attempt']} of {entry['limit']}."
-                )
-            if claim["issue"] is not None and claim["claim_id"]:
-                lifecycle.complete(
-                    directory,
-                    str(claim["issue"]),
-                    claim["claim_id"],
-                    integrated,
-                    data["verify"],
-                    source_commit,
                 )
             metrics.record_report(
                 directory,
