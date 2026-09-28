@@ -1388,9 +1388,7 @@ def _change(
                             f"Issue #{blocker} is not in the issue ledger; "
                             "block only on recorded work."
                         )
-                    if blocker in waiting or (
-                        lifecycle.state(known)["state"] == lifecycle.COMPLETE
-                    ):
+                    if blocker in waiting or lifecycle.satisfied(known):
                         return record
                     if lifecycle.reaches(state["issues"], blocker, issue):
                         raise BridgeError(
@@ -1618,7 +1616,11 @@ def describe(state: dict, liveness: dict[str, str] | None = None) -> str:
             line += "; waits on " + ", ".join(
                 f"#{blocker} ({holder['owner']})"
                 if (holder := state["issues"].get(blocker, {})).get("owner")
-                else f"#{blocker} (unclaimed)"
+                else (
+                    f"#{blocker} (ended on forge, clears next poll)"
+                    if holder.get("ended_on_forge")
+                    else f"#{blocker} (unclaimed)"
+                )
                 for blocker in waiting
             )
         if offer := record["offer"]:

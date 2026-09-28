@@ -194,19 +194,41 @@ def released(record: dict, closed: bool = False) -> dict:
     return execution
 
 
+def satisfied(record: dict) -> bool:
+    """Reports whether a blocker no longer holds back the work waiting on it.
+
+    A blocker is satisfied by verified completion, or by release after its
+    issue or pull request ended on the forge, which marks the record
+    `ended_on_forge`. The operator merging or closing by hand ends the work
+    as surely as verified integration does, and nothing else would ever
+    clear the edge. A reclaim drops the mark, so a reopened blocker holds
+    its dependents again.
+
+    Args:
+        record: Ledger record of the blocking issue, or an empty mapping.
+
+    Returns:
+        True when the blocker is complete or ended on the forge.
+    """
+    return state(record)["state"] == COMPLETE or bool(
+        record.get("ended_on_forge")
+    )
+
+
 def dependencies_complete(ledger: dict, record: dict) -> bool:
-    """Reports whether every issue this record waits on is verified complete.
+    """Reports whether every issue this record waits on is satisfied.
 
     Args:
         ledger: Published issue ledger.
         record: Issue record whose dependencies are checked.
 
     Returns:
-        True when every dependency carries verified completion.
+        True when every dependency carries verified completion or ended on
+        the forge.
     """
     issues = ledger.get("issues", {})
     return all(
-        state(issues.get(number, {}))["state"] == COMPLETE
+        satisfied(issues.get(number, {}))
         for number in record.get("blocked_by", [])
     )
 
@@ -579,11 +601,13 @@ def integration_failed(
 
 
 def settle_dependencies(directory: Path) -> list[tuple[str, str]]:
-    """Drops dependency edges whose blocker is complete or no longer recorded.
+    """Drops dependency edges whose blocker is satisfied or no longer recorded.
 
     Completion frees its dependents at the instant it is recorded, which
     misses an edge added afterwards and an edge to an issue the ledger does
-    not hold. Such an edge can never clear on its own, and while it stands
+    not hold. A blocker released after it ended on the forge is satisfied
+    too, yet no completion is ever recorded for it. Such an edge can never
+    clear on its own, and while it stands
     the waiting issue can neither report ready nor be listed as unclaimed,
     whether or not anybody still owns it. The supervisor calls this on every
     poll, so the edge is reconciled whoever holds the issue.
@@ -605,8 +629,7 @@ def settle_dependencies(directory: Path) -> list[tuple[str, str]]:
                 blocker
                 for record in records.values()
                 for blocker in record.get("blocked_by", [])
-                if blocker not in records
-                or state(records[blocker])["state"] == COMPLETE
+                if blocker not in records or satisfied(records[blocker])
             },
             key=int,
         )
@@ -652,7 +675,7 @@ def _reconcile_dependents(ledger: dict, issue: str, now: float) -> None:
             not waiting["blocked_by"]
             and waiting_execution["state"] == BLOCKED
             and dependency
-            and state(dependency)["state"] == COMPLETE
+            and satisfied(dependency)
         ):
             waiting_execution.update(
                 state=RUNNING if waiting.get("owner") else QUEUED,
