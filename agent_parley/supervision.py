@@ -29,6 +29,7 @@ from agent_parley import (
     process,
     reclaim,
     records,
+    recovery,
     roster,
     store,
     terminal,
@@ -4537,7 +4538,10 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     here once, so `status` reports both without walking the disk itself.
     Every lane the sweep removed requests the `reclaimed` transition of its
     state; the transition table refuses it, and records the refusal, for a
-    lane whose state is not `stopped` or `dead`.
+    lane whose state is not `stopped` or `dead`. The same pass prunes the
+    recovery bundles no live claim can still read, so the state directory
+    stops growing by one bundle per capture of an issue nothing owns
+    anymore.
 
     Args:
         home: Private bridge state root.
@@ -4551,10 +4555,13 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
         return
     rows: list[dict] = []
     made: list[dict] = []
+    pruned: list[str] = []
     bridge = cli.Bridge(home)
     try:
         rows = bridge.reclaim(Path(manifest["root"]), apply=True)
         made = bridge.reclaim_worktrees(Path(manifest["root"]), apply=True)
+        with contextlib.suppress(OSError, ValueError):
+            pruned = recovery.prune(directory, issues.snapshot(directory))
     except BridgeError:
         pass
     finally:
@@ -4569,6 +4576,7 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     "state_bytes": reclaim.size(directory),
                     "reclaimable": sum(row["reclaim"] for row in left),
                     "forceable": sum(reclaim.forceable(row) for row in left),
+                    "bundles_pruned": len(pruned),
                 },
             )
     removed = [row["participant"] for row in rows if row.get("removed")]
