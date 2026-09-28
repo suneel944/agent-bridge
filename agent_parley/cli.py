@@ -2135,7 +2135,10 @@ class Bridge(
         superseded, because a lane that left answers nothing; the messages
         themselves stay readable. Removing the worktree deletes its ignored
         files, which `git status` never reports, so they are deleted only
-        when every one of them was named in ``discard``.
+        when every one of them was named in ``discard``. The lane's session
+        and checkpoint locks are both taken before the first irreversible
+        step, so a busy lane refuses the retirement with its worktree,
+        branch, credential and record intact rather than failing halfway.
 
         Args:
             repo: Any checkout of the target repository.
@@ -2161,9 +2164,12 @@ class Bridge(
                 )
             lane = Path(participant["lane"])
             branch = participant["branch"]
-            with lock(
-                directory / f"{name}.session.lock",
-                f"{name} has a running session; stop that terminal first.",
+            with (
+                lock(
+                    directory / f"{name}.session.lock",
+                    f"{name} has a running session; stop that terminal first.",
+                ),
+                lock(directory / f"{name}-checkpoint.lock", timeout=1),
             ):
                 if lane.exists():
                     if git(lane, "status", "--porcelain"):
@@ -2217,23 +2223,22 @@ class Bridge(
                         **held_claim(directory, name),
                     },
                 )
-                with lock(directory / f"{name}-checkpoint.lock", timeout=1):
-                    for suffix in (
-                        "identity.json",
-                        "activity.json",
-                        "mcp.json",
-                        "events.jsonl",
-                        "events.1.jsonl",
-                        "events.jsonl.tmp",
-                        "events.1.jsonl.tmp",
-                        "gemini-settings.json",
-                        "amp-settings.json",
-                    ):
-                        (directory / f"{name}-{suffix}").unlink(missing_ok=True)
-                    shutil.rmtree(
-                        directory / f"{name}-opencode", ignore_errors=True
-                    )
-                    release_copilot(self.home, participant, name)
+                for suffix in (
+                    "identity.json",
+                    "activity.json",
+                    "mcp.json",
+                    "events.jsonl",
+                    "events.1.jsonl",
+                    "events.jsonl.tmp",
+                    "events.1.jsonl.tmp",
+                    "gemini-settings.json",
+                    "amp-settings.json",
+                ):
+                    (directory / f"{name}-{suffix}").unlink(missing_ok=True)
+                shutil.rmtree(
+                    directory / f"{name}-opencode", ignore_errors=True
+                )
+                release_copilot(self.home, participant, name)
                 del data["participants"][name]
                 write_json(directory / "project.json", data)
             (directory / f"{name}-checkpoint.lock").unlink(missing_ok=True)
