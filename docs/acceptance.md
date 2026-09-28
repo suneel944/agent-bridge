@@ -175,30 +175,42 @@ replace. Five are decided from the estate's final state; the two that
 watch a lane over time are decided from the frames, because a lane that
 stalled for an hour and recovered leaves nothing behind at the end.
 
-**Every backlog issue reported.** Each seeded issue must end at `ready`,
-`blocked` or `bounced`, and anything other than `ready` must carry a
-reason. This proves the loop closes without an operator: lanes pick up
-work, finish it or say why they cannot, and nothing is left silently
-claimed.
+**Every backlog issue reported.** Each seeded issue must end at `ready`
+or `blocked`, and a `blocked` ending must carry a reason: the summary
+the lane filed with the report, read from the lane's durable report log.
+This proves the loop closes without an operator: lanes pick up work,
+finish it or say why they cannot, and nothing is left silently claimed.
 
 **Problems holds only operator rows.** Every row the problems view still
 shows at the end must name the operator as the actor and must carry the
 command that clears it. A row with no command, or one that waits on a
 lane, is a situation the service noticed and could not route.
 
-**No worktree outlived its claim.** A worktree whose issue already
-reported ready or merged must be gone. Stranded worktrees were the
-reclamation gap the audit found, and they accumulate silently across a
+**No worktree outlived its claim.** The product keeps one worktree per
+lane and none per issue, so a lane that holds no claim when the run ends
+must leave its worktree clean. Uncommitted or untracked changes there, or
+a worktree Git cannot read, are work no claim owns. Stranded work was the
+reclamation gap the audit found, and it accumulates silently across a
 long run.
 
 **Service log is clean.** The run fails on any `BrokenPipeError` and on
 any hook lock expiry in `server.log`. Both are faults the operator never
-sees at the time and both cost a lane its turn.
+sees at the time and both cost a lane its turn. The service rewrites its
+log in place at its bound and moves the oldest lines to `server.log.1`,
+so the verdict reads both files and counts every entry stamped at or
+after the run's start, not the bytes past an offset.
 
 **No lane idled on an open claim.** No frame may show a lane reading as
-stalled while it holds a claim. A lane idle with work it owns is the
-trust breach the audit opened this milestone on: the issue is not being
-worked, no peer can take it, and the status line says somebody owns it.
+stalled while it holds a claim, and no lane may leave one claim unworked
+for more than the default `claim_idle_after` of 3,600 seconds, summed
+over the run. Between two frames that both show the claim, the growth of the
+lane's `idle_seconds` reading counts as unworked time, and the whole gap
+counts when the lane's session process was not alive at its start. The
+stalled reading needs unanswered mail, so this total is what catches a
+lane idle on an empty inbox or a claim whose holder died. A lane idle
+with work it owns is the trust breach the audit opened this milestone on:
+the issue is not being worked, no peer can take it, and the status line
+says somebody owns it.
 
 **No lease outlived its holder.** No frame may show a lane holding a
 reservation past its deadline while no session process of its own is

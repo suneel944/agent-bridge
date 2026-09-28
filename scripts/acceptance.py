@@ -38,9 +38,10 @@ import subprocess
 import sys
 import termios
 import time
+from datetime import datetime
 from pathlib import Path
 
-from agent_parley import metrics, problems, supervision
+from agent_parley import metrics, problems, server, supervision
 
 BACKLOG = 20
 HOURS = 24.0
@@ -102,6 +103,8 @@ PROJECT_PERMISSIONS = (
     "Bash(ls:*)",
 )
 ENDINGS = frozenset({"ready", "blocked", "partial"})
+IDLE_CLAIM_SECONDS = float(supervision.DEFAULTS["claim_idle_after"])
+STAMP = "%Y-%m-%dT%H:%M:%S%z"
 CONDITION = """# Task {number}
 
 Create `{name}.py` with a function `{name}` that {behaviour}, and a test
@@ -361,28 +364,22 @@ def trust(home: Path, repo: Path, lanes: list[str]) -> list[str]:
     return paths
 
 
-def mark(home: Path, repo: Path) -> None:
-    """Records where the shared service log stood when the run began.
+def mark(repo: Path) -> None:
+    """Records the instant the run began.
 
     Args:
-        home: Private state directory the estate runs under.
         repo: Throwaway project the lanes coordinate over.
 
     One service writes one log for every project on the machine, so the
-    verdict reads only what was appended after this instant.
+    verdict counts only the log entries stamped at or after this instant.
+    A byte offset would not do: the service rewrites its log in place and
+    moves the oldest lines to the rotated file once the log reaches its
+    bound, and a long run always reaches it.
     """
-    log = home / "server.log"
     directory = repo / "acceptance"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "start.json").write_text(
-        json.dumps(
-            {
-                "at": time.time(),
-                "log": log.stat().st_size if log.exists() else 0,
-            },
-            indent=1,
-        )
-        + "\n"
+        json.dumps({"at": time.time()}, indent=1) + "\n"
     )
 
 
@@ -700,7 +697,14 @@ def _reports(cli: str, home: Path, repo: Path, issues: int) -> dict:
         the transition the history names for it. A release after a
         blocked report leaves the report as the ending. An issue nobody
         reported on maps to an empty state, which is what fails the run.
+
+    The reason is the summary the lane filed, read from the lane's own
+    durable report log by the report's identifier. The history line
+    itself only restates the state, so it would give every ending a
+    reason. A report the log no longer holds has no reason.
     """
+    directory = _directory(home, repo)
+    filed: dict[str, dict[str, dict]] = {}
     endings: dict[str, dict] = {}
     for number in range(1, issues + 1):
         document = _document(
@@ -711,10 +715,17 @@ def _reports(cli: str, home: Path, repo: Path, issues: int) -> dict:
         for event in history.get("records") or []:
             action = str(event.get("action", ""))
             if event.get("kind") == "report" and action in ENDINGS:
+                owner = str(event.get("participant", ""))
+                if owner not in filed:
+                    filed[owner] = {
+                        str(entry.get("id", "")): entry
+                        for entry in metrics.report_records(directory, owner)
+                    }
+                entry = filed[owner].get(str(event.get("report_id", "")), {})
                 ending = {
                     "state": action,
-                    "reason": str(event.get("detail", "")),
-                    "owner": str(event.get("participant", "")),
+                    "reason": str(entry.get("summary", "") or "").strip(),
+                    "owner": owner,
                 }
         endings[str(number)] = ending
     return endings
@@ -733,15 +744,39 @@ def _log_faults(home: Path, repo: Path) -> dict:
         of the log written after the run started is counted, because one
         service writes the log for every project on the machine and a
         fault from last week is not this run's.
+
+    The service rewrites its log in place once it reaches its bound and
+    appends the lines it drops to the rotated file, so the rotated file
+    is read first and the current log after it. A line belongs to the
+    timestamped entry above it, which carries a traceback's lines with
+    the entry that printed them, and is counted when that entry was
+    stamped in or after the second the run began. Lines above the first
+    stamp belong to an entry whose first line rotated away; they are
+    counted only when the run recorded no start.
     """
-    path = home / "server.log"
-    start = int(_read(repo / "acceptance" / "start.json").get("log", 0) or 0)
+    since = int(
+        float(_read(repo / "acceptance" / "start.json").get("at", 0) or 0)
+    )
     try:
-        with path.open(errors="replace") as handle:
-            handle.seek(start)
-            text = handle.read()
+        current = (home / server.LOG_NAME).read_text(errors="replace")
     except OSError:
         return {"readable": False, "broken_pipe": 0, "hook_expiry": 0}
+    try:
+        rotated = (home / server.ROTATED_NAME).read_text(errors="replace")
+    except OSError:
+        rotated = ""
+    counted = not since
+    kept: list[str] = []
+    for line in [*rotated.splitlines(), *current.splitlines()]:
+        try:
+            stamp = datetime.strptime(line.split(" ", 1)[0], STAMP)
+        except ValueError:
+            stamp = None
+        if stamp is not None:
+            counted = stamp.timestamp() >= since
+        if counted:
+            kept.append(line)
+    text = "\n".join(kept)
     return {
         "readable": True,
         "broken_pipe": text.count("BrokenPipeError"),
@@ -749,37 +784,35 @@ def _log_faults(home: Path, repo: Path) -> dict:
     }
 
 
-def _worktrees(repo: Path, endings: dict, lanes: list[str]) -> list[str]:
-    """Lists worktrees still held for an issue that already reported.
+def _worktrees(repo: Path, lanes: list[str], holding: set[str]) -> list[str]:
+    """Lists lane worktrees left with uncommitted work after their claims.
 
     Args:
         repo: Throwaway project the lanes coordinate over.
-        endings: Each issue's last recorded report.
         lanes: Lane specifications as ``name:provider[:credentials]``.
+        holding: Lanes that still hold a claim when the run ends.
 
     Returns:
-        The worktree paths that outlived the claim they were created for.
-        A lane's own worktree is not an issue worktree, even when its name
-        ends in a number, as ``claude-5`` does, that an issue shares.
+        The path of every lane worktree whose lane holds no claim and
+        whose Git status is not clean or cannot be read. The product
+        creates one worktree per lane and none per issue, so a lane that
+        finished or released every claim and still carries changes left
+        work that no claim owns.
     """
-    names = {lane.split(":", 1)[0] for lane in lanes}
+    names = {_lane(lane)[0] for lane in lanes}
     result = _run(["git", "worktree", "list", "--porcelain"], cwd=repo)
-    held = [
-        line.split(" ", 1)[1]
-        for line in result.stdout.splitlines()
-        if line.startswith("worktree ")
-    ]
-    done = {
-        number
-        for number, ending in endings.items()
-        if ending["state"] in ("ready", "merged")
-    }
-    return [
-        path
-        for path in held
-        if Path(path).name not in names
-        and Path(path).name.rsplit("-", 1)[-1] in done
-    ]
+    stranded: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = line.split(" ", 1)[1]
+        name = Path(path).name
+        if name not in names or name in holding:
+            continue
+        status = _run(["git", "status", "--porcelain"], cwd=Path(path))
+        if status.returncode or status.stdout.strip():
+            stranded.append(path)
+    return stranded
 
 
 def samples(frames: Path) -> list[dict]:
@@ -808,23 +841,57 @@ def samples(frames: Path) -> list[dict]:
 
 
 def _idle_claims(taken: list[dict]) -> list[str]:
-    """Names every lane that held a claim while it read as stalled.
+    """Names every lane that sat on a claim without working it.
 
     Args:
         taken: Frames the run recorded.
 
     Returns:
         One entry per lane and issue seen stalled with that claim open,
-        which is the condition an operator would have had to rescue by
-        hand.
+        or held without being worked for more than `IDLE_CLAIM_SECONDS`
+        over the run, which is the condition an operator would have had
+        to rescue by hand.
+
+    The stalled reading needs unanswered mail, so it never names a lane
+    idle on an empty inbox. Between two frames that both show a lane
+    holding a claim, the growth of the lane's own ``idle_seconds``
+    reading, capped at the gap, is time the claim was not worked. A gap
+    that opens with the lane's session process not alive counts whole,
+    because a lane with no process accrues no idle time of its own.
     """
     found: set[str] = set()
-    for record in taken:
+    unworked: dict[str, float] = {}
+    for index, record in enumerate(taken):
+        later = taken[index + 1] if index + 1 < len(taken) else {}
+        gap = float(later.get("at", 0) or 0) - float(record.get("at", 0) or 0)
+        following = {
+            lane.get("participant"): lane
+            for lane in (later.get("status") or {}).get("participants") or []
+        }
         for lane in (record.get("status") or {}).get("participants") or []:
-            if not (lane.get("idle") or {}).get("stalled"):
+            name = str(lane.get("participant", "?"))
+            claims = {str(claim["issue"]) for claim in lane.get("claims") or []}
+            if (lane.get("idle") or {}).get("stalled"):
+                found.update(f"{name}#{number}" for number in claims)
+            after = following.get(lane.get("participant")) or {}
+            kept = claims & {
+                str(claim["issue"]) for claim in after.get("claims") or []
+            }
+            if not kept or gap <= 0:
                 continue
-            for claim in lane.get("claims") or []:
-                found.add(f"{lane.get('participant', '?')}#{claim['issue']}")
+            if not (lane.get("availability") or {}).get("process_alive"):
+                idle = gap
+            else:
+                grown = float(after.get("idle_seconds", 0) or 0) - float(
+                    lane.get("idle_seconds", 0) or 0
+                )
+                idle = min(gap, max(0.0, grown))
+            for number in kept:
+                key = f"{name}#{number}"
+                unworked[key] = unworked.get(key, 0.0) + idle
+    found.update(
+        key for key, seconds in unworked.items() if seconds > IDLE_CLAIM_SECONDS
+    )
     return sorted(found)
 
 
@@ -984,7 +1051,7 @@ def verdict(
     unreported = [
         number
         for number, ending in endings.items()
-        if ending["state"] not in ("ready", "blocked", "bounced")
+        if ending["state"] not in ("ready", "blocked")
         or (ending["state"] != "ready" and not ending["reason"])
     ]
     final = _document(cli, home, ["problems"])
@@ -1001,7 +1068,15 @@ def verdict(
     if "error" in final:
         unattended.append({"condition": "unreadable", "detail": final})
     faults = _log_faults(home, repo)
-    stranded = _worktrees(repo, endings, lanes)
+    holding = {
+        str(lane.get("participant", ""))
+        for lane in _project(_document(cli, home, ["status"]), repo).get(
+            "participants"
+        )
+        or []
+        if lane.get("claims")
+    }
+    stranded = _worktrees(repo, lanes, holding)
     counters = lane_counters(home, repo, lanes)
     taken = samples(frames)
     idled = _idle_claims(taken)
@@ -1178,7 +1253,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "rehearse":
         workspace(repo, arguments.issues)
         register(arguments.cli, home, repo, lanes)
-        mark(home, repo)
+        mark(repo)
         faults = rehearse(arguments.cli, home, repo, lanes)
         sys.stdout.write(
             "".join(f"{fault}\n" for fault in faults)
@@ -1190,7 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
         register(arguments.cli, home, repo, lanes)
         if arguments.trust:
             trust(home, repo, lanes)
-        mark(home, repo)
+        mark(repo)
         started = launch(arguments.cli, home, repo, lanes)
         (repo / "acceptance" / "launched.json").write_text(
             json.dumps(started, indent=1)
