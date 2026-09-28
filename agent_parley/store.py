@@ -2504,7 +2504,9 @@ def _grant_queued(
 
     Requests are read in the order they were recorded, so the first lane to
     ask for a key is the first to take it, and a key that another lane still
-    holds is left queued rather than granted twice. A request whose lane no
+    holds is left queued rather than granted twice. A request whose lane
+    already holds the key at the strength it asked for is marked granted
+    without a new lease or notice. A request whose lane no
     longer holds a credential is left alone: a revoked registration expires
     its requests instead.
 
@@ -2546,6 +2548,18 @@ def _grant_queued(
     for request in queued:
         pattern = request["path_pattern"]
         if not any(overlapping(pattern, key) for key in released):
+            continue
+        if any(
+            owner == request["agent_id"]
+            and key == pattern
+            and (exclusive or not request["exclusive"])
+            for owner, key, exclusive in held
+        ):
+            db.execute(
+                "UPDATE reservation_requests SET granted_ts=CURRENT_TIMESTAMP "
+                "WHERE id=?",
+                (request["id"],),
+            )
             continue
         if any(
             owner != request["agent_id"]
@@ -4867,7 +4881,9 @@ def transfer_reservations(
     observes both lanes holding a key, and none observes neither holding it. A
     key the source no longer holds is skipped rather than invented for the
     target, and a key the target already holds is superseded by the moved
-    lease so one lane never accumulates two live records of one key.
+    lease so one lane never accumulates two live records of one key. A
+    request the target had queued for a moved key is marked granted, so a
+    later release never grants it the key a second time.
 
     Args:
         home: Private bridge state root.
@@ -4923,6 +4939,7 @@ def transfer_reservations(
                     lease["ttl_seconds"],
                 ),
             )
+            _settle_requests(db, receiver["id"], lease)
             moved.append(lease["path_pattern"])
     return moved
 
@@ -4987,8 +5004,33 @@ def transfer_claim_reservations(
                     lease["ttl_seconds"],
                 ),
             )
+            _settle_requests(db, receiver["id"], lease)
             moved.append(lease["path_pattern"])
     return moved
+
+
+def _settle_requests(
+    db: sqlite3.Connection, agent_id: int, lease: sqlite3.Row
+) -> None:
+    """Marks a lane's queued requests that a moved lease now satisfies.
+
+    A lane queued for a key and then handed that key's lease already holds
+    what it asked for. Leaving its request open would let the next release
+    of the key grant it again, displacing whoever holds it then. An
+    exclusive lease satisfies any request for its key; a shared lease
+    satisfies only a shared request.
+
+    Args:
+        db: Open transaction owned by the caller.
+        agent_id: Lane that received the lease.
+        lease: Moved lease, with its key and exclusivity.
+    """
+    db.execute(
+        "UPDATE reservation_requests SET granted_ts=CURRENT_TIMESTAMP "
+        "WHERE agent_id=? AND path_pattern=? AND granted_ts IS NULL "
+        "AND cancelled_ts IS NULL AND (exclusive=0 OR ?)",
+        (agent_id, lease["path_pattern"], bool(lease["exclusive"])),
+    )
 
 
 def release_reservations(home: Path, root: str, name: str) -> list[str]:
