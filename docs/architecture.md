@@ -1283,8 +1283,10 @@ healthy lane keep their context injection.
 
 The recovery checkpoint of a `SessionStart`, `PostToolUse`, `Stop` or
 `SessionEnd` is not part of the decision. The service answers the hook first
-and then queues the capture on one thread per lane, which works the lane's
-requests in arrival order under the lane's checkpoint lock. A decision
+and then queues the capture on one thread per lane. At most one request waits
+behind the running capture: a newer one replaces it and carries the most
+recent gate command of the requests it replaced when it ran none itself, so a
+burst of events costs the running capture and one more. A decision
 abandoned at its deadline queues its capture when it finishes. The in-process
 fallback writes its reply, then captures before it exits.
 
