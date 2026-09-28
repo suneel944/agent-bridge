@@ -405,6 +405,32 @@ def test_a_held_permission_prompt_is_a_waiting_on_approval_row(
     assert problems.APPROVAL == "waiting on approval"
 
 
+def test_a_prompt_in_a_lane_resumed_without_a_terminal_names_the_restart(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "claude",
+        attached=False,
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    deliver(bridge, repo, paired, ack=True, aged=1800)
+    found = rows(bridge, ack_after=600)
+    [row] = [item for item in found if item["condition"] == problems.APPROVAL]
+    assert "claude's terminal" not in row["command"]
+    assert str(directory / "claude-wake.log") in row["command"]
+    assert (
+        f"participant restart claude --repo {paired['root']}"
+        in (row["command"])
+    )
+    assert all("agent-parley say" not in item["command"] for item in found)
+
+
 def test_a_paused_lane_is_resumed_rather_than_spoken_to(
     bridge, repo, paired, served
 ):

@@ -525,6 +525,7 @@ reported.
                     launcher_pid=os.getpid(),
                     launcher_ticks=process.start_ticks(os.getpid()),
                     session_started=time.time(),
+                    attached=sys.stdin.isatty(),
                 )
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)
