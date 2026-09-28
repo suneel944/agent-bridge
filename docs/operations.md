@@ -2320,6 +2320,19 @@ recent change keep it and are reported by name. `agent-parley gc --apply
 --force` removes those too, but only after writing a recovery checkpoint
 bundle of the whole worktree, index and untracked files included, to the
 project's `recovery` folder; a checkpoint that fails removes nothing.
+
+A worktree whose unpushed commits already landed in the base checkout through
+another branch, such as a squash merge or a cherry-pick, is removed without
+`--force`. The sweep decides this with `git merge-tree --write-tree HEAD
+<head>`: when merging the worktree's head into the base head leaves the base
+tree unchanged, every change it holds is already there. The worktree must
+still be clean, and quiet past `inactive_after` or belong to a retired lane.
+It is reported with reason `its unpushed commits already landed in the base
+checkout through another branch`, and it is removed with an ordinary
+`git worktree remove` only after a recovery checkpoint bundle of it is
+written, so its commits stay recoverable. A checkpoint that fails removes
+nothing, and its branch is kept.
+
 `agent-parley gc`, `gc --dry-run` and its alias `agent-parley reclaim`
 without `--apply` add each worktree's size on disk.
 
@@ -2328,6 +2341,21 @@ worktrees a reclaim, and a forced reclaim, would still remove.
 `agent-parley status` prints them under the project heading and carries them
 as `reclaim` in its JSON document, reading the sweep's record instead of
 walking the disk.
+
+The same sweep prunes lane state that no longer serves anyone, and publishes
+the file names it removed under `pruned` in `reclaim.json`. A retired lane
+with no running session loses its `<name>-work.json`, `<name>-wake-work.json`,
+`<name>-mcp.json` and `<name>-wake.log`. Its identity, activity, event and
+report history, its `<name>-wake.json`, its `<name>-capacity.json`, which
+lanes on the same account still read, and its lock files are kept. Any
+`<name>-wake.log` unchanged for two days is removed too, because each wake
+appends to it.
+
+A lane whose session is not running still has its `<name>-work.json`
+rewritten when its offers or checks change, but not when only its capacity
+reading changes. A dead lane shares its capacity reading with every lane on
+the same account, so a live peer's observations would otherwise rewrite the
+dead lane's work file on every poll.
 
 When the project root itself disappears, the first poll records
 `root-missing.json` in the project state directory. One interval later every

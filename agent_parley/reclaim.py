@@ -49,6 +49,8 @@ from agent_parley.state import BridgeError, LockBusy, lock
 GIT_SECONDS = 5
 MAX_REPORTED_PATHS = 10
 RENAMED_HOMES = {"agent-parley": "agent-bridge"}
+RETIRED_FILES = ("-work.json", "-wake-work.json", "-mcp.json", "-wake.log")
+WAKE_LOG_RETENTION = 2 * 24 * 3600
 
 MERGED = "its pull request merged"
 STOPPED = (
@@ -79,13 +81,28 @@ UNCOMMITTED = "it holds uncommitted changes"
 UNMERGED = "its branch holds commits the base checkout does not have"
 UNUSED = "its branch never left the commit its lane was created from"
 UNPUSHED = "its branch holds commits its upstream does not have"
+ABSORBED = (
+    "its unpushed commits already landed in the base checkout through "
+    "another branch"
+)
 PULL_OPEN = "its pull request is still open"
 PUBLISHED = "its upstream still carries its branch"
 PULL_CLOSED = "its pull request was closed without merging"
 UNLANDED = "nothing shows its branch landed"
 REMOVABLE = frozenset(
-    {MERGED, GONE, STOPPED, VANISHED, MISSING, CONTAINED, ABANDONED, STALE}
+    {
+        MERGED,
+        GONE,
+        STOPPED,
+        VANISHED,
+        MISSING,
+        CONTAINED,
+        ABANDONED,
+        STALE,
+        ABSORBED,
+    }
 )
+BUNDLED = frozenset({ABSORBED})
 FORCEABLE = frozenset({UNCOMMITTED, UNPUSHED, RECENT})
 
 
@@ -576,6 +593,30 @@ def _unpushed(root: str, entry: dict, ahead: list[str]) -> list[str] | None:
     return _ahead(root, reference, entry["head"])
 
 
+def _absorbed(root: str, head: str) -> bool:
+    """Reports whether the base checkout already holds a head's changes.
+
+    A branch squash-merged or cherry-picked through another branch keeps
+    commits no ref of the base carries, yet merging it into the base
+    changes nothing. Git's own merge is the test: the head is absorbed
+    only when the merge applies cleanly and leaves the base's tree exactly
+    as it is. A conflict, an older Git without `merge-tree --write-tree`
+    and any other failure are all no.
+
+    Args:
+        root: Base checkout whose head is merged into.
+        head: Commit whose changes are looked for.
+
+    Returns:
+        True only when the merge result is the base head's own tree.
+    """
+    merged = _read(root, "merge-tree", "--write-tree", "HEAD", head)
+    if not merged:
+        return False
+    base = _read(root, "rev-parse", "HEAD^{tree}")
+    return bool(base) and merged.splitlines()[0] == base
+
+
 def _stray(
     root: str,
     entry: dict,
@@ -621,6 +662,9 @@ def _stray(
         if unpushed is None:
             return UNREADABLE, []
         if unpushed:
+            quiet = retired or time.time() - _changed(path) > after
+            if quiet and _absorbed(root, head):
+                return ABSORBED, unpushed
             return UNPUSHED, unpushed
     if retired:
         return ABANDONED, []
@@ -738,6 +782,48 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     return rows
 
 
+def prune(directory: Path, manifest: dict, now: float) -> list[str]:
+    """Deletes lane files nothing reads any more, and old wake logs.
+
+    A retired lane is never offered work, woken or launched until an
+    operator re-admits it, and a re-admitted lane writes these files anew,
+    so its published work, its wake prompt, its client configuration, which
+    carries a registration token, and its wake log only take space. The
+    lane's identity, activity, events, reports and capacity stay: they are
+    the history an archive exports, and capacity is read for every lane
+    sharing the same account. Lock files stay too, because unlinking a lock
+    another process holds would let a third take it. A lane whose session
+    still holds its session lock keeps everything.
+
+    A wake log records the relaunches the supervisor spawned and is only
+    ever appended to, so one untouched for `WAKE_LOG_RETENTION` seconds is
+    deleted whoever wrote it, including lanes no longer in the manifest.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Project manifest naming the participants.
+        now: Unix time the wake log retention is measured against.
+
+    Returns:
+        The names of the files deleted, sorted.
+    """
+    doomed: set[Path] = set()
+    for name, participant in manifest["participants"].items():
+        if participant.get("retired") and not _busy(directory, name):
+            doomed.update(directory / f"{name}{end}" for end in RETIRED_FILES)
+    for log in directory.glob("*-wake.log"):
+        if now - _changed(log) > WAKE_LOG_RETENTION:
+            doomed.add(log)
+    removed = []
+    for path in sorted(doomed):
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(path.name)
+    return removed
+
+
 def forceable(row: dict) -> bool:
     """Reports whether a forced sweep may remove one kept worktree."""
     return "worktree" in row and row["reason"] in FORCEABLE
@@ -755,7 +841,10 @@ def remove(
     A forced removal of a worktree kept for its uncommitted changes, its
     unpushed commits or a recent change first writes a recovery checkpoint
     holding all of them, and removes nothing when that checkpoint fails.
-    Branches are left in place.
+    A worktree whose unpushed commits already landed through another
+    branch is bundled the same way before its ordinary removal, so the
+    commits no ref of the base carries survive it too. Branches are left
+    in place.
 
     Args:
         root: Base checkout the worktree is registered with.
@@ -765,10 +854,18 @@ def remove(
 
     Returns:
         The row with whether Git removed it, and the checkpoint written
-        before a forced removal.
+        before a forced or bundled removal.
     """
     from agent_parley import recovery
 
+    if row["reclaim"] and row["reason"] in BUNDLED:
+        try:
+            saved = recovery.preserve(directory, Path(row["worktree"]))
+        except (BridgeError, OSError):
+            return {**row, "removed": False}
+        removed = _read(root, "worktree", "remove", row["worktree"])
+        gone = removed is not None
+        return {**row, "removed": gone, "checkpoint": saved["id"]}
     if row["reclaim"]:
         removed = _read(root, "worktree", "remove", row["worktree"])
         return {**row, "removed": removed is not None}
@@ -831,7 +928,9 @@ def lines(rows: list[dict]) -> list[str]:
         if "bytes" in row:
             detail += f"; {row['bytes'] / 1_000_000:.1f} MB"
         if "checkpoint" in row:
-            detail += f"; forced after checkpoint {row['checkpoint']}"
+            bundled = row["reason"] in BUNDLED
+            action = "bundled to" if bundled else "forced after"
+            detail += f"; {action} checkpoint {row['checkpoint']}"
         if row.get("remedy"):
             detail += f"; {row['remedy']}"
         label = row["participant"]

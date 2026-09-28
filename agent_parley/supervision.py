@@ -2199,6 +2199,31 @@ def _work_progress(ledger: dict, numbers: list[str]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 
+def _work_changed(previous: dict, published: dict) -> bool:
+    """Reports whether a lane's work publication needs rewriting.
+
+    A lane's capacity is the newest observation of every lane sharing its
+    provider account, so a running peer moves it on nearly every poll. A
+    lane whose session is not running reads none of it, and rewriting its
+    file for that alone keeps a dead lane's state looking fresh. Such a
+    lane's publication is rewritten only when something other than its
+    capacity changed; a lane that runs, or has no reading yet, is
+    rewritten on any change.
+
+    Args:
+        previous: The publication already on disk.
+        published: The publication this poll derived.
+
+    Returns:
+        Whether the new publication should be written.
+    """
+    if published == previous:
+        return False
+    if published["checks"].get("session") is not False:
+        return True
+    return {**published, "capacity": None} != {**previous, "capacity": None}
+
+
 def _work_dispatch(previous: dict, offer: dict) -> dict:
     """Keeps one dispatch obligation until work changes or disappears.
 
@@ -2497,7 +2522,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             if offer:
                 published["dispatch"] = _work_dispatch(previous, offer)
             path = directory / f"{name}-work.json"
-            if published != previous:
+            if _work_changed(previous, published):
                 write_json(path, published)
     idle = [
         name
@@ -4454,7 +4479,10 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     next attempt and gives the operator the account of what was removed and
     what was kept. The worktrees lanes made for themselves are swept in the
     same pass and published beside the lanes, without their sizes, because
-    measuring them walks every file they hold. The state directory's total
+    measuring them walks every file they hold. The files retired lanes no
+    longer need and wake logs past their retention are then deleted, as
+    `reclaim.prune` decides, and published by name. The state directory's
+    total
     size and the count of worktrees still left for a reclaim are measured
     here once, so `status` reports both without walking the disk itself.
     Every lane the sweep removed requests the `reclaimed` transition of its
@@ -4473,10 +4501,12 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
         return
     rows: list[dict] = []
     made: list[dict] = []
+    pruned: list[str] = []
     bridge = cli.Bridge(home)
     try:
         rows = bridge.reclaim(Path(manifest["root"]), apply=True)
         made = bridge.reclaim_worktrees(Path(manifest["root"]), apply=True)
+        pruned = reclaim.prune(directory, roster.read(directory), now)
     except BridgeError:
         pass
     finally:
@@ -4488,6 +4518,7 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     "swept": now,
                     "lanes": rows,
                     "worktrees": made,
+                    "pruned": pruned,
                     "state_bytes": reclaim.size(directory),
                     "reclaimable": sum(row["reclaim"] for row in left),
                     "forceable": sum(reclaim.forceable(row) for row in left),
