@@ -772,7 +772,7 @@ def _taken(
     if (
         takeover.get("claim_id") != record.get("claim_id")
         or takeover.get("orphan_id") != orphan.get("id")
-        or not takeover.get("checkpoint")
+        or not (takeover.get("checkpoint") or orphan.get("capture_failed"))
     ):
         raise Transient(
             f"Issue #{issue} recovery evidence changed; inspect and retry."

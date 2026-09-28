@@ -3882,7 +3882,7 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     ]
     if not dead and not returned:
         return
-    recoverable: set[str] = set()
+    uncaptured: dict[str, str] = {}
     reservations: dict = {}
     if dead:
         from agent_parley import recovery
@@ -3890,9 +3890,8 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         for name in dead:
             try:
                 recovery.capture(directory, manifest, name)
-                recoverable.add(name)
-            except (BridgeError, OSError, ValueError):
-                pass
+            except (BridgeError, OSError, ValueError) as exc:
+                uncaptured[name] = str(exc) or type(exc).__name__
         try:
             reservations = store.active_reservations(home, manifest["root"])
         except (BridgeError, OSError, sqlite3.Error):
@@ -3903,12 +3902,16 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         ledger = issues.snapshot(directory)
         changed = False
         for name, lane in dead.items():
-            if name not in recoverable:
-                continue
             keys = reservations.get(
                 manifest["participants"][name]["display"], []
             )
             reason = orphan_reason(name, lane)
+            if name in uncaptured:
+                reason += (
+                    "; no recovery checkpoint was captured "
+                    f"({uncaptured[name]}), so a takeover starts from the "
+                    "base without the dead lane's uncommitted work"
+                )
             marked = []
             fresh = False
             for number, record in ledger["issues"].items():
@@ -3932,6 +3935,8 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                     "reservations": list(keys),
                     "created": time.time(),
                 }
+                if name in uncaptured:
+                    record["orphan"]["capture_failed"] = uncaptured[name]
                 changed = True
                 fresh = True
             if fresh:
