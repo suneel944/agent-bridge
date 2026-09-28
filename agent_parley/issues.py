@@ -683,22 +683,6 @@ def change(
         raise
 
 
-def _drop_offer(directory: Path, record: dict) -> None:
-    """Removes the attachments of an offer that is leaving the record.
-
-    A declined or cancelled offer takes its spilled summary and its attached
-    diff with it, so an answered handoff leaves no unreferenced body behind.
-
-    Args:
-        directory: Private state directory for the common repository.
-        record: Ledger record whose pending offer is being cleared.
-    """
-    offer = record.get("offer") or {}
-    for field in ("attachment", "diff"):
-        if offer.get(field):
-            attachments.remove(directory, str(offer[field]))
-
-
 def _clear_recovery(record: dict) -> dict:
     """Removes the previous generation's take and orphan marker.
 
@@ -1336,7 +1320,7 @@ def _change(
                         record["attachment"] = offer["attachment"]
                     record["handoff"] = inherited
                 else:
-                    _drop_offer(directory, record)
+                    lifecycle.drop_offer(directory, record)
                 record["offer"] = None
             else:
                 if record["owner"] != agent and not operating:
@@ -1388,7 +1372,7 @@ def _change(
                 elif action == "cancel":
                     if not record["offer"]:
                         raise BridgeError("No handoff is pending.")
-                    _drop_offer(directory, record)
+                    lifecycle.drop_offer(directory, record)
                     record["offer"] = None
                 elif action == "release":
                     retired = str(record.get("claim_id") or "")
@@ -1398,6 +1382,7 @@ def _change(
                     record.pop("attachment", None)
                     inherited = record.pop("handoff", None) or {}
                     attachments.remove(directory, inherited.get("diff", ""))
+                    lifecycle.drop_offer(directory, record)
                     record.update(
                         owner=None, offer=None, request=None, deadline=None
                     )
