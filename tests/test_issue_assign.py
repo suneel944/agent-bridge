@@ -120,6 +120,18 @@ def test_a_second_offer_on_the_same_issue_is_refused(bridge, repo, paired):
         bridge.issue_assign(repo, "42", "claude")
 
 
+def test_a_claim_is_refused_while_an_offer_is_pending(bridge, repo, paired):
+    result = bridge.issue_assign(repo, "42", "codex", reason="Parser work")
+    with pytest.raises(BridgeError, match="offered to codex"):
+        bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    with pytest.raises(BridgeError, match="issue accept 42 --offer-id"):
+        bridge.issue(paired["lanes"]["codex"], "claim", "42")
+    record = ledger(bridge, repo)["42"]
+    assert record["owner"] is None
+    assert record["offer"]["id"] == result["offer_id"]
+    assert record["offer"]["reason"] == "Parser work"
+
+
 def test_a_held_issue_records_a_request_its_owner_is_mailed(
     bridge, repo, paired
 ):
