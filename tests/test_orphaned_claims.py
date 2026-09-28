@@ -838,6 +838,64 @@ def test_quiesce_resumes_after_the_exact_process_stops(
             child.wait()
 
 
+def test_quiesce_refuses_a_capture_without_the_issue(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    session_id = "moved-capacity-session"
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "working",
+                "updated": time.time(),
+                "session_id": session_id,
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        write_json(
+            directory / "capacity-candidates.json",
+            {
+                "version": 1,
+                "candidates": [
+                    {
+                        "issue": "42",
+                        "owner": "claude",
+                        "reason": "provider capacity exhausted",
+                        "reset_at": None,
+                        "source": "provider-status",
+                        "session_id": session_id,
+                        "observation_id": "moved-observation",
+                    }
+                ],
+            },
+        )
+        manifest = roster.read(directory)
+        bridge.authorize_recovery(repo, "42", "recover after provider refusal")
+        monkeypatch.setattr(recovery, "capture", lambda *args: [])
+
+        with pytest.raises(BridgeError, match="Issue #42 has no capture"):
+            recovery.quiesce_authorized(directory, manifest)
+
+        transitions = list((directory / "recovery").glob("*-quiesce.json"))
+        assert json.loads(transitions[0].read_text())["phase"] == "stopped"
+        assert "orphan" not in issues.snapshot(directory)["issues"]["42"]
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
 def test_a_refused_recovery_leaves_other_lanes_their_work(bridge, repo, paired):
     registered(bridge, paired)
     lane = Path(paired["lanes"]["claude"])

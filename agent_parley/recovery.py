@@ -1052,10 +1052,18 @@ def quiesce_exhausted(
         }
         write_json(activity_path, activity)
         saved = next(
-            value
-            for value in capture(directory, manifest, owner)
-            if value["issue"] == issue
+            (
+                value
+                for value in capture(directory, manifest, owner)
+                if value["issue"] == issue
+            ),
+            None,
         )
+        if saved is None:
+            raise BridgeError(
+                f"Issue #{issue} has no capture for claim {claim_id}; the "
+                "claim moved before recovery captured it."
+            )
         transition["phase"] = "captured"
         transition["checkpoint"] = saved["id"]
         write_json(transition_path, transition)
