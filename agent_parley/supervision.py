@@ -330,7 +330,7 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
         previous = str(json.loads(record.read_text()).get("boot_id") or "")
     except (OSError, ValueError, AttributeError):
         previous = ""
-    if previous == current:
+    if previous == current or previous.startswith(f"{{ sec = {current},"):
         return []
     marked = []
     if previous:
