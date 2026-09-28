@@ -308,6 +308,14 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
     the silence those paths measure. An operator restart records a new
     session, which moves the record out of `stopped` and clears the mark.
 
+    A session recorded in the current boot is left alone. A lane launched
+    after the restart can publish its new session before the first poll,
+    and marking that live session would read the lane as stopped on every
+    poll until the next launch. The launcher and the hooks stamp each
+    recorded session with the boot it started in, so a record carrying the
+    current boot identifier is known to be live rather than a leftover. A
+    record without that stamp predates it and is marked as before.
+
     The record is written before the mark, and the boot identifier only
     after every lane was marked, so a lane whose checkpoint lock or store
     was busy is marked on the next poll.
@@ -337,7 +345,11 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
         for name in manifest["participants"]:
             with lock(directory / f"{name}-checkpoint.lock", timeout=1):
                 state = checkpoints.activity(directory, name)
-                if state.get("session_pid") is None or rebooted(state):
+                if (
+                    state.get("session_pid") is None
+                    or state.get("session_boot") == current
+                    or rebooted(state)
+                ):
                     continue
                 with store.connect(home, write=True) as db:
                     lanes.transition(

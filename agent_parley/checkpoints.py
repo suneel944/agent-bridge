@@ -2556,9 +2556,15 @@ def checkpoint(
         if (new_session and not seeded) or (event == "SessionStart" and ended):
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
+            state.pop("session_boot", None)
             state.pop("session_started", None)
         state.update(session_id=session, updated=time.time(), event=event)
         if session_process is not None:
+            if "session_boot" not in state or (
+                state.get("session_pid"),
+                state.get("session_ticks"),
+            ) != (session_process.pid, session_process.ticks):
+                state["session_boot"] = process.boot_id()
             state["session_pid"] = session_process.pid
             state["session_ticks"] = session_process.ticks
         if session:

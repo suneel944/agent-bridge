@@ -345,6 +345,34 @@ def test_a_reboot_marks_the_lane_stopped_orphaned_and_restartable(
     assert captured[0][0] == "claude"
 
 
+def test_a_reboot_leaves_a_session_recorded_in_the_new_boot_live(
+    bridge, paired, monkeypatch
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    manifest = roster.read(directory)
+    write_json(
+        directory / "claude-activity.json",
+        {
+            "activity": "working",
+            "updated": time.time(),
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+            "session_boot": "new",
+        },
+    )
+    write_json(directory / supervision.BOOT_RECORD, {"boot_id": "old"})
+    monkeypatch.setattr(process, "boot_id", lambda: "new")
+    home = bridge.home
+    assert supervision.settle_reboot(home, directory, manifest) == []
+    state = json.loads((directory / "claude-activity.json").read_text())
+    assert state["activity"] == "working"
+    assert not supervision.rebooted(state)
+    assert supervision.presence(directory, "claude")["process_alive"] is True
+    record = json.loads((directory / supervision.BOOT_RECORD).read_text())
+    assert record["boot_id"] == "new"
+
+
 def test_restart_replays_initialization_and_launches_the_same_provider(
     bridge, repo, paired, monkeypatch, tmp_path
 ):
