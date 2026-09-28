@@ -247,6 +247,77 @@ def test_a_delivered_claim_does_not_count_toward_the_cap(bridge, paired):
         bridge.issue(lane, "claim", "10")
 
 
+def test_a_claim_on_a_closed_issue_does_not_count_toward_the_cap(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    for number in ("7", "8"):
+        bridge.issue(lane, "claim", number)
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "9")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        for number in ("7", "8"):
+            ledger["issues"][number]["handoff_prompt"] = {
+                "trigger": issues.ENDED,
+                "holder": "claude",
+                "created": time.time(),
+                "responded_at": time.time(),
+            }
+        write_json(directory / "issues.json", ledger)
+    assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
+    assert bridge.issue(lane, "claim", "10")["owner"] == "claude"
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "11")
+
+
+def test_ready_work_on_a_closed_issue_releases_without_requeueing(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        record = ledger["issues"]["7"]
+        record["execution"] = {
+            **lifecycle.state(record),
+            "authorized": True,
+            "state": lifecycle.READY,
+            "claim_id": record["claim_id"],
+        }
+        write_json(directory / "issues.json", ledger)
+    with pytest.raises(BridgeError, match="Ready work must remain claimed"):
+        bridge.issue(lane, "release", "7")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["7"]["handoff_prompt"] = {
+            "trigger": issues.ENDED,
+            "holder": "claude",
+            "created": time.time(),
+            "responded_at": time.time(),
+        }
+        write_json(directory / "issues.json", ledger)
+    released = bridge.issue(lane, "release", "7")
+    assert released["owner"] is None
+    assert released["ended_on_forge"]
+    assert "7" not in lifecycle.actionable(issues.snapshot(directory))
+    reclaimed = bridge.issue(lane, "claim", "7")
+    assert reclaimed["owner"] == "claude"
+    assert "ended_on_forge" not in reclaimed
+
+
+def test_resolve_without_an_escalation_names_release(bridge, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "7")
+    with pytest.raises(BridgeError, match="issue release 7"):
+        bridge.issue_resolve(lane, "7")
+
+
 def test_a_wake_waits_out_a_brief_setup_lock_holder(bridge, paired):
     registered(bridge, paired)
     directory = Path(paired["lanes"]["claude"]).parent

@@ -1974,12 +1974,15 @@ def _waiting_claims(ledger: dict, held: list[str]) -> list[str]:
         One phrase per held claim with no action the lane can take now, in
         the order held: ready work waits on CI and review before verified
         integration, blocked work on its recorded condition, and work whose
-        dependency is unfinished on that dependency.
+        dependency is unfinished on that dependency. A claim whose issue
+        closed waits on nothing, so it is left out.
     """
     waiting = []
     for number in held:
         record = ledger["issues"].get(number) or {}
-        if number in lifecycle.actionable(ledger, record.get("owner")):
+        if number in lifecycle.actionable(
+            ledger, record.get("owner")
+        ) or issues.closed(record):
             continue
         execution = lifecycle.state(record)
         pending = [

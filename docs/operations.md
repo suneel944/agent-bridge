@@ -1892,7 +1892,10 @@ checkpoint attached, then release once that offer expires. Each step is
 recorded in history and counted in `attempts`. Blocked and ready work is
 waiting rather than idle and is not moved. `issue claim` and `issue accept` refuse a lane
 that already holds `max_claims_per_lane` claims and name each held claim with
-its progress age. `issue request N [--summary REASON]` asks the holder to hand the
+its progress age. A claim whose issue closed on the forge inside its generation
+does not count toward the cap, and its holder can `issue release` it even after
+a ready report; the release marks it ended on the forge, so it is not offered
+again as free work until someone claims it. `issue request N [--summary REASON]` asks the holder to hand the
 issue to the requesting lane; the holder answers with `issue accept` or
 `issue decline` and the request identifier, and a holder that neither answers
 nor records progress on the claim within `takeover_grace` has the request

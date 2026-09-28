@@ -148,11 +148,19 @@ def claimed(record: dict, claim_id: str) -> dict:
     return execution
 
 
-def released(record: dict) -> dict:
+def released(record: dict, closed: bool = False) -> dict:
     """Returns unfinished work to its authorized queue after release.
+
+    A claim whose issue closed on the forge inside its generation has no
+    integration left to wait on, so even ready work may be released. It is
+    marked `ended_on_forge` rather than offered again as free work; the
+    next claim builds a fresh record without the mark, so a reopened issue
+    can still be taken.
 
     Args:
         record: Mutable issue ledger record.
+        closed: Whether the claim's issue closed on the forge inside the
+            current ownership generation.
 
     Returns:
         The execution mapping stored on the record.
@@ -161,11 +169,16 @@ def released(record: dict) -> dict:
         BridgeError: If ready work still awaits verified integration.
     """
     execution = state(record)
-    if execution["state"] == READY:
+    if execution["state"] == READY and not closed:
         raise BridgeError(
             "Ready work must remain claimed until verified integration "
             "completes."
         )
+    if closed:
+        record["ended_on_forge"] = {
+            "at": time.time(),
+            "claim_id": record.get("claim_id"),
+        }
     if execution["state"] != COMPLETE:
         execution.update(
             state=QUEUED,
@@ -207,7 +220,8 @@ def actionable(ledger: dict, owner: str | None = None) -> list[str]:
 
     Returns:
         Issue numbers ordered numerically. Owner work is limited to its
-        current generation. Free work must be queued and unowned.
+        current generation. Free work must be queued, unowned and not
+        released after its issue ended on the forge.
     """
     found = []
     for number, record in ledger.get("issues", {}).items():
@@ -217,7 +231,11 @@ def actionable(ledger: dict, owner: str | None = None) -> list[str]:
         if not dependencies_complete(ledger, record):
             continue
         if owner is None:
-            eligible = not record.get("owner") and execution["state"] == QUEUED
+            eligible = (
+                not record.get("owner")
+                and not record.get("ended_on_forge")
+                and execution["state"] == QUEUED
+            )
         else:
             eligible = (
                 record.get("owner") == owner
