@@ -189,7 +189,8 @@ def test_checkpoint_waits_for_a_short_activity_update(
 
 def test_public_state_directory_rejected(tmp_path):
     public = tmp_path / "public"
-    public.mkdir(mode=0o755)
+    public.mkdir()
+    public.chmod(0o755)
     with pytest.raises(BridgeError, match="private"):
         Bridge(public)
 
