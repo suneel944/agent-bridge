@@ -13,6 +13,7 @@ moved method reads. This module never imports `cli` at import time, because
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 import subprocess
 import time
@@ -87,11 +88,15 @@ class IntegrationMixin(MailMixin):
     def _from_base(
         self, repo: Path, root: Path, data: dict, subject: str
     ) -> None:
-        """Refuses an operator decision made inside an assigned worktree.
+        """Refuses an operator decision made by a lane.
 
-        This is the command-line boundary between the operator and the
-        lanes, not an operating-system one: a program running as the same
-        user can write coordination state directly.
+        A launched lane carries its coordination credential in
+        `unattended.LANE_TOKEN`, and every process it starts inherits it,
+        so a lane that changes directory to the base checkout is still
+        refused, the same rule `unattended.approve` applies. This is the
+        command-line boundary between the operator and the lanes, not an
+        operating-system one: a program running as the same user can
+        write coordination state directly.
 
         Args:
             repo: Checkout the command runs in.
@@ -100,20 +105,27 @@ class IntegrationMixin(MailMixin):
             subject: What is decided, as the start of the refusal.
 
         Raises:
-            BridgeError: If the command runs inside an assigned worktree.
+            BridgeError: If the command runs inside an assigned worktree
+                or with a lane's coordination credential.
         """
         from agent_parley.cli import git, roster
+        from agent_parley.unattended import LANE_TOKEN
 
         here = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
         lanes = {
             Path(lane["lane"]).resolve()
             for lane in data["participants"].values()
         }
-        if here in lanes or roster.caller_lane(data):
+        if (
+            here in lanes
+            or roster.caller_lane(data)
+            or os.environ.get(LANE_TOKEN)
+        ):
             raise BridgeError(
-                f"{subject} recorded from the base checkout at {root}, never "
-                "from an assigned worktree, so a lane does not decide its own "
-                "work."
+                f"{subject} recorded from an operator shell in the base "
+                f"checkout at {root}, never from an assigned worktree or a "
+                f"process holding a lane's {LANE_TOKEN}, so a lane does not "
+                "decide its own work."
             )
 
     def verify_recovery(self, repo: Path) -> str:

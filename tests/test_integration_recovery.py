@@ -258,7 +258,7 @@ def test_repeated_failure_exhausts_into_one_escalation(
     rows = problems._integration_rows(directory, str(repo), time.time())
     assert len(rows) == 1
     assert "--renew-recovery" in rows[0]["command"]
-    with pytest.raises(BridgeError, match="from the base checkout"):
+    with pytest.raises(BridgeError, match="in the base checkout"):
         bridge.merge(failed["lane"], "claude", renew=True)
 
     lane = failed["lane"]
@@ -408,7 +408,7 @@ def test_the_operator_path_clears_only_on_a_passing_gate(
     bridge, repo, paired, gated, failed
 ):
     directory = bridge.project(repo)[1]
-    with pytest.raises(BridgeError, match="from the base checkout"):
+    with pytest.raises(BridgeError, match="in the base checkout"):
         bridge.verify_recovery(failed["lane"])
     with pytest.raises(BridgeError, match="record stands"):
         bridge.verify_recovery(repo)
