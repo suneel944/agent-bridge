@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import shlex
     import shutil
     import socket as socket
+    import sqlite3
     import string
     import subprocess
     import textwrap
@@ -211,6 +212,7 @@ DEFERRED_STANDARD_MODULES = (
     "shlex",
     "shutil",
     "socket",
+    "sqlite3",
     "string",
     "subprocess",
     "textwrap",
@@ -2282,7 +2284,12 @@ class Bridge(
         directory, _, _ = self._lane(repo, name)
         with lock(directory / "setup.lock"):
             data = roster.read(directory)
-            participant = data["participants"][name]
+            participant = data["participants"].get(name)
+            if participant is None:
+                raise BridgeError(
+                    f"{name} was retired while this command ran; nothing "
+                    "changed."
+                )
             if participant.get("paused", False) is not resume:
                 state = "paused" if not resume else "not paused"
                 return f"{name} is already {state}; nothing changed."
@@ -5794,14 +5801,37 @@ def main() -> int:
         return 0
     except (
         BridgeError,
+        KeyError,
         OSError,
         ValueError,
+        sqlite3.Error,
         subprocess.TimeoutExpired,
     ) as exc:
-        print(f"agent-parley: {exc}", file=sys.stderr)
+        print(f"agent-parley: {_error_message(exc)}", file=sys.stderr)
         if getattr(args, "json", False):
             print(_error_document(exc))
         return 1
+
+
+def _error_message(exc: Exception) -> str:
+    """Words one runtime failure as the line the CLI prints.
+
+    A missing key reads as its quoted key alone, so it is named as a record
+    that vanished, which is how one reaches the handler: another process
+    retired or removed it between the command's read and its use.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The message both the human line and the error document carry.
+    """
+    if isinstance(exc, KeyError):
+        return (
+            f"No record {exc.args[0]!r} any more; another command changed "
+            "the project while this one ran. Rerun it."
+        )
+    return str(exc)
 
 
 def _error_document(exc: Exception) -> str:
@@ -5824,10 +5854,15 @@ def _error_document(exc: Exception) -> str:
         kind = "timeout"
     elif isinstance(exc, OSError):
         kind = "os"
+    elif isinstance(exc, KeyError):
+        kind = "missing"
+    elif isinstance(exc, sqlite3.Error):
+        kind = "store"
     else:
         kind = "value"
+    message = _error_message(exc)
     return json.dumps(
-        views.document("error", {"error": {"type": kind, "message": str(exc)}}),
+        views.document("error", {"error": {"type": kind, "message": message}}),
         ensure_ascii=False,
     )
 
