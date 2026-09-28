@@ -5131,6 +5131,12 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
 
     This observes delivery, not the semantic completeness of a handoff. It
     never acknowledges mail, releases an issue or transfers ownership.
+
+    A message the store routed to the project feed answers the reminder
+    whether or not any mailbox received it. Routing withholds a broadcast
+    from idle or unconcerned lanes and records no recipient row for them,
+    yet every lane reads that message from the feed, so waiting on a
+    recipient row would leave the reminder open until a peer returned.
     """
     with lock(directory / "issues.lock", timeout=1):
         ledger = issues.snapshot(directory)
@@ -5143,27 +5149,29 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
                 holder = manifest["participants"].get(prompt["holder"])
                 if not holder:
                     continue
-                recipients = {
-                    row["name"]
-                    for row in db.execute(
-                        "SELECT recipient.name FROM messages m "
-                        "JOIN agents sender ON sender.id=m.sender_id "
-                        "JOIN projects p ON p.id=m.project_id "
-                        "JOIN message_recipients r ON r.message_id=m.id "
-                        "JOIN agents recipient ON recipient.id=r.agent_id "
-                        "WHERE p.human_key=? AND sender.name=? "
-                        "AND m.id>?",
-                        (
-                            manifest["root"],
-                            holder["display"],
-                            prompt.get("after_message_id", 0),
-                        ),
+                rows = db.execute(
+                    "SELECT m.feed AS feed, recipient.name AS name "
+                    "FROM messages m "
+                    "JOIN agents sender ON sender.id=m.sender_id "
+                    "JOIN projects p ON p.id=m.project_id "
+                    "LEFT JOIN message_recipients r ON r.message_id=m.id "
+                    "LEFT JOIN agents recipient ON recipient.id=r.agent_id "
+                    "WHERE p.human_key=? AND sender.name=? "
+                    "AND m.id>?",
+                    (
+                        manifest["root"],
+                        holder["display"],
+                        prompt.get("after_message_id", 0),
+                    ),
+                ).fetchall()
+                recipients = {row["name"] for row in rows if row["name"]}
+                if any(row["feed"] for row in rows) or (
+                    recipients
+                    and all(
+                        manifest["participants"].get(name, {}).get("display")
+                        in recipients
+                        for name in prompt["waiting"]
                     )
-                }
-                if recipients and all(
-                    manifest["participants"].get(name, {}).get("display")
-                    in recipients
-                    for name in prompt["waiting"]
                 ):
                     prompt["responded_at"] = time.time()
                     changed = True
