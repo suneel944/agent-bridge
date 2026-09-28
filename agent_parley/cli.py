@@ -3556,7 +3556,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         metavar="LIST",
         help=(
             "Show only these columns, comma separated, such as "
-            "PARTICIPANT,STATE,IDLE. Every column is shown by default."
+            "PARTICIPANT,STATE,IDLE, or all for every column. The default "
+            "leaves out PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and "
+            "FIT."
         ),
     )
     watch.add_argument(

@@ -928,7 +928,7 @@ def test_an_idle_claim_with_a_countable_backlog_offers_one_split(
     view = dashboard.collect(bridge.home, False, {})
     rows = {row["participant"]: row for row in view["projects"][0]["rows"]}
     assert rows["claude"]["offer_kind"] == "split"
-    assert "split offer pending" in "\n".join(dashboard.render(view))
+    assert "+split" in "\n".join(dashboard.render(view, columns=("ALL",)))
     reported = views.frame(view)["projects"][0]["participants"]
     holder = next(row for row in reported if row["participant"] == "claude")
     assert holder["work_offer"] == "split"
@@ -1513,9 +1513,9 @@ def test_top_reports_the_fit_result_and_a_pending_offer(bridge, repo, paired):
     assert rows["claude"]["fit"] is True
     assert rows["claude"]["work_offer"] is True
     assert rows["claude"]["offer_kind"] == "pull"
-    lines = "\n".join(dashboard.render(view))
+    lines = "\n".join(dashboard.render(view, columns=("ALL",)))
     assert "FIT" in lines
-    assert "pull offer pending" in lines
+    assert "fit+pull" in lines
     reported = views.frame(view)["projects"][0]["participants"]
     assert reported[0]["fit"] is True
     assert reported[0]["work_offer"] == "pull"
