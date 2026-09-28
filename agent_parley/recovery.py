@@ -19,6 +19,7 @@ CAPTURE_INTERVAL = 30
 GIT_SECONDS = 30
 MAX_STEP_BYTES = 400
 RECOVERY_FOLDER = "recovery"
+TEMPORARY_REF_NAMESPACE = "refs/agent-parley-recovery/"
 
 
 def _git(
@@ -287,6 +288,28 @@ def _require_dead(activity: dict, issue: str, owner: str) -> None:
         )
 
 
+def _reclaim_temporary_refs(lane: Path) -> None:
+    """Deletes recovery refs a killed capture left behind in the lane.
+
+    ``_publish_bundle`` always removes its temporary ref before returning,
+    so any ref still under `TEMPORARY_REF_NAMESPACE` here was orphaned by a
+    process that died between its ``update-ref`` and that cleanup. The
+    caller holds the lane's capture lock, so no other capture of this lane
+    can be publishing one right now, and every surviving ref is stale.
+    Coordination state belongs outside the target repository; this keeps
+    an orphaned ref from lingering there past the next capture.
+
+    Args:
+        lane: Assigned worktree to sweep.
+    """
+    listing = _text(
+        lane, "for-each-ref", "--format=%(refname)", TEMPORARY_REF_NAMESPACE
+    )
+    for name in listing.splitlines():
+        if name:
+            _git(lane, "update-ref", "-d", name)
+
+
 def _publish_bundle(
     lane: Path,
     destination: Path,
@@ -294,7 +317,7 @@ def _publish_bundle(
     commit: str,
 ) -> tuple[int, str]:
     """Publishes one fsynced bundle and removes its temporary Git ref."""
-    temporary_ref = f"refs/agent-parley-recovery/{reference}"
+    temporary_ref = f"{TEMPORARY_REF_NAMESPACE}{reference}"
     _git(lane, "update-ref", temporary_ref, commit)
     descriptor, temporary_name = tempfile.mkstemp(dir=destination.parent)
     os.close(descriptor)
@@ -397,6 +420,11 @@ def _capture(
     tool calls bundles each lane at most once per interval. A capture with no
     event, such as a handoff or an overdue offer, always reflects the tree.
 
+    A capture killed mid-publish can leave its temporary ref behind in the
+    lane. This capture, holding the lane's capture lock, reclaims any such
+    ref before doing its own work, so coordination state never lingers in
+    the target repository past the next capture of the same lane.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -415,6 +443,7 @@ def _capture(
     if not participant:
         raise BridgeError(f"{agent} is not a participant in this project.")
     lane = Path(participant["lane"])
+    _reclaim_temporary_refs(lane)
     ledger = issues.snapshot(directory)
     owned = [
         (number, record)

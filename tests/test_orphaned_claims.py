@@ -436,6 +436,28 @@ def test_recovery_capture_leaves_the_checkpoint_lock_free(
     assert "recovery_error" not in state
 
 
+def test_a_capture_reclaims_a_ref_orphaned_by_a_killed_capture(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    manifest = roster.read(directory)
+    head = git(lane, "rev-parse", "HEAD")
+    git(lane, "update-ref", "refs/agent-parley-recovery/leftover", head)
+
+    saved = recovery.capture(directory, manifest, "claude")
+
+    assert len(saved) == 1
+    remaining = git(
+        lane,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/agent-parley-recovery/",
+    )
+    assert remaining == ""
+
+
 def test_an_unchanged_tree_is_captured_once(bridge, repo, paired, monkeypatch):
     lane = Path(paired["lanes"]["claude"])
     directory = lane.parent
