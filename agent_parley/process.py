@@ -445,16 +445,20 @@ def darwin_boot_id() -> str:
     """Reads the instant the macOS kernel records for the current boot.
 
     Returns:
-        The boot time exactly as `sysctl` prints it, which changes only
-        when the host starts again.
+        The boot time in epoch seconds, the ``sec`` field `sysctl` prints.
+        The local-time rendering after it is dropped because it changes
+        with the timezone while the host keeps running; output without a
+        ``sec`` field is returned whole.
     """
-    return subprocess.run(
+    output = subprocess.run(
         ["sysctl", "-n", "kern.boottime"],
         capture_output=True,
         text=True,
         timeout=PS_TIMEOUT,
         check=True,
     ).stdout.strip()
+    seconds = output.partition("sec = ")[2].partition(",")[0].strip()
+    return seconds if seconds.isdigit() else output
 
 
 def linux_platform() -> Platform:
