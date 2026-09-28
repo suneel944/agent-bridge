@@ -1310,6 +1310,8 @@ def _change(
                     )
                     lifecycle.claimed(record, record["claim_id"])
                     cleared = _clear_recovery(record)
+                    if ended := record.pop("ended_on_forge", None):
+                        cleared["ended_on_forge"] = ended
                     if offer.get("attachment"):
                         record["attachment"] = offer["attachment"]
                     record["handoff"] = inherited

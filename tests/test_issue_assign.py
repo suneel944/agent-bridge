@@ -1,11 +1,12 @@
 """Checks the operator's issue assign path from offer to acceptance."""
 
 import sys
+import time
 
 import pytest
 
-from agent_parley import cli, issues, store
-from agent_parley.state import BridgeError
+from agent_parley import cli, issues, lifecycle, store
+from agent_parley.state import BridgeError, lock, write_json
 
 
 def run(bridge, monkeypatch, capsys, *arguments):
@@ -156,6 +157,33 @@ def test_the_owner_authorizes_the_request_before_the_offer_exists(
         offer_id=authorized["offer"]["id"],
     )
     assert accepted["owner"] == "codex"
+
+
+def test_ended_on_forge_does_not_survive_an_accepted_operator_offer(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo)[1]
+    claimed = held(bridge, paired, "claude")
+    with lock(directory / "issues.lock", timeout=1):
+        state = issues.snapshot(directory)
+        record = state["issues"]["42"]
+        record["owner"] = None
+        record["ended_on_forge"] = {
+            "at": time.time(),
+            "claim_id": claimed["claim_id"],
+        }
+        write_json(directory / "issues.json", state)
+    result = bridge.issue_assign(repo, "42", "codex", reason="Resume")
+    assert ledger(bridge, repo)["42"]["ended_on_forge"]
+    accepted = bridge.issue(
+        paired["lanes"]["codex"], "accept", "42", offer_id=result["offer_id"]
+    )
+    assert "ended_on_forge" not in accepted
+    assert (
+        accepted["history"][-1]["cleared"]["ended_on_forge"]["claim_id"]
+        == (claimed["claim_id"])
+    )
+    assert lifecycle.actionable(issues.snapshot(directory), "codex") == ["42"]
 
 
 def test_only_the_owner_answers_an_operator_request(bridge, repo, paired):
