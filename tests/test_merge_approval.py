@@ -258,6 +258,34 @@ def test_the_requirement_is_reported_and_validated(bridge, repo, paired):
     assert stored["approval"] == ["merge"]
 
 
+def test_a_lane_cannot_clear_the_approval_or_verification_gate(
+    bridge, repo, paired, monkeypatch
+):
+    bridge.approval_policy(repo, ["merge"])
+    bridge.verification(repo, "make check")
+    lane = Path(paired["lanes"]["codex"])
+    with pytest.raises(BridgeError, match="base checkout"):
+        bridge.approval_policy(lane, [])
+    with pytest.raises(BridgeError, match="base checkout"):
+        bridge.verification(lane, "true")
+    monkeypatch.chdir(lane)
+    with pytest.raises(BridgeError, match="base checkout"):
+        bridge.approval_policy(repo, [])
+    with pytest.raises(BridgeError, match="base checkout"):
+        bridge.verification(repo, "true")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_PARLEY_TOKEN", "lane-token")
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        bridge.approval_policy(repo, [])
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        bridge.verification(repo, "")
+    assert "participant merge" in bridge.approval_policy(lane)
+    assert "make check" in bridge.verification(lane)
+    stored = roster.read(lane.parent)
+    assert stored["approval"] == ["merge"]
+    assert stored["verify"] == ["make", "check"]
+
+
 def test_a_completed_prerequisite_reads_as_completed_not_released():
     state = {
         "issues": {
