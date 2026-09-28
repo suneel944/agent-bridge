@@ -1014,7 +1014,12 @@ attachment is readable by its own lane.
 
 One attachment is capped at 65,536 bytes and a lane holds at most 1 MiB of
 attachments in total; a body past either cap is refused with the cap named.
-A message attachment lives as long as its message; a report attachment is
+Messages are never pruned, so when a long message would pass the lane's
+allowance, the lane's oldest message attachments that every recipient has read
+are released first, only as far as the new body needs. A released attachment
+reads as released and its message keeps the first slice. A message with an
+unread recipient, or with no recipient such as a feed-only post, keeps its
+attachment. A report attachment is
 removed when the report log rotates past that record; an offer attachment is
 removed when the offer is declined, cancelled or replaced, and an accepted
 offer keeps it until the issue is released. `top` and `status` count as
@@ -1418,6 +1423,11 @@ service takes the capture after it has answered the hook, so a slow bundle
 never delays a native call. The old session generation is refused by later
 lifecycle hooks after takeover; this is runtime fencing, not a filesystem
 security boundary against another process writing directly into the old lane.
+Its tool calls are denied, but its `Stop` is let through with the transfer
+shown, so a returning session ends its turn instead of looping on refusals.
+The service never wakes a fenced session with `run --resume`, and a manual
+`agent-parley run NAME --resume` of it is refused; start a new session
+instead.
 
 `--since` narrows every event count to a window that ends at the current
 reading, so `agent-parley top --since 6h` answers what happened in the last six
@@ -2171,8 +2181,14 @@ it spawns the configured hook command with `--adapter opencode`, and
 shared parser and flattens the result to `decision`, `reason` and `context`.
 A denied `tool.execute.before` is raised as an error inside the plugin, which
 is how an OpenCode plugin refuses a tool call; a blocked `session.idle` posts
-the reason back into the session as the next prompt; `context` is appended to
-the user's message parts. The plugin never sets a `permission.ask` status, so
+the reason back into the session as the next prompt. The service marks
+`context` delivered on every event, so the plugin holds it per session and
+appends it to the next `tool.execute.after` output or the parts of the next user
+message, whichever comes first; context returned to `session.created`,
+`tool.execute.before`, `permission.ask` or `session.idle` waits there because
+those events cannot carry text into the session. Held context lives in the
+plugin process, so an OpenCode exit before the next tool result or message
+loses it. The plugin never sets a `permission.ask` status, so
 OpenCode's own approval prompt is left to the user. OpenCode raises no end of
 session event, so `SessionEnd` is reported under `unavailable_hooks`. Resume
 passes the recorded session as `--session ID`. Plugins in the user's global

@@ -514,6 +514,16 @@ reported.
                             "No usable native session to resume; "
                             "launch manually."
                         )
+                    from agent_parley import recovery
+
+                    if recovery.stale_session(
+                        lane.parent, agent, {"session_id": session}
+                    ):
+                        raise BridgeError(
+                            f"Session {session} lost its claim to a "
+                            "takeover and cannot resume; launch a new "
+                            "session without --resume."
+                        )
                     if entry["adapter"] == "codex":
                         command[1:1] = ["resume", session]
                     elif entry["adapter"] == "opencode":
