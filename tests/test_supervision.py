@@ -824,6 +824,60 @@ def test_dead_manual_session_resumes_from_its_recorded_session(
     assert record["result"] == "resume requested (launcher 4321)"
 
 
+def test_operator_stop_holds_until_the_next_launch(
+    bridge, repo, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    path = directory / "codex-activity.json"
+    write_json(
+        path,
+        {
+            "activity": "stopped",
+            "session_id": "12345678-abcd-1234-abcd-123456789abc",
+        },
+    )
+    send(bridge, actors["claude"], "codex")
+    bridge.stop(repo, "codex")
+    assert json.loads(path.read_text())["operator_stopped"] is True
+
+    class Child:
+        pid = 4321
+
+    launched = []
+    popen = supervision.subprocess.Popen
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    observed = sampled(bridge, paired, directory, "codex", 300)
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched == []
+
+    monkeypatch.setattr(supervision.subprocess, "Popen", popen)
+    monkeypatch.setattr(bridge, "up", lambda: None)
+
+    async def identity(*args):
+        return {"registration_token": "test-only"}
+
+    monkeypatch.setattr(bridge, "identity", identity)
+    from agent_parley import cli
+
+    original = cli.shutil.which
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name: "/bin/true" if name == "codex" else original(name),
+    )
+    monkeypatch.setattr(terminal, "run", lambda *args, **kwargs: 0)
+    assert bridge.launch("codex", repo, terminal.PROMPT, resume=True) == 0
+    assert "operator_stopped" not in json.loads(path.read_text())
+
+
 @pytest.mark.parametrize(
     "answer,result,attempts",
     [

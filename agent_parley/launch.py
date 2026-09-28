@@ -526,6 +526,7 @@ reported.
                     session_started=time.time(),
                 )
                 previous.pop("last_prompt", None)
+                previous.pop("operator_stopped", None)
                 write_json(activity_path, previous)
             with contextlib.suppress(sqlite3.OperationalError):
                 with store.connect(self.home, write=True) as db:

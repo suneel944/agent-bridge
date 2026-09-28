@@ -5743,6 +5743,9 @@ def wake(
     A lane whose record `settle_reboot` stopped on a host restart is not
     woken or resumed either, because the resume would reset the silence its
     claims and leases are judged on; `participant restart` brings it back.
+    A lane the operator ended with `participant stop` is not woken or resumed
+    until its next launch clears the stop, so a stop is not undone within one
+    sweep and the operator's own `run` does not meet a service-held lock.
     """
     participant = manifest["participants"][name]
     if (
@@ -5758,10 +5761,12 @@ def wake(
     recorded = condition(home, root, name)
     if lanes.rebooted(recorded):
         return
+    path = directory / f"{name}-activity.json"
+    state = json.loads(path.read_text()) if path.exists() else {}
+    if state.get("operator_stopped"):
+        return
     stopped = False
     if recorded is None:
-        path = directory / f"{name}-activity.json"
-        state = json.loads(path.read_text()) if path.exists() else {}
         if rebooted(state):
             return
         label = str(state.get("activity", ""))
