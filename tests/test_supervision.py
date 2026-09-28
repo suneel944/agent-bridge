@@ -274,6 +274,34 @@ def test_release_reminds_waiter_without_transferring_work(bridge, paired):
     assert after["issues"]["1"]["handoff_prompt"]["responded_at"]
 
 
+def test_withheld_completion_note_answers_the_release_reminder(bridge, paired):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    bridge.issue(lane, "release", "1")
+    prompt = issues.snapshot(lane.parent)["issues"]["1"]["handoff_prompt"]
+    assert prompt["waiting"] == []
+    sent = store.call(
+        bridge.home,
+        actors["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Merged #1 into main",
+            "body_md": "Released #1 after the merge.",
+            "idempotency_key": "done",
+        },
+    )
+    assert sent["withheld"] == ["codex"]
+    supervision.observe_responses(
+        bridge.home, lane.parent, roster.read(lane.parent)
+    )
+    record = issues.snapshot(lane.parent)["issues"]["1"]
+    assert record["owner"] is None
+    assert record["handoff_prompt"]["responded_at"]
+    assert not mailbox(bridge.home, paired["root"], "codex")["unread"]
+
+
 def test_closed_pr_reminds_holder_and_preserves_claim(
     bridge, paired, monkeypatch
 ):
