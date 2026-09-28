@@ -780,8 +780,13 @@ def test_a_worktree_whose_commits_landed_elsewhere_is_bundled_then_removed(
     folder = idle["directory"] / "recovery"
     record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
     bundle = folder / record["artifact"]["reference"]
-    reference = f"refs/agent-parley-recovery/{row['checkpoint']}"
-    git(repo, "fetch", str(bundle), reference)
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
     assert git(repo, "cat-file", "-t", head).strip() == "commit"
 
 
