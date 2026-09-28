@@ -1,4 +1,4 @@
-# Native Windows port: evaluation and plan
+# Native Windows port: evaluation and plan (probe)
 
 Status: evaluation only. Nothing here is implemented. The download
 measurement from issue #450 is recorded in
