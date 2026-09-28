@@ -12,6 +12,7 @@ import re
 import time
 from pathlib import Path
 
+from agent_parley import attachments
 from agent_parley.state import BridgeError, lock, write_json
 
 QUEUED = "queued"
@@ -50,6 +51,25 @@ def initial(*, authorized: bool = False) -> dict:
         "progress": None,
         "backlog": None,
     }
+
+
+def drop_offer(directory: Path, record: dict) -> None:
+    """Removes the attachments of an offer that is leaving the record.
+
+    Every transition that clears a pending offer calls this first, so a
+    declined, cancelled, released, completed or resolved offer takes its
+    spilled summary and its attached diff with it. An offer that is only
+    dereferenced would leave its diff counted against the offering lane's
+    attachment allowance forever.
+
+    Args:
+        directory: Private state directory for the common repository.
+        record: Ledger record whose pending offer is being cleared.
+    """
+    offer = record.get("offer") or {}
+    for field in ("attachment", "diff"):
+        if offer.get(field):
+            attachments.remove(directory, str(offer[field]))
 
 
 def state(record: dict) -> dict:
@@ -497,6 +517,7 @@ def complete(
             blocker="",
             resume_when="",
         )
+        drop_offer(directory, record)
         record.update(
             owner=None,
             offer=None,
@@ -758,6 +779,7 @@ def resolve(
                 commit="",
                 gate=None,
             )
+        drop_offer(directory, record)
         record.update(
             owner=None,
             offer=None,

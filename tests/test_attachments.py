@@ -370,6 +370,23 @@ def test_operator_decide_and_speak_spill_a_long_body(bridge, repo, paired):
     assert attachments.body(directory, spoken["attachment"], "codex") == body
 
 
+def test_releasing_with_an_offer_pending_removes_the_offer_attachment(
+    bridge, repo, paired
+):
+    lanes = {name: Path(path) for name, path in paired["lanes"].items()}
+    directory = bridge.project(repo)[1]
+    bridge.issue(lanes["claude"], "claim", "42")
+    summary = ("design note\n" * 300).strip()
+    offered = bridge.issue(
+        lanes["claude"], "offer", "42", to="codex", summary=summary
+    )["offer"]
+    pending = attachments.folder(directory) / f"{offered['attachment']}.md"
+    assert pending.exists()
+    released = bridge.issue(lanes["claude"], "release", "42")
+    assert released["offer"] is None
+    assert not pending.exists()
+
+
 def test_mail_show_prints_the_reference_and_the_whole_body_on_request(
     bridge, repo, paired, monkeypatch, capsys
 ):
