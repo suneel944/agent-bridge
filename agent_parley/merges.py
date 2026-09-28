@@ -590,9 +590,10 @@ def outside_prerequisites(
 
     A selection narrows what a run attempts; it never lifts a recorded
     dependency. Every issue a selected lane holds is read for the issues it
-    waits on, and each one that no selected lane holds is named here. The
-    ledger records no completion, so a prerequisite nobody holds is reported
-    as released rather than as finished work.
+    waits on, and each one that no selected lane holds is named here. A
+    prerequisite whose execution is verified complete reads as completed;
+    one that nobody holds without that completion reads as released, which
+    tells the operator somebody dropped it rather than finished it.
 
     Args:
         state: Published issue ledger.
@@ -611,12 +612,14 @@ def outside_prerequisites(
     }
     lines = []
     for issue in sorted(waited, key=int):
-        owner = state["issues"].get(issue, {}).get("owner", "")
-        satisfied = (
-            f"held by {owner}, so it is not satisfied here"
-            if owner
-            else "released, so no lane still holds it"
-        )
+        record = state["issues"].get(issue, {})
+        owner = record.get("owner", "")
+        if owner:
+            satisfied = f"held by {owner}, so it is not satisfied here"
+        elif lifecycle.state(record)["state"] == lifecycle.COMPLETE:
+            satisfied = "completed, so it is satisfied"
+        else:
+            satisfied = "released, so no lane still holds it"
         lines.append(
             f"#{issue} is a prerequisite outside this selection, {satisfied}."
         )

@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import approvals, dashboard, history, metrics, roster
+from agent_parley import (
+    approvals,
+    dashboard,
+    history,
+    lifecycle,
+    merges,
+    metrics,
+    roster,
+)
 from agent_parley.checkpoints import branch_head
 from agent_parley.cli import git
 from agent_parley.state import BridgeError
@@ -248,3 +256,23 @@ def test_the_requirement_is_reported_and_validated(bridge, repo, paired):
         (Path(paired["lanes"]["codex"]).parent / "project.json").read_text()
     )
     assert stored["approval"] == ["merge"]
+
+
+def test_a_completed_prerequisite_reads_as_completed_not_released():
+    state = {
+        "issues": {
+            "10": {"owner": None, "execution": {"state": lifecycle.COMPLETE}},
+            "11": {"owner": None},
+            "12": {"owner": "codex"},
+            "20": {"owner": "claude", "blocked_by": ["10", "11", "12"]},
+        }
+    }
+
+    assert merges.outside_prerequisites(state, {"claude": ["20"]}) == [
+        "#10 is a prerequisite outside this selection, completed, so it is "
+        "satisfied.",
+        "#11 is a prerequisite outside this selection, released, so no lane "
+        "still holds it.",
+        "#12 is a prerequisite outside this selection, held by codex, so it "
+        "is not satisfied here.",
+    ]
