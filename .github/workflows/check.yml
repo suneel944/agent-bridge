@@ -10,26 +10,50 @@ concurrency:
   group: check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pythons: ${{ steps.scope.outputs.pythons }}
+      macos: ${{ steps.scope.outputs.macos }}
+      wsl: ${{ steps.scope.outputs.wsl }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - id: scope
+        name: Choose the legs this change needs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 -m scripts.ci_scope
   check:
-    needs: python
+    needs: [changes, python, macos]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require every supported Python check
+      - name: Require every needed Python check
         env:
-          RESULT: ${{ needs.python.result }}
-        run: test "$RESULT" = success
+          CHANGES: ${{ needs.changes.result }}
+          PYTHON: ${{ needs.python.result }}
+          MACOS: ${{ needs.macos.result }}
+          MACOS_NEEDED: ${{ needs.changes.outputs.macos }}
+        run: |
+          test "$CHANGES" = success
+          test "$PYTHON" = success
+          if [ "$MACOS_NEEDED" = false ]; then
+            test "$MACOS" = skipped
+          else
+            test "$MACOS" = success
+          fi
   python:
+    needs: changes
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 20 || 10 }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.12', '3.13', '3.14']
+        python: ${{ fromJSON(needs.changes.outputs.pythons) }}
         os: [ubuntu-latest]
-        include:
-          - python: '3.12'
-            os: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -38,7 +62,23 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: make check
+  macos:
+    name: python (3.12, macos-latest)
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          python-version: '3.12'
+      - run: make check
   wsl:
+    needs: changes
+    if: needs.changes.outputs.wsl == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     continue-on-error: true

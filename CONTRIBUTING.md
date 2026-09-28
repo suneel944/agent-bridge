@@ -62,6 +62,17 @@ uv run --locked pre-commit run --all-files
 repository policy gate using locked tools. It does not rewrite files on commit.
 CI runs the complete gate independently of local hook installation.
 
+The `Check` workflow scopes pull requests by the paths they change;
+`scripts/ci_scope.py` holds the lists. Every pull request runs `secrets` and
+`make check` on Ubuntu with Python 3.12. Changes to `plugins/`, `scripts/`,
+`tests/`, `Makefile`, `.github/actions/` or plugin manifests add Python 3.13,
+3.14 and macOS. Changes to `agent_parley/`, `tests/test_wsl.py`,
+`pyproject.toml`, `uv.lock` or `.github/workflows/check.yml` also add `wsl`.
+Documentation, templates and other workflows run only the Ubuntu 3.12 leg. A
+path no list recognises, a push to `main` and a manual run select every leg.
+Skipped legs still report their required check names, and the `check` job
+fails if a needed leg did not succeed.
+
 Open a focused issue before proposing a substantial behavior change. Branch from
 current `main`, keep commits reviewable, and use the PR template. Explain the
 problem, final behavior, exact verification, and compatibility risks. Every PR

@@ -115,8 +115,9 @@ child stays in the parent's console and process group.
 
 ### CI
 
-`.github/workflows/check.yml:41-65`: the `wsl` job runs the suite inside
-Ubuntu on WSL with `continue-on-error: true`. No job runs Python natively on
+`.github/workflows/check.yml:79-105`: the `wsl` job runs the suite inside
+Ubuntu on WSL with `continue-on-error: true` when package, launch or process
+code changes. No job runs Python natively on
 Windows.
 
 ## 2. Per-layer plan
