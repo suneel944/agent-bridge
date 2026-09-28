@@ -3228,7 +3228,8 @@ def _overdue_step(
                 "at": now,
             }
             record["attempts"] = int(record.get("attempts", 0) or 0) + 1
-            record.setdefault("history", []).append(
+            lifecycle.append_history(
+                record,
                 {
                     "action": f"overdue-{step}",
                     "actor": "supervisor",
@@ -3236,7 +3237,7 @@ def _overdue_step(
                     "owner": record.get("owner"),
                     "offer": record.get("offer"),
                     "claim_id": record.get("claim_id"),
-                }
+                },
             )
         ledger["revision"] += 1
         write_json(directory / "issues.json", ledger)

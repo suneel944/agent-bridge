@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import cli, issues, lifecycle, plan
+from agent_parley import cli, issues, lifecycle, plan, retries
 from agent_parley.cli import git
 from agent_parley.state import BridgeError
 
@@ -602,3 +602,62 @@ def test_the_operator_unblocks_an_unowned_issue_from_the_base_checkout(
         bridge.issue(lane, "unblock", "42", on="17")
     bridge.issue(repo, "unblock", "42", on="17")
     assert issues.snapshot(directory)["issues"]["42"]["blocked_by"] == []
+
+
+def test_history_is_capped_but_keeps_the_claim_marker():
+    record = {"history": []}
+    lifecycle.append_history(record, {"action": "claim", "at": 0})
+    last = 0
+    for last in range(1, lifecycle.MAX_HISTORY + 20):
+        lifecycle.append_history(record, {"action": "note", "at": last})
+    history = record["history"]
+    assert len(history) == lifecycle.MAX_HISTORY + 1
+    assert history[0] == {"action": "claim", "at": 0}
+    assert history[-1] == {"action": "note", "at": last}
+    assert history[1]["at"] == last - lifecycle.MAX_HISTORY + 1
+
+
+def test_repeated_claim_release_cycles_never_grow_past_the_cap(tmp_path):
+    """A lane cycling one issue keeps its ledger entry bounded.
+
+    At most three retained marker entries (claim, take and complete) can
+    sit outside the capped recent window, so the total never exceeds the
+    cap by more than that fixed amount, however many cycles run.
+    """
+    for _ in range(lifecycle.MAX_HISTORY + 20):
+        claim(tmp_path, "42")
+        issues.change(
+            tmp_path,
+            "codex",
+            "release",
+            "42",
+            participants={"codex", "claude"},
+        )
+    record = issues.snapshot(tmp_path)["issues"]["42"]
+    assert len(record["history"]) <= lifecycle.MAX_HISTORY + 3
+
+
+def test_a_replayed_claim_omits_history_from_the_retained_result(tmp_path):
+    first = issues.change(
+        tmp_path,
+        "codex",
+        "claim",
+        "42",
+        participants={"codex", "claude"},
+        key="claim-42",
+    )
+    assert first["history"]
+    scoped = retries.scope("codex", "claim", "claim-42")
+    stored = issues.snapshot(tmp_path)["retries"][scoped]["result"]
+    assert "history" not in stored
+
+    replayed = issues.change(
+        tmp_path,
+        "codex",
+        "claim",
+        "42",
+        participants={"codex", "claude"},
+        key="claim-42",
+    )
+    assert "history" not in replayed
+    assert replayed["replayed"] is True

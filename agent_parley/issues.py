@@ -624,7 +624,9 @@ def change(
             from the arguments a key is compared against.
 
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, retry, or lock checks
@@ -928,7 +930,8 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                 continue
             record["offer"] = _operator_offer(request, number, budgets)
             record["request"] = None
-            record["history"].append(
+            lifecycle.append_history(
+                record,
                 {
                     "action": "grant",
                     "actor": "supervisor",
@@ -938,7 +941,7 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                     "request": None,
                     "offer_id": request["id"],
                     "claim_id": record.get("claim_id"),
-                }
+                },
             )
             granted.append(number)
         if granted:
@@ -1164,7 +1167,9 @@ def _change(
     transition knows which generation stopped mattering and why.
 
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, or lock checks fail.
@@ -1428,10 +1433,20 @@ def _change(
             history["taken"] = dict(record["taken"])
         if cleared:
             history["cleared"] = cleared
-        record["history"].append(history)
+        lifecycle.append_history(record, history)
         state["issues"][issue] = record
         if scope:
-            retries.remember(state, scope, fingerprint, retries.SERVED, record)
+            retries.remember(
+                state,
+                scope,
+                fingerprint,
+                retries.SERVED,
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "history"
+                },
+            )
         state["revision"] += 1
         write_json(directory / "issues.json", state)
     if retired:
