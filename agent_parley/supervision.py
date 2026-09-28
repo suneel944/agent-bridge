@@ -2795,7 +2795,9 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
     attempt count that caused it, so a lane and its waiting peers are told
     once rather than on every read. Recording a notice moves nothing: the
     issue keeps its owner, its offer and its dependencies, and the notice
-    itself says so.
+    itself says so. A notice whose holder no longer owns the open claim, after
+    a release, completion, transfer or closure on the forge, is dropped, so
+    the ledger stops carrying a pause directive nobody stands behind.
 
     Args:
         directory: Private project state directory.
@@ -2805,6 +2807,11 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
         ledger = issues.snapshot(directory)
         changed = False
         for number, record in ledger["issues"].items():
+            if record.get("deadline_notice") and not issues.deadline_notice(
+                record
+            ):
+                record.pop("deadline_notice")
+                changed = True
             holder = record.get("owner")
             if holder not in manifest["participants"]:
                 continue

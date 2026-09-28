@@ -11,6 +11,7 @@ from agent_parley import (
     checkpoints,
     cli,
     dashboard,
+    delivery,
     issues,
     lifecycle,
     roster,
@@ -285,6 +286,31 @@ def test_the_runtime_records_one_notice_per_breach(bridge, repo, paired):
     revision = issues.snapshot(directory)["revision"]
     supervision.deadline_notices(directory, paired)
     assert issues.snapshot(directory)["revision"] == revision
+
+
+def test_a_released_claim_stops_delivering_its_deadline_notice(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo)[1]
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "42", within=60)
+    age_claim(directory, "42", 300)
+    supervision.deadline_notices(directory, paired)
+    held = issues.snapshot(directory)
+    assert "overdue" in "\n".join(
+        delivery._notices("claude", held, None, [], {})
+    )
+    bridge.issue(lane, "release", "42")
+    state = issues.snapshot(directory)
+    assert state["issues"]["42"]["deadline_notice"]["holder"] == "claude"
+    state["revision"] += 1
+    write_json(directory / "issues.json", state)
+    stale = issues.snapshot(directory)
+    assert "overdue" not in "\n".join(
+        delivery._notices("claude", stale, None, [], {})
+    )
+    supervision.deadline_notices(directory, paired)
+    assert "deadline_notice" not in ledger(directory)["42"]
 
 
 def test_a_request_without_a_window_takes_the_configured_default(

@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from agent_parley import checkpoints, roster, store, supervision
-from agent_parley.issues import describe, snapshot
+from agent_parley.issues import deadline_notice, describe, snapshot
 from agent_parley.state import BridgeError, lock, write_json, write_text
 
 DEFAULT_SECONDS = 20.0
@@ -129,9 +129,9 @@ def _notices(
             and not item["handoff_prompt"].get("responded_at")
         ]
         reminders += [
-            item["deadline_notice"]["text"]
+            notice["text"]
             for item in issues["issues"].values()
-            if (notice := item.get("deadline_notice"))
+            if (notice := deadline_notice(item))
             and (
                 notice["holder"] == agent or agent in notice.get("waiting", [])
             )
