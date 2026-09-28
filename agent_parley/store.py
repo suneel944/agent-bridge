@@ -1364,6 +1364,17 @@ def _send(
                     attachments.reference("message", message_id),
                 )
             )
+        if decision or fed:
+            readers = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM agents WHERE project_id=?",
+                    (actor["project_id"],),
+                )
+            }
+            readers.add(OPERATOR)
+        else:
+            readers = {str(name) for name in recipients}
         stored, ref = attachments.spill(
             directory,
             "message",
@@ -1371,7 +1382,7 @@ def _send(
             body,
             MAX_BODY_BYTES,
             actor["name"],
-            [str(name) for name in recipients],
+            sorted(readers),
         )
         db.execute(
             "UPDATE messages SET body_md=? WHERE id=?", (stored, message_id)
@@ -3844,6 +3855,7 @@ def decide(home: Path, root: str, subject: str, body: str, key: str) -> dict:
                 "idempotency_key": key,
                 "decision": True,
             },
+            directory=roster.locate(home, root),
         )
 
 
@@ -4188,6 +4200,7 @@ def speak(
                 "ack_required": ack,
                 "ack_within": within,
             },
+            directory=roster.locate(home, root),
         )
 
 
