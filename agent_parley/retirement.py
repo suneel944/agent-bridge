@@ -71,6 +71,31 @@ def _git(cwd: str, *arguments: str) -> tuple[bool, str]:
     return result.returncode == 0, result.stdout
 
 
+def ignored_files(lane: str) -> list[str] | None:
+    """Lists the files inside a worktree that Git tracks nowhere else.
+
+    Args:
+        lane: Worktree the listing is read from.
+
+    Returns:
+        Sorted worktree-relative paths Git ignores, empty when there are
+        none, or None when Git could not inspect the worktree. These files
+        are never staged and `git status` never reports them, so removing
+        the worktree would delete them with no other copy anywhere.
+    """
+    readable, listing = _git(
+        lane,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
+    if not readable:
+        return None
+    return sorted(line.rstrip("/") for line in listing.splitlines() if line)
+
+
 def _prune(root: str, lane: Path) -> dict:
     """Removes a retiring lane's worktree when Git reports it clean.
 
@@ -103,19 +128,11 @@ def _prune(root: str, lane: Path) -> dict:
         dirty.append(entry.rstrip("/"))
     if dirty:
         return {"worktree": KEPT, "dirty": sorted(dirty)}
-    readable, listing = _git(
-        str(lane),
-        "ls-files",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-    )
-    if not readable:
+    ignored = ignored_files(str(lane))
+    if ignored is None:
         return {"worktree": KEPT, "dirty": []}
-    ignored = [line.rstrip("/") for line in listing.splitlines() if line]
     if ignored:
-        return {"worktree": KEPT, "dirty": sorted(ignored)}
+        return {"worktree": KEPT, "dirty": ignored}
     removed, _ = _git(root, "worktree", "remove", str(lane))
     _git(root, "worktree", "prune")
     return {"worktree": PRUNED if removed else KEPT, "dirty": []}

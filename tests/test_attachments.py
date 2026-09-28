@@ -230,6 +230,74 @@ def test_attachment_and_lane_caps_are_enforced(
     assert sent(bridge, lanes["codex"], "w" * 5000, key="peer", to=("claude",))
 
 
+def test_a_full_allowance_frees_once_its_recipients_read_the_mail(
+    bridge, repo, paired, monkeypatch
+):
+    lanes = actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    monkeypatch.setattr(attachments, "MAX_LANE_BYTES", 12000)
+    first = sent(bridge, lanes["claude"], "a" * 5000, key="first")
+    second = sent(bridge, lanes["claude"], "b" * 5000, key="second")
+    with pytest.raises(BridgeError, match="read"):
+        sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "mark_message_read",
+        {"message_id": first["id"]},
+    )
+    third = sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    assert third["attachment"]
+    home = attachments.folder(directory)
+    assert not (home / f"{first['attachment']}.md").exists()
+    assert (home / f"{second['attachment']}.md").exists()
+    assert attachments.used(directory, "claude") == 10000
+    with pytest.raises(BridgeError, match="released"):
+        store.call(
+            bridge.home,
+            lanes["codex"],
+            "read_attachment",
+            {"reference": first["attachment"]},
+        )
+    with pytest.raises(BridgeError, match="readable"):
+        attachments.body(directory, first["attachment"], "kimi-1")
+    stored = store.read_message(
+        bridge.home, paired["root"], "codex", first["id"]
+    )["body_md"]
+    assert stored.startswith("a" * 100)
+
+
+def test_a_read_decision_keeps_its_attachment_when_the_allowance_fills(
+    bridge, repo, paired, monkeypatch
+):
+    lanes = actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    monkeypatch.setattr(attachments, "MAX_LANE_BYTES", 12000)
+    decision = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Interface agreed",
+            "body_md": "d" * 5000,
+            "idempotency_key": "decision",
+            "decision": True,
+        },
+    )
+    sent(bridge, lanes["claude"], "b" * 5000, key="second")
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "mark_message_read",
+        {"message_id": decision["id"]},
+    )
+    with pytest.raises(BridgeError, match="read"):
+        sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    home = attachments.folder(directory)
+    assert (home / f"{decision['attachment']}.md").exists()
+
+
 def test_report_evidence_over_the_cap_is_attached(
     bridge, repo, paired, monkeypatch, capsys
 ):
@@ -368,6 +436,23 @@ def test_operator_decide_and_speak_spill_a_long_body(bridge, repo, paired):
     assert attachments.body(directory, decided["attachment"], "codex") == body
     spoken = bridge.say(repo, "codex", body)
     assert attachments.body(directory, spoken["attachment"], "codex") == body
+
+
+def test_releasing_with_an_offer_pending_removes_the_offer_attachment(
+    bridge, repo, paired
+):
+    lanes = {name: Path(path) for name, path in paired["lanes"].items()}
+    directory = bridge.project(repo)[1]
+    bridge.issue(lanes["claude"], "claim", "42")
+    summary = ("design note\n" * 300).strip()
+    offered = bridge.issue(
+        lanes["claude"], "offer", "42", to="codex", summary=summary
+    )["offer"]
+    pending = attachments.folder(directory) / f"{offered['attachment']}.md"
+    assert pending.exists()
+    released = bridge.issue(lanes["claude"], "release", "42")
+    assert released["offer"] is None
+    assert not pending.exists()
 
 
 def test_mail_show_prints_the_reference_and_the_whole_body_on_request(

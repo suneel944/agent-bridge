@@ -637,8 +637,42 @@ def test_a_worktree_with_unmerged_commits_is_kept(bridge, repo, idle):
     assert path.exists()
 
 
+def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-4")
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text(".env\n")
+    (path / ".env").write_text("SECRET=1\n")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    kept = worktree_of(swept, path)
+    assert kept["reason"] == reclaim.IGNORED
+    assert kept["paths"] == [".env"]
+    assert kept["reclaim"] is False
+    assert path.exists()
+    assert (path / ".env").exists()
+
+
 def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
     path = made(repo, tmp_path, "operator-wt")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True, force=True)
+
+    assert worktree_of(swept, path)["reason"] == reclaim.FOREIGN
+    assert path.exists()
+
+
+def test_a_worktree_nested_under_the_state_directory_is_never_touched(
+    bridge, repo, idle
+):
+    nested = idle["directory"] / "operator-wt"
+    nested.mkdir()
+    path = made(repo, nested, "fix/616-c2")
     aged(path)
 
     swept = bridge.reclaim_worktrees(repo, apply=True, force=True)
@@ -713,8 +747,13 @@ def test_force_removes_a_dirty_lane_worktree_after_a_checkpoint(
     record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
     bundle = folder / record["artifact"]["reference"]
     assert bundle.stat().st_size == record["artifact"]["bytes"]
-    reference = f"refs/agent-parley-recovery/{row['checkpoint']}"
-    git(repo, "fetch", str(bundle), reference)
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
     assert "draft.txt" in git(
         repo, "ls-tree", "-r", "--name-only", record["worktree_commit"]
     )

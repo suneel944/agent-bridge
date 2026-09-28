@@ -1014,7 +1014,12 @@ attachment is readable by its own lane.
 
 One attachment is capped at 65,536 bytes and a lane holds at most 1 MiB of
 attachments in total; a body past either cap is refused with the cap named.
-A message attachment lives as long as its message; a report attachment is
+Messages are never pruned, so when a long message would pass the lane's
+allowance, the lane's oldest message attachments that every recipient has read
+are released first, only as far as the new body needs. A released attachment
+reads as released and its message keeps the first slice. A message with an
+unread recipient, or with no recipient such as a feed-only post, keeps its
+attachment. A report attachment is
 removed when the report log rotates past that record; an offer attachment is
 removed when the offer is declined, cancelled or replaced, and an accepted
 offer keeps it until the issue is released. `top` and `status` count as
@@ -1390,8 +1395,10 @@ non-ignored untracked content, and marks the claim recoverable. A refusal from
 the provider, elapsed time, or the approval alone cannot transfer ownership.
 Recovery also refuses while the owner is paused, waiting for a native approval,
 or waiting for more operator input. The command itself refuses inside an
-assigned worktree, even with `--repo` pointing at the base checkout, so a lane
-cannot approve recovery of its own or a peer's claim.
+assigned worktree, even with `--repo` pointing at the base checkout, and in
+any process holding a lane's `AGENT_PARLEY_TOKEN`, even after it changes
+directory to the base checkout, so a lane cannot approve recovery of its own
+or a peer's claim.
 The receiving lane still runs `issue claim 42 --take-orphaned`. That claim
 revalidates the stopped process and ownership generation, moves only the old
 claim's reservations, fast-forwards to the captured committed HEAD, and restores
@@ -1418,6 +1425,11 @@ service takes the capture after it has answered the hook, so a slow bundle
 never delays a native call. The old session generation is refused by later
 lifecycle hooks after takeover; this is runtime fencing, not a filesystem
 security boundary against another process writing directly into the old lane.
+Its tool calls are denied, but its `Stop` is let through with the transfer
+shown, so a returning session ends its turn instead of looping on refusals.
+The service never wakes a fenced session with `run --resume`, and a manual
+`agent-parley run NAME --resume` of it is refused; start a new session
+instead.
 
 `--since` narrows every event count to a window that ends at the current
 reading, so `agent-parley top --since 6h` answers what happened in the last six
@@ -2784,7 +2796,9 @@ requirement on its own work; `approval show` stays readable from a lane.
 
 With a step required, `participant merge` and `participant pr` refuse until a
 decision for that lane's current ready report is recorded, and the refusal
-names the report and the `agent-parley approve NAME` that grants it. The
+names the report and the `agent-parley approve NAME` that grants it. `approve`
+and `reject` refuse inside an assigned worktree and in any process holding a
+lane's `AGENT_PARLEY_TOKEN`, so a lane cannot decide its own work. The
 decision is bound to the identifier of that report, the exact commit the lane
 branch points at, the branch and base it targets, the repository root, and a
 digest of the verification command, the pull-request policy and the approval

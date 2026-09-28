@@ -137,9 +137,11 @@ class SettingsMixin(BridgeCore):
             An account of the configured command.
 
         Raises:
-            BridgeError: If the repository has no project yet, or the command
-                is not a usable argument list.
+            BridgeError: If the repository has no project yet, the command
+                is not a usable argument list, or a change comes from a lane
+                or a process holding a lane's token.
         """
+        from agent_parley import unattended
         from agent_parley.cli import lock, roster, shlex, write_json
 
         root, directory = self.project(repo, create=False)
@@ -147,6 +149,9 @@ class SettingsMixin(BridgeCore):
         if command is None:
             configured = data["initialize"]
         else:
+            unattended.operator_only(
+                repo, root, data, "The lane initialization command is set"
+            )
             with lock(directory / "setup.lock"):
                 data = roster.read(directory)
                 data["initialize"] = roster.verify_command(

@@ -2485,12 +2485,18 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     recovered = recovery.quiesce_authorized(directory, manifest, isolate=True)
     if recovered:
         ledger = issues.snapshot(directory)
+        audience = _audience(
+            manifest,
+            {name: condition(home, manifest["root"], name) for name in serving},
+            set(),
+        )
         for number, record in ledger["issues"].items():
             marker = record.get("orphan")
             if marker in recovered:
                 _announce_orphan(
                     home,
                     manifest,
+                    audience,
                     str(record["owner"]),
                     [number],
                     list(marker.get("reservations") or []),
@@ -3840,12 +3846,14 @@ def _quiesced(marker: dict, name: str, record: dict) -> bool:
 
 
 def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
-    """Marks a dead lane's claims as orphaned and tells every other lane once.
+    """Marks a dead lane's claims as orphaned and tells the able lanes once.
 
     A crashed lane keeps its issues, and peers that wait on them cannot tell a
     working owner from one that will never answer. The marker states that
     observation where the ledger is read, and one notice per dead lane names
-    the orphaned issues and the reservations it still holds.
+    the orphaned issues and the reservations it still holds. Notices go only
+    to lanes that could take the work: a lane that is itself dead, reclaimed
+    or retired is left out, since nobody reads its mail.
 
     Nothing moves here. The issue keeps its owner, the reservations keep their
     holder, and only an explicit ``issue claim --take-orphaned`` by a peer
@@ -3909,6 +3917,7 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     ]
     if not dead and not returned:
         return
+    audience = _audience(manifest, records, set(dead))
     uncaptured: dict[str, str] = {}
     reservations: dict = {}
     if dead:
@@ -3985,19 +3994,54 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             ledger["revision"] += 1
             write_json(directory / "issues.json", ledger)
     for name, marked, keys in notices:
-        _announce_orphan(home, manifest, name, marked, keys)
+        _announce_orphan(home, manifest, audience, name, marked, keys)
     for name, recovered in withdrawn:
-        _announce_return(home, manifest, name, recovered)
+        _announce_return(home, manifest, audience, name, recovered)
+
+
+def _audience(
+    manifest: dict, records: dict[str, dict | None], dead: set[str]
+) -> list[str]:
+    """Names the lanes an orphan notice can reach a reader through.
+
+    Args:
+        manifest: Current participant manifest.
+        records: Each candidate lane's state record, or None without one.
+        dead: Lanes the caller read as dead from their presence alone.
+
+    Returns:
+        The candidates that are not retired, not read as dead, and whose
+        record is neither `dead` nor `reclaimed`, in record order.
+    """
+    return [
+        name
+        for name, record in records.items()
+        if name not in dead
+        and not roster.retired(manifest["participants"][name])
+        and (
+            record is None
+            or record["state"] not in (lanes.DEAD, lanes.RECLAIMED)
+        )
+    ]
 
 
 def _announce_orphan(
-    home: Path, manifest: dict, name: str, numbers: list[str], keys: list[str]
+    home: Path,
+    manifest: dict,
+    audience: list[str],
+    name: str,
+    numbers: list[str],
+    keys: list[str],
 ) -> None:
-    """Tells every other lane once that one lane's claims read as orphaned.
+    """Tells every lane that can take the work once that claims are orphaned.
+
+    A dead, reclaimed or retired lane cannot take the work, and mail to it
+    only inflates the unread and unacknowledged counts nobody will clear.
 
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
+        audience: Participants that are neither dead, reclaimed nor retired.
         name: Participant whose claims were marked.
         numbers: Issue numbers marked orphaned, in ledger order.
         keys: Reservation keys that lane still holds.
@@ -4011,9 +4055,10 @@ def _announce_orphan(
         "--take-orphaned, which records you as the owner and releases those "
         "reservations. Leaving it alone keeps it with " + name + "."
     )
-    for peer, participant in manifest["participants"].items():
+    for peer in audience:
         if peer == name:
             continue
+        participant = manifest["participants"][peer]
         digest = hashlib.sha256(
             f"{name}\x00{listed}\x00{held}\x00{peer}".encode()
         ).hexdigest()[:32]
@@ -4029,9 +4074,13 @@ def _announce_orphan(
 
 
 def _announce_return(
-    home: Path, manifest: dict, name: str, numbers: list[str]
+    home: Path,
+    manifest: dict,
+    audience: list[str],
+    name: str,
+    numbers: list[str],
 ) -> None:
-    """Tells every other lane once that one lane's orphan marker is withdrawn.
+    """Tells every lane that can take work once that a marker is withdrawn.
 
     A peer that was told to take the work is told that the work is no longer
     available, so the earlier notice is never left standing as the last thing
@@ -4040,6 +4089,7 @@ def _announce_return(
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
+        audience: Participants that are neither dead, reclaimed nor retired.
         name: Participant whose marker was withdrawn.
         numbers: Issue numbers that lost the marker, in ledger order.
     """
@@ -4051,9 +4101,10 @@ def _announce_return(
         "take one should leave it alone and ask that lane for a handoff "
         "instead."
     )
-    for peer, participant in manifest["participants"].items():
+    for peer in audience:
         if peer == name:
             continue
+        participant = manifest["participants"][peer]
         digest = hashlib.sha256(
             f"{name}\x00{listed}\x00{peer}".encode()
         ).hexdigest()[:32]
@@ -5789,6 +5840,30 @@ def session_held(directory: Path, name: str) -> bool:
         return True
 
 
+def _fenced(directory: Path, name: str, state: dict) -> bool:
+    """Reports whether the session a resume would continue was fenced.
+
+    The launcher resumes the activity record's resumable session, falling
+    back to its session identifier. A published ownership takeover fences
+    that session generation, so resuming it could only be refused again.
+
+    Args:
+        directory: Private project state directory.
+        name: Lane participant name.
+        state: The lane's activity record.
+
+    Returns:
+        True when a published takeover fenced the session to be resumed.
+    """
+    from agent_parley import recovery
+
+    session = str(state.get("resumable_session", state.get("session_id")) or "")
+    return bool(
+        session
+        and recovery.stale_session(directory, name, {"session_id": session})
+    )
+
+
 def wake(
     home: Path,
     directory: Path,
@@ -5838,7 +5913,9 @@ def wake(
     the lock. When the socket does not answer either, the wake is recorded
     as `SESSION_HELD`, a busy refusal that spends no attempt and that
     `status` and `problems` report, rather than as a requested resume the
-    lock would refuse.
+    lock would refuse. A session whose ownership generation a published
+    takeover fenced is never resumed; the wake is recorded as needing
+    manual attention, because that session can only end its turn.
 
     The attempt bound counts wakes without progress. Each attempt records the
     lane's progress marker from `_lane_activity`: its `HEAD` moves, the state
@@ -6078,7 +6155,11 @@ def wake(
             result = terminal.request(directory, name)
             if result == "unavailable":
                 result = SESSION_HELD
-        elif (observed["process_alive"] is False or stopped) and session:
+        elif (
+            (observed["process_alive"] is False or stopped)
+            and session
+            and not _fenced(directory, name, state)
+        ):
             entry = roster.provider(home, participant["provider"])
             if entry["adapter"] in roster.ADAPTERS and not entry.get(
                 "require_env"
