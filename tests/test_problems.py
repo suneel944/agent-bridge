@@ -430,10 +430,7 @@ def test_a_prompt_in_a_lane_resumed_without_a_terminal_names_the_restart(
     [row] = [item for item in found if item["condition"] == problems.APPROVAL]
     assert "claude's terminal" not in row["command"]
     assert str(directory / "claude-wake.log") in row["command"]
-    assert (
-        f"participant restart claude --repo {paired['root']}"
-        in (row["command"])
-    )
+    assert f"participant restart claude {at(paired['root'])}" in row["command"]
     assert all("agent-parley say" not in item["command"] for item in found)
 
 
