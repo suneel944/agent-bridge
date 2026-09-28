@@ -647,6 +647,20 @@ def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
     assert path.exists()
 
 
+def test_a_worktree_nested_under_the_state_directory_is_never_touched(
+    bridge, repo, idle
+):
+    nested = idle["directory"] / "operator-wt"
+    nested.mkdir()
+    path = made(repo, nested, "fix/616-c2")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True, force=True)
+
+    assert worktree_of(swept, path)["reason"] == reclaim.FOREIGN
+    assert path.exists()
+
+
 def test_a_worktree_under_the_pre_rename_state_root_is_reclaimed(
     bridge, repo, idle, tmp_path, monkeypatch
 ):

@@ -26,9 +26,11 @@ commits, so no work leaves with the row.
 Lanes also make worktrees of their own, for pull requests and sub-tasks, and
 Git registers each against the project repository. Those are read from
 `git worktree list` and attributed to a lane by path, when they sit inside a
-lane, the project state directory or the state root the product used
-before its rename, or by branch, when their branch is named after a lane.
-A worktree no lane accounts for is the operator's and is never touched. An
+lane or directly inside the project state directory or a project directory
+of the state root the product used before its rename, or by branch, when
+their branch is named after a lane. A worktree no lane accounts for, even
+one nested deeper under the state directory, is the operator's and is
+never touched. An
 attributed one is removed when it is clean, carries no commit that neither
 the base checkout nor its upstream has, and either the base already holds
 its head, its lane retired, or it has been untouched past the inactivity
@@ -544,12 +546,17 @@ def _within(path: Path, parent: Path) -> bool:
 
 
 def owned_roots(directory: Path) -> list[Path]:
-    """Names the directories whose worktrees the project itself made.
+    """Names the directories whose direct children the project itself made.
 
-    The project state directory is one. The state root the product used
-    before its rename is the other: lanes created then were registered
-    with the same repository from beneath it, and no lane of the current
-    manifest accounts for them any longer. It is only claimed when the
+    The product places every lane and every worktree a lane adds for a
+    sub-task directly inside a project state directory, so only a direct
+    child is the project's. A worktree nested deeper, such as one an
+    operator adds under a directory of their own beside the lanes, is
+    theirs. The project state directory is one such directory. The
+    project directories under the state root the product used before its
+    rename are the others: lanes created then were registered with the
+    same repository from beneath them, and no lane of the current
+    manifest accounts for them any longer. They are only claimed when the
     current state root carries the product's own default name, so a
     relocated state root never reaches into a sibling the operator owns.
 
@@ -562,7 +569,8 @@ def owned_roots(directory: Path) -> list[Path]:
     home = directory.parent.parent
     found = [directory.resolve()]
     if renamed := RENAMED_HOMES.get(home.name):
-        found.append((home.parent / renamed).resolve())
+        legacy = (home.parent / renamed / "projects").resolve()
+        found.extend(sorted(path for path in legacy.glob("*") if path.is_dir()))
     return found
 
 
@@ -674,9 +682,10 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
 
     Every worktree the project repository registers is read, except the
     base checkout and the participants' own lanes. Each is attributed to a
-    lane by path or branch; one inside the project state directory, or
-    inside the state root the product used before its rename, belongs to
-    the project even when no single lane accounts for it, and one nothing
+    lane by path or branch; one directly inside the project state
+    directory, or directly inside a project directory under the state root
+    the product used before its rename, belongs to the project even when
+    no single lane accounts for it, and one nothing
     accounts for is the operator's and is never removed. An
     attributed worktree is removed only when Git holds no lock on it, no
     session runs in its lane, it is clean, every commit beyond the base is
@@ -727,7 +736,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)
         paths: list[str]
-        if not owner and not any(_within(path, root) for root in owned):
+        if not owner and path.parent not in owned:
             reason, paths = FOREIGN, []
         else:
             reason, paths = _stray(
