@@ -713,8 +713,13 @@ def test_force_removes_a_dirty_lane_worktree_after_a_checkpoint(
     record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
     bundle = folder / record["artifact"]["reference"]
     assert bundle.stat().st_size == record["artifact"]["bytes"]
-    reference = f"refs/agent-parley-recovery/{row['checkpoint']}"
-    git(repo, "fetch", str(bundle), reference)
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
     assert "draft.txt" in git(
         repo, "ls-tree", "-r", "--name-only", record["worktree_commit"]
     )

@@ -19,6 +19,7 @@ CAPTURE_INTERVAL = 30
 GIT_SECONDS = 30
 MAX_STEP_BYTES = 400
 RECOVERY_FOLDER = "recovery"
+TEMPORARY_REF_NAMESPACE = "refs/agent-parley-recovery/"
 
 
 def _git(
@@ -287,14 +288,64 @@ def _require_dead(activity: dict, issue: str, owner: str) -> None:
         )
 
 
+def _lane_scope(lane: Path) -> str:
+    """Returns a path-safe token scoping one worktree's temporary refs.
+
+    Every lane is a linked worktree of one shared repository (`git
+    worktree add`), so a ref created under `TEMPORARY_REF_NAMESPACE` in
+    one lane is visible, and deletable, from every sibling lane sharing
+    that repository. Scoping the namespace by the lane's own resolved
+    path keeps one lane's publish or sweep from ever touching a sibling
+    lane's ref.
+
+    Args:
+        lane: Worktree to scope.
+
+    Returns:
+        A 16-character hex token derived from the lane's resolved path.
+    """
+    return hashlib.sha256(str(lane.resolve()).encode()).hexdigest()[:16]
+
+
+def _reclaim_temporary_refs(lane: Path) -> None:
+    """Deletes recovery refs a killed capture left behind in this lane.
+
+    ``_publish_bundle`` always removes its temporary ref before returning,
+    so any ref still under this lane's scoped prefix here was orphaned by
+    a process that died between its ``update-ref`` and that cleanup. The
+    caller holds this lane's capture lock, so no other capture of this
+    lane can be publishing one right now, and every surviving ref under
+    its own prefix is stale. The sweep never reaches past that prefix, so
+    a sibling lane's in-flight ref, live in the same shared repository, is
+    never touched. Coordination state belongs outside the target
+    repository; this keeps an orphaned ref from lingering there past the
+    next capture of the same lane.
+
+    Args:
+        lane: Assigned worktree to sweep.
+    """
+    prefix = f"{TEMPORARY_REF_NAMESPACE}{_lane_scope(lane)}/"
+    listing = _text(lane, "for-each-ref", "--format=%(refname)", prefix)
+    for name in listing.splitlines():
+        if name:
+            _git(lane, "update-ref", "-d", name)
+
+
 def _publish_bundle(
     lane: Path,
     destination: Path,
     reference: str,
     commit: str,
 ) -> tuple[int, str]:
-    """Publishes one fsynced bundle and removes its temporary Git ref."""
-    temporary_ref = f"refs/agent-parley-recovery/{reference}"
+    """Publishes one fsynced bundle and removes its temporary Git ref.
+
+    The temporary ref is scoped under the lane's own resolved path
+    (`_lane_scope`) because every lane is a linked worktree sharing one
+    repository's refs; an unscoped name would let one lane's cleanup or
+    reclaim delete a sibling lane's ref still between its own
+    ``update-ref`` and ``bundle create``.
+    """
+    temporary_ref = f"{TEMPORARY_REF_NAMESPACE}{_lane_scope(lane)}/{reference}"
     _git(lane, "update-ref", temporary_ref, commit)
     descriptor, temporary_name = tempfile.mkstemp(dir=destination.parent)
     os.close(descriptor)
@@ -409,6 +460,11 @@ def _capture(
     tool calls bundles each lane at most once per interval. A capture with no
     event, such as a handoff or an overdue offer, always reflects the tree.
 
+    A capture killed mid-publish can leave its temporary ref behind in the
+    lane. This capture, holding the lane's capture lock, reclaims any such
+    ref before doing its own work, so coordination state never lingers in
+    the target repository past the next capture of the same lane.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -429,6 +485,7 @@ def _capture(
     if not participant:
         raise BridgeError(f"{agent} is not a participant in this project.")
     lane = Path(participant["lane"])
+    _reclaim_temporary_refs(lane)
     ledger = issues.snapshot(directory)
     owned = [
         (number, record)
