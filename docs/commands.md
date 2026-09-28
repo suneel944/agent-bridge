@@ -240,4 +240,6 @@ reference. Nothing is delivered whole automatically; the reader prints it with
 `agent-parley mail show ID --full` and `agent-parley report show ID --full`. One
 attachment is capped at 65,536 bytes, a lane holds at most 1 MiB of them, and an
 attachment is removed when its record is pruned or its offer is declined,
-cancelled or released.
+cancelled or released. A full allowance releases the lane's oldest message
+attachments that every recipient has read; `--full` then says the body was
+released and the message keeps its first slice.

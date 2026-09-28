@@ -175,6 +175,43 @@ def test_attachment_and_lane_caps_are_enforced(
     assert sent(bridge, lanes["codex"], "w" * 5000, key="peer", to=("claude",))
 
 
+def test_a_full_allowance_frees_once_its_recipients_read_the_mail(
+    bridge, repo, paired, monkeypatch
+):
+    lanes = actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    monkeypatch.setattr(attachments, "MAX_LANE_BYTES", 12000)
+    first = sent(bridge, lanes["claude"], "a" * 5000, key="first")
+    second = sent(bridge, lanes["claude"], "b" * 5000, key="second")
+    with pytest.raises(BridgeError, match="read"):
+        sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "mark_message_read",
+        {"message_id": first["id"]},
+    )
+    third = sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    assert third["attachment"]
+    home = attachments.folder(directory)
+    assert not (home / f"{first['attachment']}.md").exists()
+    assert (home / f"{second['attachment']}.md").exists()
+    assert attachments.used(directory, "claude") == 10000
+    with pytest.raises(BridgeError, match="released"):
+        store.call(
+            bridge.home,
+            lanes["codex"],
+            "read_attachment",
+            {"reference": first["attachment"]},
+        )
+    with pytest.raises(BridgeError, match="readable"):
+        attachments.body(directory, first["attachment"], "kimi-1")
+    stored = store.read_message(
+        bridge.home, paired["root"], "codex", first["id"]
+    )["body_md"]
+    assert stored.startswith("a" * 100)
+
+
 def test_report_evidence_over_the_cap_is_attached(
     bridge, repo, paired, monkeypatch, capsys
 ):

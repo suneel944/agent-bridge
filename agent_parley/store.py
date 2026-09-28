@@ -1372,6 +1372,7 @@ def _send(
             MAX_BODY_BYTES,
             actor["name"],
             [str(name) for name in recipients],
+            _settled_attachments(db, actor, message_id),
         )
         db.execute(
             "UPDATE messages SET body_md=? WHERE id=?", (stored, message_id)
@@ -1379,6 +1380,37 @@ def _send(
         result["attachment"] = ref
         result["attachment_bytes"] = len(body.encode())
     return result
+
+
+def _settled_attachments(
+    db: sqlite3.Connection, actor: dict, message_id: int | None
+) -> list[str]:
+    """Lists the sender's attachment-bearing messages every recipient read.
+
+    Messages are never pruned, so this is what lets a lane's attachment
+    allowance free again. A recipient whose copy was superseded counts as
+    finished with it; a message with no recipient row, such as a feed-only
+    post, is never listed. The list is oldest first so the longest-settled
+    bodies are released before newer ones.
+
+    Args:
+        db: Open store connection.
+        actor: Sending participant.
+        message_id: Message being sent, which is never listed.
+
+    Returns:
+        Attachment references of those messages, oldest first.
+    """
+    rows = db.execute(
+        "SELECT m.id FROM messages m WHERE m.sender_id=? AND m.id IS NOT ? "
+        "AND m.body_md LIKE '%[attachment message-%' AND EXISTS ("
+        "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id) "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id "
+        "AND r.read_ts IS NULL AND r.superseded_ts IS NULL) ORDER BY m.id",
+        (actor["id"], message_id),
+    ).fetchall()
+    return [attachments.reference("message", row[0]) for row in rows]
 
 
 def _roster(db: sqlite3.Connection, actor: dict) -> dict:
