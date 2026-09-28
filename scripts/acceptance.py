@@ -940,10 +940,16 @@ def acceptance_record(decided: dict, version: str, run: str) -> dict:
 
     Returns:
         The record ``scripts.release_publish`` checks, holding the version,
-        the report link and the measured numbers exactly as the run took
-        them.
+        the report link, the run's overall verdict and the measured numbers
+        exactly as the run took them. The verdict travels with the numbers
+        so a release can refuse a run that failed its own conditions.
     """
-    return {"version": version, "run": run, **decided["measured"]}
+    return {
+        "version": version,
+        "run": run,
+        "verdict": "passed" if decided.get("passed") is True else "failed",
+        **decided["measured"],
+    }
 
 
 def verdict(

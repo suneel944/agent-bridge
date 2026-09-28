@@ -594,6 +594,12 @@ def _advance(path: Path, fold: Fold, reading: dict) -> dict:
     that grew by more than the budget catches up over later refreshes. A
     replaced or truncated file starts a new reading.
 
+    A line longer than ``MAX_READ`` holds no newline in a full chunk, so the
+    offset moves past that whole chunk rather than stalling on it forever.
+    The next reading then starts inside the oversized line; its remaining
+    fragment is not a JSON object and is skipped like any unparsable line,
+    and folding resumes from the following newline.
+
     Every adapter folds only records carrying a usage object, whose key ends
     in ``USAGE_MARK``, so a line without those bytes is skipped unparsed.
     Most transcript lines are prompts and tool output with no usage at all.
@@ -626,6 +632,8 @@ def _advance(path: Path, fold: Fold, reading: dict) -> dict:
         chunk = handle.read(MAX_READ)
     end = chunk.rfind(b"\n")
     if end < 0:
+        if len(chunk) == MAX_READ:
+            reading["offset"] += len(chunk)
         return reading
     reading["offset"] += end + 1
     for line in chunk[:end].split(b"\n"):

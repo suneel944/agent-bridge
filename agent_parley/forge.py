@@ -232,12 +232,14 @@ def issue_completion(repo: Path, number: str) -> dict | None:
         number: Bare repository issue number.
 
     Returns:
-        None when the forge cannot say. Otherwise the issue state, `OPEN` or
-        `CLOSED`, and for a closed issue the instant it closed in Unix
-        seconds, together with the closing pull request's state, number,
-        URL, head branch and merge commit, each empty when no pull request
-        is linked or it cannot be read. A closing pull request that merged
-        reports the state `MERGED`.
+        None when the forge cannot say, including when a linked closing
+        pull request cannot be read, since a closed issue whose pull request
+        is unknown must not read as closed without merging. Otherwise the
+        issue state, `OPEN` or `CLOSED`, and for a closed issue the instant
+        it closed in Unix seconds, together with the closing pull request's
+        state, number, URL, head branch and merge commit, each empty when no
+        pull request is linked. A closing pull request that merged reports
+        the state `MERGED`.
     """
     if _implementation(repo) != "github":
         return None
@@ -297,15 +299,16 @@ def issue_completion(repo: Path, number: str) -> dict | None:
     )
     try:
         request = json.loads(pull or "null")
+        state = str(request["state"]).upper()
         reading.update(
-            state="MERGED" if request.get("state") == "MERGED" else "CLOSED",
+            state="MERGED" if state == "MERGED" else "CLOSED",
             pull_request=int(request.get("number") or 0),
             url=str(request.get("url") or ""),
             branch=str(request.get("headRefName") or ""),
             commit=str((request.get("mergeCommit") or {}).get("oid") or ""),
         )
-    except (ValueError, TypeError, AttributeError):
-        reading["pull_request"] = max(linked)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
     return reading
 
 

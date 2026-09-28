@@ -295,7 +295,10 @@ def idle_intervals(
     ``Stop`` or ``SessionEnd`` checkpoint, and closes at the lane's next
     recorded activity. The interval still open at the time of the reading is
     reported as open, and only counted while the recorded session process is
-    alive, because a stopped lane is not idle: it is stopped.
+    alive, because a stopped lane is not idle: it is stopped. Records the
+    service writes on the lane's behalf, such as a wake request, and hook
+    calls from another session are not the lane's activity, so they neither
+    close an interval nor open one.
 
     Args:
         directory: Private state directory for the common repository.
@@ -319,9 +322,11 @@ def idle_intervals(
             entries = checkpoints.read_events(directory, name, since)
         except BridgeError:
             return {"intervals": [], "seconds": 0, "complete": False}
+    unobserved = {reason.value for reason in checkpoints.UNOBSERVED}
     stamps = sorted(
         (float(entry.get("ts", 0) or 0), str(entry.get("event", "")))
         for entry in entries
+        if entry.get("reason_class") not in unobserved
     )
     intervals: list[dict] = []
     opened: float | None = None

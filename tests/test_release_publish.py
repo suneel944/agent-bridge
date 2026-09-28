@@ -1211,6 +1211,7 @@ def live_record(root, released, **changes):
     record = {
         "version": released,
         "run": "https://github.com/suneel944/agent-parley/issues/366",
+        "verdict": "passed",
         "lanes": 4,
         "claims": 6,
         "claims_completed": 6,
@@ -1260,6 +1261,9 @@ def test_a_passing_suite_and_a_live_record_admit_a_minor_release(tmp_path):
     [
         ({"version": "0.12.0"}, "names another version"),
         ({"run": ""}, "names no run"),
+        ({"verdict": "failed"}, "carries verdict 'failed', not 'passed'"),
+        ({"verdict": None}, "carries verdict None, not 'passed'"),
+        ({"verdict": True}, "carries verdict True, not 'passed'"),
         ({"idle_lane_minutes": None}, "lacks measured idle_lane_minutes"),
         ({"unaccountable_claim_minutes": True}, "unaccountable_claim_minutes"),
         ({"claims_completed": 5}, "completed 5 of 6 claims"),
@@ -1273,6 +1277,15 @@ def test_an_incomplete_live_record_is_named(tmp_path, changes, named):
     )
     assert len(errors) == 1
     assert named in errors[0]
+
+
+def test_a_record_without_a_verdict_is_refused(tmp_path):
+    path = live_record(tmp_path, "0.13.0")
+    record = json.loads(path.read_text())
+    del record["verdict"]
+    path.write_text(json.dumps(record))
+    error = release.acceptance_record_error(tmp_path, "0.13.0")
+    assert error.endswith("carries verdict None, not 'passed'")
 
 
 @pytest.mark.parametrize("name", release.ACCEPTANCE_MEASURES)

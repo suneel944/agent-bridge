@@ -27,6 +27,7 @@ ENDED_STATES = ("stopped", "dead", "reclaimed")
 ATTENTION_LINES = 8
 FORGE_ISSUES = "forge-issues.json"
 FORGE_TTL = 300.0
+FORGE_STALE = 2 * FORGE_TTL
 FORGE_RETRY = 60.0
 FORGE_TIMEOUT = 5
 FORGE_LIMIT = 1000
@@ -41,7 +42,7 @@ def reading(
         issues: Issue number to its title, or None when never read.
         limit: Most issues the reading asked the forge for.
         age: Seconds since the reading was taken.
-        fresh: Whether the reading is within `FORGE_TTL`.
+        fresh: Whether the reading is within `FORGE_STALE`.
         reason: Why the reading is not fresh, empty when it is.
 
     Returns:
@@ -1015,14 +1016,14 @@ class StatusMixin(BridgeCore):
         return reported_lanes({"projects": shown})
 
     def forge_issues(self, directory: Path, root: str) -> dict:
-        """Reads the forge's open issues through a short-lived cache.
+        """Reads the forge's open issues from the supervisor's cache.
 
         The open-work view hides claims on closed issues and shows titles,
-        and only the forge knows either. One bounded `forge` call reads every
-        open issue and is kept in `FORGE_ISSUES` for `FORGE_TTL` seconds. A
-        failed call is retried no sooner than `FORGE_RETRY` seconds later, so
-        a forge that is down costs one timeout per retry window rather than
-        one per reading, and the last good cache answers meanwhile.
+        and only the forge knows either. `status` stays read-only, so it
+        never calls the forge: the service's poll keeps `FORGE_ISSUES`
+        current through `supervision.refresh_forge_issues`, and this reads
+        that file alone. A reading older than `FORGE_STALE` seconds is
+        reported stale, with a recorded failed read named as the cause.
 
         Args:
             directory: Private state directory of the project.
@@ -1032,14 +1033,12 @@ class StatusMixin(BridgeCore):
             ``issues`` as issue number to its title, or None when no reading
             was ever cached; ``complete`` when that reading held every open
             issue; ``age_seconds`` of the reading; ``fresh`` when it is
-            within `FORGE_TTL`; and ``reason`` naming why it is not.
+            within `FORGE_STALE`; and ``reason`` naming why it is not.
         """
         from agent_parley.cli import forge, json
-        from agent_parley.state import write_json
 
-        path = directory / FORGE_ISSUES
         try:
-            cached = json.loads(path.read_text())
+            cached = json.loads((directory / FORGE_ISSUES).read_text())
         except (OSError, ValueError):
             cached = {}
         if not isinstance(cached, dict):
@@ -1049,8 +1048,7 @@ class StatusMixin(BridgeCore):
         issues = stored if isinstance(stored, dict) else None
         read_at = float(cached.get("read_at") or 0)
         limit = int(cached.get("limit") or FORGE_LIMIT)
-        reason = "forge unreachable"
-        if issues is not None and now - read_at < FORGE_TTL:
+        if issues is not None and now - read_at < FORGE_STALE:
             return reading(issues, limit, now - read_at, True, "")
         try:
             manifest = json.loads((directory / "project.json").read_text())
@@ -1058,27 +1056,8 @@ class StatusMixin(BridgeCore):
             manifest = {}
         if forge.select(Path(root), manifest) != "github":
             return reading(issues, limit, now - read_at, False, "no GitHub")
-        if now - float(cached.get("failed_at") or 0) >= FORGE_RETRY:
-            catalog = forge.open_issue_catalog(
-                Path(root), FORGE_LIMIT, FORGE_TIMEOUT
-            )
-            if catalog is not None:
-                issues = {
-                    number: {"title": str(item.get("title") or "")}
-                    for number, item in catalog.items()
-                }
-                with contextlib.suppress(OSError):
-                    write_json(
-                        path,
-                        {
-                            "read_at": now,
-                            "limit": FORGE_LIMIT,
-                            "issues": issues,
-                        },
-                    )
-                return reading(issues, FORGE_LIMIT, 0.0, True, "")
-            with contextlib.suppress(OSError):
-                write_json(path, {**cached, "failed_at": now})
+        failed = float(cached.get("failed_at") or 0) > read_at
+        reason = "forge unreachable" if failed else "service not refreshing"
         return reading(issues, limit, now - read_at, False, reason)
 
     def _board_project(

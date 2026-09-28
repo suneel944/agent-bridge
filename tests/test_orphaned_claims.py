@@ -169,6 +169,40 @@ def test_a_killed_lane_is_orphaned_announced_and_taken_by_a_peer(
     }
 
 
+def test_a_failed_capture_still_orphans_and_the_claim_can_be_taken(
+    bridge, repo, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    reserve(bridge, actors["claude"], "src/app.py")
+    killed(directory, "claude", STALLED + 100)
+    running(directory, "codex")
+
+    def locked(*args, **kwargs):
+        raise BridgeError("index.lock exists")
+
+    monkeypatch.setattr(recovery, "capture", locked)
+    supervision.poll(bridge.home, directory)
+
+    orphan = issues.snapshot(directory)["issues"]["42"]["orphan"]
+    assert orphan["owner"] == "claude"
+    assert orphan["capture_failed"] == "index.lock exists"
+    assert "no recovery checkpoint was captured" in orphan["reason"]
+    assert inbox(bridge, paired, "codex")[0][0] == (
+        "Orphaned claims held by claude"
+    )
+
+    taken = bridge.issue(peer, "claim", "42", take_orphaned=True)
+
+    assert taken["owner"] == "codex"
+    assert taken["taken"]["from"] == "claude"
+    assert "recovery" not in taken
+    assert taken["reservations_moved"] == ["src/app.py"]
+
+
 def test_a_native_exit_retains_the_generation_needed_for_recovery(
     bridge, repo, paired, monkeypatch
 ):

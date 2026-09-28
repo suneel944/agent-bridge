@@ -819,6 +819,10 @@ def prepare_takeover(
 ) -> dict:
     """Loads a dead owner's exact claim generation for takeover.
 
+    A marker the supervisor published after a failed capture records that
+    failure, and its takeover proceeds with no checkpoint: ownership truth
+    does not wait on a best-effort recovery of the dead lane's work.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -826,11 +830,13 @@ def prepare_takeover(
         issue: Bare repository issue number.
 
     Returns:
-        Expected claim and orphan identities plus its durable checkpoint.
+        Expected claim and orphan identities plus its durable checkpoint,
+        which is empty when the marker records a failed capture.
 
     Raises:
-        BridgeError: If ownership changed, no checkpoint exists, or the old
-            session process is alive.
+        BridgeError: If ownership changed, no checkpoint exists and the
+            marker records no failed capture, or the old session process is
+            alive.
     """
     from agent_parley import issues
 
@@ -846,7 +852,12 @@ def prepare_takeover(
     if owner not in manifest["participants"]:
         raise BridgeError(f"Issue #{issue} names an unknown owner {owner}.")
     claim_id = str(record.get("claim_id") or "")
-    saved = checkpoint(directory, issue, claim_id)
+    try:
+        saved = checkpoint(directory, issue, claim_id)
+    except BridgeError:
+        if not orphan.get("capture_failed"):
+            raise
+        saved = {}
     with lock(directory / f"{owner}-checkpoint.lock", timeout=1):
         activity_path = directory / f"{owner}-activity.json"
         try:
