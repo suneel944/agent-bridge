@@ -305,6 +305,7 @@ def test_ready_work_on_a_closed_issue_releases_without_requeueing(
     assert released["owner"] is None
     assert released["ended_on_forge"]
     assert "7" not in lifecycle.actionable(issues.snapshot(directory))
+    assert "7" not in issues.unclaimed(issues.snapshot(directory))
     reclaimed = bridge.issue(lane, "claim", "7")
     assert reclaimed["owner"] == "claude"
     assert "ended_on_forge" not in reclaimed

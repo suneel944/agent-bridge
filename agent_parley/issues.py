@@ -477,7 +477,10 @@ def unclaimed(state: dict) -> list[str]:
     An issue is unclaimed when the ledger records neither an owner nor a
     pending offer for it, and unblocked when it waits on nothing. The ledger
     records no completion, so an issue that waits on anything is left out
-    rather than guessed to be ready.
+    rather than guessed to be ready. A released claim whose issue closed on
+    the forge carries ``ended_on_forge`` and is left out too, as
+    ``lifecycle.actionable`` leaves it out, so finished work is never offered
+    as the next thing to claim; claiming it again clears the mark.
 
     The order puts first the issues that other owned issues wait on, because
     finishing one of those releases a peer, and falls back to the issue number
@@ -498,6 +501,7 @@ def unclaimed(state: dict) -> list[str]:
             if not record.get("owner")
             and not record.get("offer")
             and not record.get("blocked_by")
+            and not record.get("ended_on_forge")
             and lifecycle.state(record)["authorized"]
             and lifecycle.state(record)["state"] != lifecycle.COMPLETE
         ),
