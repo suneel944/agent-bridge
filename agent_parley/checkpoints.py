@@ -961,10 +961,7 @@ def option_values(args: list[str], options: tuple[str, ...]) -> list[str]:
         options: Option names whose value carries publishable text.
 
     Returns:
-        Every value those options were given, in the order they appear. A
-        value supplied through a file is not collected, because the hook reads
-        the command line rather than the file system; integration still scans
-        the commit that value produced.
+        Every value those options were given, in the order they appear.
     """
     values: list[str] = []
     index = 0
@@ -992,12 +989,44 @@ def option_values(args: list[str], options: tuple[str, ...]) -> list[str]:
 
 
 MESSAGE_OPTIONS = {
-    "commit": ("-m", "--message"),
+    "commit": ("-m", "--message", "--trailer"),
     "merge": ("-m", "--message"),
     "tag": ("-m", "--message"),
     "revert": ("-m", "--message"),
 }
+MESSAGE_FILES = {
+    "commit": ("-F", "--file"),
+    "merge": ("-F", "--file"),
+    "tag": ("-F", "--file"),
+}
 PULL_REQUEST_OPTIONS = ("-t", "--title", "-b", "--body")
+PULL_REQUEST_FILES = ("-F", "--body-file")
+MESSAGE_FILE_LIMIT = 65536
+
+
+def message_files(base: Path, names: list[str]) -> list[str]:
+    """Reads the message files a command names, as it would publish them.
+
+    Args:
+        base: Directory a relative file name resolves against.
+        names: File names given to a message file option.
+
+    Returns:
+        The leading bytes of every file that could be read, decoded
+        leniently. Standard input and unreadable names yield nothing.
+    """
+    texts = []
+    for name in names:
+        if name == "-":
+            continue
+        try:
+            with (base / name).open("rb") as handle:
+                texts.append(
+                    handle.read(MESSAGE_FILE_LIMIT).decode(errors="replace")
+                )
+        except OSError:
+            continue
+    return texts
 
 
 def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
@@ -1006,8 +1035,8 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
     A lane reaches Git and the forge through its own tools, so the text that
     would land in a commit, a merge, a tag or a pull request is inspected
     where the agent asks for it, before anything is written. The check reads
-    the command line only: it runs nothing, writes nothing and never consults
-    the network.
+    the command line and the message files it names: it runs nothing, writes
+    nothing and never consults the network.
 
     Args:
         payload: Native lifecycle hook payload.
@@ -1029,14 +1058,23 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
         texts: list[str] = []
         if Path(words[0]).name == "gh":
             if words[1:3] == ["pr", "create"] and cwd.is_relative_to(lane):
-                texts = option_values(words[3:], PULL_REQUEST_OPTIONS)
+                texts = option_values(
+                    words[3:], PULL_REQUEST_OPTIONS
+                ) + message_files(
+                    cwd, option_values(words[3:], PULL_REQUEST_FILES)
+                )
         else:
             action = git_action(segment, cwd)
             if action is None:
                 continue
             target, subcommand, args = action
             if subcommand in MESSAGE_OPTIONS and target.is_relative_to(lane):
-                texts = option_values(args, MESSAGE_OPTIONS[subcommand])
+                texts = option_values(
+                    args, MESSAGE_OPTIONS[subcommand]
+                ) + message_files(
+                    target,
+                    option_values(args, MESSAGE_FILES.get(subcommand, ())),
+                )
         for text in texts:
             rule = policy.matched_rule(text)
             if rule:
