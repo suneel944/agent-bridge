@@ -118,12 +118,14 @@ and named on one line with `agent-parley issue resolve N`; `--all` lists those
 rows too.
 
 Titles and open state come from one bounded read of the project's open GitHub
-issues, the same list `issue list` reads, with a 5-second timeout. The reading
-is cached as `forge-issues.json` in the project's state directory for 300
-seconds, so repeated `status` calls reuse it. When the read fails, `status`
-answers from the last cached reading, prints one `Forge:` line with its age,
-and waits 60 seconds before trying again. With no reading at all, or no GitHub
-forge, the `Forge:` line says so and claims on closed issues are not hidden.
+issues, the same list `issue list` reads, with a 5-second timeout. The service's
+poll takes that reading, not `status`: it caches it as `forge-issues.json` in
+the project's state directory and reads again once the cache is 300 seconds
+old. When the read fails, the poll keeps the last reading and waits 60 seconds
+before trying again. `status` only reads the cache; a reading over 600 seconds
+old prints one `Forge:` line with its age and the cause, a failed read or a
+service that is not refreshing it. With no reading at all, or no GitHub forge,
+the `Forge:` line says so and claims on closed issues are not hidden.
 Last, `Needs action:` lists each orphaned or overdue claim with the
 command that resolves it, `agent-parley issue claim N --take-orphaned` run from
 a peer lane or `agent-parley issue assign N LANE --reason TEXT`.
@@ -235,7 +237,9 @@ page carries up to ten messages and a search up to five, each with a
 240-character body preview; `--after-id` continues a thread page and `--limit`
 narrows a search. Where SQLite was built without the full-text index a search
 matches the query as a literal case-insensitive substring rather than as
-indexed terms, and every result names which of the two answered it.
+indexed terms, and every result names which of the two answered it. The index
+covers the whole body of a message that spilled to an attachment, and so does
+decision search; the substring fallback reads only the slice the message keeps.
 
 `--as NAME` names the lane to read instead of taking it from the worktree, so
 `mail show`, `mail thread`, `mail search` and `mail list` answer from the main
@@ -286,6 +290,7 @@ the only compatible combination.
 <!-- compatibility:start -->
 | Launcher | Wire protocol | Store schema |
 | --- | --- | --- |
+| 0.14.0 | 1 | 12 |
 | 0.13.0 | 1 | 11 |
 | 0.12.0 | 1 | 10 |
 | 0.11.0 | 1 | 10 |
@@ -345,6 +350,12 @@ new service, so the relaunch follows the stop. `status` prints the same drift
 as a
 `Code: stale` line, and `agent-parley up` then starts a service on the code in
 the checkout.
+
+The `projects` component is `ok` while every registered project's root
+checkout exists. A project whose root is gone, such as a probe run from a
+temporary directory, puts it in `root gone`, names each such root, and makes
+the verdict not consistent until the checkout is restored or that project's
+state folder is removed.
 
 The store has four states. `absent` means no store has been created yet, which
 is consistent because the service writes it at the current schema. `ok` means
@@ -2302,7 +2313,10 @@ the same pass and published under `worktrees` in `reclaim.json`. Every
 worktree `git worktree list` reports is attributed to a lane by path, when it
 sits inside a lane's worktree, or by branch, when its branch is the lane's
 name or branch followed by `-` or `/`, such as `claude-pr-12`. One inside the
-project state directory belongs to the project. A worktree nothing accounts
+project state directory belongs to the project, and so does one under the
+`agent-bridge` folder beside a state root named `agent-parley`, such as
+`~/.local/state/agent-bridge`, where lanes lived before the rename. A
+worktree nothing accounts
 for is reported with reason `no lane made it` and never touched, even with
 `--force`.
 
@@ -2372,6 +2386,14 @@ notice on the launcher's terminal. Each delivery is written to the same
 participant event log a served checkpoint records into, under the reason
 class `polled_delivery`, so `agent-parley top` counts its bytes in `CONTEXT`
 like any other lane's.
+
+Each delivery appends a batch headed `## Batch N, written <UTC time>`, and
+delivery never marks mail read, because the lane may not have read the file
+yet. A batch stays while any message it carried is unread and leaves once the
+lane calls `mark_message_read` for all of them; a batch without mail stays
+only until a newer one is written, and at most eight are kept. A quiet
+interval drops read batches and removes the file once none remain, so a lane
+tells a new batch from one it already read by its number.
 
 Polled delivery is delivery, never enforcement. It cannot deny a tool call,
 cannot hold a turn open, and reaches the lane only as text that lane has to
@@ -2706,7 +2728,10 @@ The command is stored as argument tokens and run without a shell, so
 redirection, expansion and chaining cannot ride into a gate, and no flag skips
 it. Removing it is an explicit `verify set ''`. `--preview` never runs it,
 because executing a configured command is a different decision from reading
-Git state.
+Git state. `verify set` runs only from an operator shell in the base checkout:
+it refuses inside an assigned worktree and in any process holding a lane's
+`AGENT_PARLEY_TOKEN`, so a lane cannot replace or clear the gate its own merge
+has to pass. `verify show` stays readable from a lane.
 
 ## Requiring a recorded approval
 
@@ -2724,7 +2749,9 @@ agent-parley reject claude-1 'Needs a test for the retry path'
 `approval set` records the requirement in the project manifest beside the
 roster, outside the target source tree, and takes any of `merge`, `pr`, both,
 or nothing at all. A repository with nothing required integrates exactly as
-before.
+before. Like `verify set`, it refuses inside an assigned worktree and in any
+process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot lift the
+requirement on its own work; `approval show` stays readable from a lane.
 
 With a step required, `participant merge` and `participant pr` refuse until a
 decision for that lane's current ready report is recorded, and the refusal

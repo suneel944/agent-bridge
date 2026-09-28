@@ -112,8 +112,9 @@ Logs are bounded automatically:
   log is bounded the same way, and an attachment goes with the report it
   belonged to.
 - A wake log is cut back to empty before a write would take it past 1 MiB.
-- The store keeps the newest 2,000 served-call records and the newest 2,000
-  lane state transitions of each project.
+- The store keeps the newest 2,000 served-call records, the newest 2,000
+  lane state events and, counted apart so they never evict those events,
+  the newest 2,000 lane accounting events of each project.
 - An offer's attachment is removed when the offer is declined, cancelled or
   released.
 

@@ -90,13 +90,16 @@ def policy(manifest: dict) -> dict | None:
     )
 
 
-def _operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
+def operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
     """Refuses an operator command run from a lane or a lane's shell.
 
     A launched lane carries its coordination credential in `LANE_TOKEN`, and
     every process it starts inherits it, so a lane that changes directory to
     the base checkout is still refused. Like `approve`, this is the product's
-    command-line boundary, not an operating-system one.
+    command-line boundary, not an operating-system one. The unattended
+    policy and the merge approval and verification gates all use it, so no
+    lane can widen its own integration authority or clear a gate its merge
+    has to pass.
 
     Args:
         repo: Checkout the command names.
@@ -184,7 +187,7 @@ def configure(
     from agent_parley.cli import lock, write_json
 
     root, directory = bridge.project(repo, create=False)
-    _operator_only(
+    operator_only(
         repo, root, roster.read(directory), "Unattended integration is set"
     )
     numbers = [str(number).strip().removeprefix("#") for number in issues]
@@ -526,7 +529,7 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
             f"{name} is not a participant in this project; "
             "run agent-parley participant list."
         )
-    _operator_only(repo, root, data, "Unattended integration runs")
+    operator_only(repo, root, data, "Unattended integration runs")
     with lock(directory / "merge.lock", MERGE_BUSY):
         with lock(directory / "setup.lock"):
             data = bridge._project(root, directory, verify={name})

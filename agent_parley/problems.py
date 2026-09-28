@@ -153,9 +153,41 @@ def _blocked(record: dict) -> str:
         return supervision.STOPPED
     if result in (DIALOG, ATTENTION):
         return result
+    held = record.get("dialog") or {}
+    if held.get("name") == dialogs.PERMISSION or held.get("escalated"):
+        return DIALOG
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _answer(name: str, repo: str, record: dict, text: str) -> str:
+    """Says where the operator answers a prompt the lane's client holds.
+
+    A lane the service resumed has no terminal: its launcher reads nothing
+    and writes to the lane's wake log, so no operator can answer the prompt
+    where it is. That lane is ended and started again in the operator's own
+    terminal, where the same prompt can be answered.
+
+    Args:
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        record: One participant record from the status reading.
+        text: Remedy for a lane whose launcher has a terminal.
+
+    Returns:
+        The given remedy, or the stop and restart commands naming the wake
+        log when the lane's launcher has no terminal.
+    """
+    log = record.get("wake_log") or ""
+    if not log:
+        return text
+    return (
+        f"{name} was resumed without a terminal, so no one can answer its "
+        f"prompt; its output is in {log}. Run `agent-parley participant "
+        f"stop {name} {repo}`, then `agent-parley participant restart "
+        f"{name} {repo}` in your terminal"
+    )
 
 
 def _attempted(name: str, record: dict) -> str:
@@ -225,8 +257,13 @@ def _remedy(
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
     if blocked == DIALOG:
         return (
-            f"answer the prompt open in {name}'s own client; it reads no "
-            "mail until that prompt is cleared",
+            _answer(
+                name,
+                repo,
+                record,
+                f"answer the prompt open in {name}'s own client; it reads no "
+                "mail until that prompt is cleared",
+            ),
             BY_OPERATOR,
         )
     if blocked == ATTENTION:
@@ -644,7 +681,12 @@ def _lane_rows(
                 _row(
                     APPROVAL,
                     f"the client is waiting for approval of {tool}",
-                    f"answer the prompt in {name}'s terminal",
+                    _answer(
+                        name,
+                        repo,
+                        record,
+                        f"answer the prompt in {name}'s terminal",
+                    ),
                     waited,
                     name,
                     root,
@@ -660,7 +702,12 @@ def _lane_rows(
             _row(
                 HELD,
                 f"the client is held by {shown}",
-                f"answer the prompt in {name}'s terminal",
+                _answer(
+                    name,
+                    repo,
+                    record,
+                    f"answer the prompt in {name}'s terminal",
+                ),
                 (
                     max(0, int(now - float(at)))
                     if isinstance(at, (int, float))

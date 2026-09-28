@@ -161,6 +161,61 @@ def test_read_attachment_pages_and_is_scoped_to_the_addressed(
         )
 
 
+def test_search_finds_text_only_in_a_spilled_body_after_a_rebuild(
+    bridge, repo, paired
+):
+    lanes = actors(bridge, paired)
+    tail = "line of evidence\n" * 400 + "rotate the signing key\n"
+    mail = sent(bridge, lanes["claude"], tail)
+    decision = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Agreed",
+            "body_md": tail,
+            "idempotency_key": "decided-1",
+            "decision": True,
+        },
+    )
+    assert mail["attachment"] and decision["attachment"]
+
+    def found():
+        hits = store.call(
+            bridge.home,
+            lanes["codex"],
+            "search_messages",
+            {"query": "signing key"},
+        )
+        decided = store.call(
+            bridge.home,
+            lanes["codex"],
+            "search_decisions",
+            {"query": "signing key"},
+        )
+        assert hits["index"] == decided["index"] == "fts5"
+        return (
+            [row["id"] for row in hits["messages"]],
+            [row["id"] for row in decided["messages"]],
+        )
+
+    expected = ([decision["id"], mail["id"]], [decision["id"]])
+    assert found() == expected
+    with store.connect(bridge.home, write=True) as db:
+        db.execute(
+            "INSERT INTO message_search(message_search) VALUES ('rebuild')"
+        )
+        db.execute(f"PRAGMA user_version={store.SCHEMA_VERSION - 1}")
+    assert found() == ([], [])
+    store.initialize(bridge.home)
+    assert found() == expected
+    with store.connect(bridge.home, write=True) as db:
+        db.execute("DROP TRIGGER message_indexed")
+    store.initialize(bridge.home)
+    assert found() == expected
+
+
 def test_attachment_and_lane_caps_are_enforced(
     bridge, repo, paired, monkeypatch
 ):
@@ -210,6 +265,37 @@ def test_a_full_allowance_frees_once_its_recipients_read_the_mail(
         bridge.home, paired["root"], "codex", first["id"]
     )["body_md"]
     assert stored.startswith("a" * 100)
+
+
+def test_a_read_decision_keeps_its_attachment_when_the_allowance_fills(
+    bridge, repo, paired, monkeypatch
+):
+    lanes = actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    monkeypatch.setattr(attachments, "MAX_LANE_BYTES", 12000)
+    decision = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Interface agreed",
+            "body_md": "d" * 5000,
+            "idempotency_key": "decision",
+            "decision": True,
+        },
+    )
+    sent(bridge, lanes["claude"], "b" * 5000, key="second")
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "mark_message_read",
+        {"message_id": decision["id"]},
+    )
+    with pytest.raises(BridgeError, match="read"):
+        sent(bridge, lanes["claude"], "c" * 5000, key="third")
+    home = attachments.folder(directory)
+    assert (home / f"{decision['attachment']}.md").exists()
 
 
 def test_report_evidence_over_the_cap_is_attached(
@@ -316,6 +402,40 @@ def test_an_offer_over_the_cap_is_attached_until_it_is_answered(
     assert accepted["attachment"] == offered["attachment"] and kept.exists()
     bridge.issue(lanes["codex"], "release", "42")
     assert not kept.exists()
+
+
+def test_a_decision_is_readable_whole_by_every_registered_lane(
+    bridge, repo, paired
+):
+    data = bridge.add_participant(repo, "kimi-1", "kimi")
+    lanes = actors(bridge, data)
+    directory = bridge.project(repo)[1]
+    body = "line of evidence\n" * 400
+    result = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": [],
+            "subject": "Interface agreed",
+            "body_md": body,
+            "idempotency_key": "decision-1",
+            "decision": True,
+        },
+    )
+    reference = result["attachment"]
+    for reader in ("codex", "kimi-1"):
+        assert attachments.body(directory, reference, reader) == body
+
+
+def test_operator_decide_and_speak_spill_a_long_body(bridge, repo, paired):
+    actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    body = "line of evidence\n" * 400
+    decided = bridge.decide(repo, body)
+    assert attachments.body(directory, decided["attachment"], "codex") == body
+    spoken = bridge.say(repo, "codex", body)
+    assert attachments.body(directory, spoken["attachment"], "codex") == body
 
 
 def test_mail_show_prints_the_reference_and_the_whole_body_on_request(

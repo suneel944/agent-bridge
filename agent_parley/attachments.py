@@ -366,6 +366,64 @@ def remove(directory: Path, reference: str) -> None:
         _path(home, reference, suffix).unlink(missing_ok=True)
 
 
+def retarget(text: str, reference: str) -> str:
+    """Points the marker a bounded record ends with at another reference.
+
+    Args:
+        text: Stored body of a record.
+        reference: Reference the marker names from now on.
+
+    Returns:
+        The body with its marker renamed, or the body unchanged when it
+        carries no marker.
+    """
+    stripped = text.rstrip()
+    found = MARKER.search(stripped)
+    if not found:
+        return text
+    size = int(found.group(2))
+    return stripped[: found.start()] + marker(validate(reference), size)
+
+
+def renumber(directory: Path, moves: list[tuple[str, str]]) -> None:
+    """Re-keys attachments whose records were given new identifiers.
+
+    Every moved file is first parked under a hidden name, so one move never
+    lands on a file another move is about to vacate. A destination that is
+    still occupied afterwards belongs to a record outside the moves and is
+    refused rather than overwritten.
+
+    Args:
+        directory: Private state directory for the common repository.
+        moves: Pairs of the reference a record had and the one it now has.
+
+    Raises:
+        BridgeError: If a destination already holds an attachment.
+    """
+    home = folder(directory)
+    parked = []
+    for old, new in moves:
+        for suffix in ("md", "json"):
+            source = _path(home, validate(old), suffix)
+            if source.exists():
+                hidden = home / f".renumber-{old}.{suffix}"
+                source.rename(hidden)
+                parked.append((hidden, _path(home, validate(new), suffix)))
+    for hidden, target in parked:
+        if target.exists():
+            raise BridgeError(
+                f"Attachment {target.stem} already exists; the import would "
+                "overwrite it."
+            )
+        if target.suffix == ".json":
+            meta = json.loads(hidden.read_text())
+            meta["reference"] = target.stem
+            write_json(target, meta)
+            hidden.unlink()
+        else:
+            hidden.rename(target)
+
+
 def _path(home: Path, reference: str, suffix: str) -> Path:
     """Resolves a validated reference to a file inside the folder.
 

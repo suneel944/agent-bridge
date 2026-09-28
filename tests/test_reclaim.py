@@ -647,6 +647,27 @@ def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
     assert path.exists()
 
 
+def test_a_worktree_under_the_pre_rename_state_root_is_reclaimed(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    legacy = tmp_path / "agent-bridge" / "projects" / "0123456789abcdef"
+    legacy.mkdir(parents=True)
+    path = made(repo, legacy, "wt-1092")
+    aged(path)
+
+    unrenamed = bridge.reclaim_worktrees(repo)
+    monkeypatch.setattr(
+        reclaim, "RENAMED_HOMES", {bridge.home.name: "agent-bridge"}
+    )
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    assert worktree_of(unrenamed, path)["reason"] == reclaim.FOREIGN
+    row = worktree_of(swept, path)
+    assert row["reason"] == reclaim.CONTAINED
+    assert row["removed"] is True
+    assert not path.exists()
+
+
 def test_a_merged_lane_worktree_outside_the_state_directory_is_reclaimed(
     bridge, repo, idle, tmp_path
 ):
@@ -889,3 +910,13 @@ def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
         "agent-parley participant retire claude --repo /r"
     )
     assert young == []
+
+
+def test_size_counts_a_hard_linked_file_once(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "object").write_bytes(b"x" * 4096)
+    os.link(tmp_path / "a" / "object", tmp_path / "b" / "object")
+    (tmp_path / "b" / "own").write_bytes(b"y" * 100)
+
+    assert reclaim.size(tmp_path) == 4196

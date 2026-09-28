@@ -26,12 +26,13 @@ commits, so no work leaves with the row.
 Lanes also make worktrees of their own, for pull requests and sub-tasks, and
 Git registers each against the project repository. Those are read from
 `git worktree list` and attributed to a lane by path, when they sit inside a
-lane or the project state directory, or by branch, when their branch is
-named after a lane. A worktree no lane accounts for is the operator's and is
-never touched. An attributed one is removed when it is clean, carries no
-commit that neither the base checkout nor its upstream has, and either the
-base already holds its head, its lane retired, or it has been untouched past
-the inactivity threshold. Uncommitted changes and unpushed commits keep it
+lane, the project state directory or the state root the product used
+before its rename, or by branch, when their branch is named after a lane.
+A worktree no lane accounts for is the operator's and is never touched. An
+attributed one is removed when it is clean, carries no commit that neither
+the base checkout nor its upstream has, and either the base already holds
+its head, its lane retired, or it has been untouched past the inactivity
+threshold. Uncommitted changes and unpushed commits keep it
 unless the operator forces the removal, and a forced removal first writes a
 recovery checkpoint holding both.
 """
@@ -47,6 +48,7 @@ from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
 MAX_REPORTED_PATHS = 10
+RENAMED_HOMES = {"agent-parley": "agent-bridge"}
 
 MERGED = "its pull request merged"
 STOPPED = (
@@ -506,7 +508,12 @@ def _entries(root: str) -> list[dict] | None:
 
 
 def size(path: Path) -> int:
-    """Totals the bytes of every regular file under a directory.
+    """Totals the bytes of every file under a directory, once per inode.
+
+    Worktrees and clones on one filesystem share Git objects through hard
+    links, so a file reached under several names is counted the first time
+    only. The total is then the space the files take, as `du -sb` reports
+    it, rather than the sum of every name.
 
     Args:
         path: Directory measured; symbolic links are counted, not followed.
@@ -515,18 +522,48 @@ def size(path: Path) -> int:
         The total in bytes, counting only what could be read.
     """
     total = 0
+    seen: set[tuple[int, int]] = set()
     for folder, _, files in os.walk(path, onerror=lambda error: None):
         for file in files:
             try:
-                total += os.lstat(os.path.join(folder, file)).st_size
+                found = os.lstat(os.path.join(folder, file))
             except OSError:
                 continue
+            if found.st_nlink > 1:
+                inode = (found.st_dev, found.st_ino)
+                if inode in seen:
+                    continue
+                seen.add(inode)
+            total += found.st_size
     return total
 
 
 def _within(path: Path, parent: Path) -> bool:
     """Reports whether a path lies inside, or is, another directory."""
     return path == parent or parent in path.parents
+
+
+def owned_roots(directory: Path) -> list[Path]:
+    """Names the directories whose worktrees the project itself made.
+
+    The project state directory is one. The state root the product used
+    before its rename is the other: lanes created then were registered
+    with the same repository from beneath it, and no lane of the current
+    manifest accounts for them any longer. It is only claimed when the
+    current state root carries the product's own default name, so a
+    relocated state root never reaches into a sibling the operator owns.
+
+    Args:
+        directory: Private project state directory.
+
+    Returns:
+        Resolved directories, the project state directory first.
+    """
+    home = directory.parent.parent
+    found = [directory.resolve()]
+    if renamed := RENAMED_HOMES.get(home.name):
+        found.append((home.parent / renamed).resolve())
+    return found
 
 
 def _unpushed(root: str, entry: dict, ahead: list[str]) -> list[str] | None:
@@ -637,9 +674,10 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
 
     Every worktree the project repository registers is read, except the
     base checkout and the participants' own lanes. Each is attributed to a
-    lane by path or branch; one inside the project state directory belongs
-    to the project even when no single lane accounts for it, and one
-    nothing accounts for is the operator's and is never removed. An
+    lane by path or branch; one inside the project state directory, or
+    inside the state root the product used before its rename, belongs to
+    the project even when no single lane accounts for it, and one nothing
+    accounts for is the operator's and is never removed. An
     attributed worktree is removed only when Git holds no lock on it, no
     session runs in its lane, it is clean, every commit beyond the base is
     on its upstream, and the base holds its head, its lane retired, or it
@@ -681,7 +719,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
         key=lambda pair: len(pair[0]),
         reverse=True,
     )
-    state = directory.resolve()
+    owned = owned_roots(directory)
     rows = []
     for entry in entries:
         if entry["path"] == base or entry["path"] in lanes:
@@ -689,7 +727,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)
         paths: list[str]
-        if not owner and not _within(path, state):
+        if not owner and not any(_within(path, root) for root in owned):
             reason, paths = FOREIGN, []
         else:
             reason, paths = _stray(

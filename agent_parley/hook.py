@@ -188,6 +188,12 @@ def write_client(home: str, python: str) -> str:
     payload past `MAX_INPUT_BYTES` goes straight to the in-process path,
     which records it as oversize and allows the call.
 
+    The script is staged in a sibling file and moved over the client in one
+    rename. Hooks keep starting while an upgrade rewrites the client, and a
+    hook that opened a file truncated in place read an empty or partial
+    script and failed with a shell parse error. Each hook now reads either
+    the old client or the new one whole.
+
     Args:
         home: Private bridge state root the client is written into.
         python: Interpreter the client runs on its fallback path.
@@ -208,9 +214,18 @@ def write_client(home: str, python: str) -> str:
         .replace("@status_header@", STATUS_HEADER)
         .replace("@stdout_header@", STDOUT_HEADER)
     )
-    with open(path, "w") as stream:
-        stream.write(script)
-    os.chmod(path, 0o755)
+    staged = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(staged, "w") as stream:
+            stream.write(script)
+        os.chmod(staged, 0o755)
+        os.replace(staged, path)
+    except BaseException:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
     return path
 
 
