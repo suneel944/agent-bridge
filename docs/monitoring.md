@@ -247,17 +247,25 @@ The screen reads like Linux `top`: three summary lines, one row per lane, and
 a short list of notes under the table.
 
 ```text
-agent-parley top - 14:02:11  server running  projects 1  idle 18m (most codex-2 9m)
-Lanes: 4 total, 2 running, 1 working, 1 idle   Issues: 3 held, 1 overdue
-Mail: 2 unread   Leases: 5 held, 1 stale   Hooks (all retained): 412 events, 3 denied (1%)   Context: 38K
+$ agent-parley top --once --columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
+agent-parley top - 04:19:38  server running  projects 1  read 0.02s
+Lanes: 3 total, 2 working, 1 idle   Issues: 3 held, 1 offered
+Mail: 1 unread, 1 unacked   Leases: 2 held   Hooks (all retained): 7 events, 2 denied (29%)   Context: 2.5kB
+Selection: columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
 
-project /home/me/payments
-PARTICIPANT     STATE     BRANCH             ISSUES  MAIL  LEASES  DENIALS  TOKENS  IDLE  TASK
-claude-1        running   parley/.../lane-1  #41     0/0   2       0/3      1.2M    40s   Add refund webhooks
-codex-2         idle 9m   parley/.../lane-2  #42*    2/0   1!1 4m  0/0      880k    9m    Retry failed payouts
+project /home/dev/payments-api
+PARTICIPANT     STATE                   ISSUES      MAIL       LEASES     DENIALS    IDLE      TASK
+claude-1        working 5s              #42         0/0        1 5s       1/3        0s        Fix refund rounding for partial capt…
+claude-2        working 5s              #58         0/0        1 5s       0/2        0s        Document the refund API for merchants
+codex-1         idle 5s                 #17+1       1/1        0          1/2        0s        Rename the shared money helper
 
-! codex-2  idle; message 2 waiting
+! codex-1  idle; acknowledgement of message 1 for claude-1 waiting 5s
+! codex-1  unfit (mail): it owes an acknowledgement 5s old
 ```
+
+This is the output behind the README screenshot, recorded by
+`scripts/record_demo.py --screenshots` against three lanes whose native
+clients are stubs.
 
 The first line names the server, the time, the project count and the idle
 total. The second counts lanes by state and the issues they hold, and says how

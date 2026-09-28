@@ -1156,8 +1156,9 @@ def test_top_reports_every_participant_and_writes_no_state(
     }
     dashboard.run(bridge.home, lambda: False, once=True)
     output = capsys.readouterr().out
-    assert "agent-parley top  server: not running" in output
-    assert "denials 0 (0%)" in output
+    assert "agent-parley top - " in output
+    assert "server not running" in output
+    assert "0 denied (0%)" in output
     assert "#77" in output
     assert "Wire the dashboard" in output
     assert "working" in output and "stopped" in output
@@ -1167,28 +1168,38 @@ def test_top_reports_every_participant_and_writes_no_state(
 
 
 def test_top_reports_only_the_selected_providers(bridge, repo, paired, capsys):
-    dashboard.run(bridge.home, lambda: False, once=True, providers=("codex",))
+    dashboard.run(
+        bridge.home,
+        lambda: False,
+        once=True,
+        providers=("codex",),
+        columns=("ALL",),
+    )
     selected = capsys.readouterr().out
     assert "codex/default" in selected
     assert "claude/default" not in selected
-    assert "participants 1" in selected
+    assert "Lanes: 1 total" in selected
     assert "provider codex" in selected
 
     dashboard.run(
-        bridge.home, lambda: False, once=True, providers=("claude", "codex")
+        bridge.home,
+        lambda: False,
+        once=True,
+        providers=("claude", "codex"),
+        columns=("ALL",),
     )
     both = capsys.readouterr().out
     assert "claude/default" in both and "codex/default" in both
-    assert "participants 2" in both
+    assert "Lanes: 2 total" in both
 
     dashboard.run(bridge.home, lambda: False, once=True, providers=("kimi",))
     none = capsys.readouterr().out
     assert "no participants for the selected provider" in none
-    assert "participants 0" in none
+    assert "Lanes: 0 total" in none
 
     dashboard.run(bridge.home, lambda: False, once=True)
     unfiltered = capsys.readouterr().out
-    assert "participants 2" in unfiltered
+    assert "Lanes: 2 total" in unfiltered
     assert "provider " not in unfiltered
 
 
@@ -1212,8 +1223,7 @@ def test_top_marks_a_lease_past_its_time_to_live_as_stale(
     dashboard.run(bridge.home, lambda: False, once=True)
     stale = capsys.readouterr().out
     assert "1!1" in stale
-    assert "past a declared time to live" in stale
-    assert "still held" in stale
+    assert "1 stale" in stale
 
 
 def usage_record(identifier, tokens):
@@ -1298,10 +1308,9 @@ def test_top_reports_tokens_each_native_client_recorded(
     assert rows["codex"]["tokens"] == 2500
 
     dashboard.run(bridge.home, lambda: False, once=True)
-    output = capsys.readouterr().out
-    lines = output.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert any(
-        line.startswith("PARTICIPANT") and line.endswith("FIT")
+        line.startswith("PARTICIPANT") and line.endswith("TASK")
         for line in lines
     )
     assert (
@@ -1312,7 +1321,7 @@ def test_top_reports_tokens_each_native_client_recorded(
         next(line for line in lines if line.startswith("codex ")).split()[-3]
         == "2.5k"
     )
-    assert "not billed spend" in output
+    assert "not billed spend" in " ".join(dashboard.keymap())
 
 
 def test_top_leaves_tokens_blank_without_readable_session_records(
@@ -1325,11 +1334,11 @@ def test_top_leaves_tokens_blank_without_readable_session_records(
     dashboard.run(bridge.home, lambda: False, once=True)
     lines = capsys.readouterr().out.splitlines()
     assert any(
-        line.startswith("PARTICIPANT") and line.endswith("FIT")
+        line.startswith("PARTICIPANT") and line.endswith("TASK")
         for line in lines
     )
     row = next(line for line in lines if line.startswith("claude "))
-    assert row.split()[-3:] == ["0", "0s+", "-"]
+    assert row.split()[-3:] == ["0/0", "0s+", "-"]
 
 
 def test_token_reading_survives_a_malformed_session_record(

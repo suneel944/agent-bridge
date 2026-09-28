@@ -71,18 +71,18 @@ coordination path; only the native client is a stand-in, so no model runs.
 `make demo` records real `claude` and `codex` sessions with
 [`scripts/record_live.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_live.py).
 
-`agent-parley top` puts every lane on one screen: session state, branch drift,
-issues, handoffs, mail, reservations, injected context, denials and the lane's
-own token count. Read-only, no model call, `q` quits.
+`agent-parley top` reads like Linux `top`: three summary lines, one row per
+lane with its state, issues, mail, leases, denials, idle time and last prompt,
+and one note per problem under the table. Read-only, no model call, `q` quits.
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-top.svg" width="900" alt="agent-parley top showing three lanes with issues, mail, leases, denials and served calls">
+  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-top.svg" width="900" alt="agent-parley top showing three lanes, two working and one idle that owes an acknowledgement">
 </p>
 
-A lane reads `active` while its session is alive and current, `idle` once its
+A lane reads `working` while its session is alive and current, `idle` once its
 activity passes the inactivity threshold, and `stopped` only when its session
 process is gone: a quiet lane is not a lost one. Stopped lanes that hold
-nothing are counted in the header; `top --all` draws them.
+nothing are counted in the summary; `top --all` draws them.
 [Monitoring](https://github.com/suneel944/agent-parley/blob/main/docs/monitoring.md)
 covers the columns, keys, filters, `problems`, `metrics` and `watch`.
 

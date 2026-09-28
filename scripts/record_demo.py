@@ -276,7 +276,12 @@ def lower_stall_windows(directory: Path) -> None:
     generator that waited that long to show a genuine idle label would
     make ``make demo screenshots`` impractical, so this rewrites the
     project's own manifest, the legitimate place that setting lives,
-    rather than faking the label. ``inactive_after`` is left at its
+    rather than faking the label. ``interval`` drops to two seconds for
+    the same reason: lane records and published fitness move only on a
+    supervision poll, and a poll taken before the later lanes launched
+    would otherwise stand for the default thirty seconds. Call this before
+    the first launch, since the poll a launch triggers schedules the next
+    one from the interval it reads. ``inactive_after`` is left at its
     default: it also governs whether a launched session still reads as
     running, and lowering it would misreport every quiet lane as stopped.
 
@@ -289,6 +294,7 @@ def lower_stall_windows(directory: Path) -> None:
     manifest["supervision"] = {
         **manifest.get("supervision", {}),
         "stalled_after": 2,
+        "interval": 2,
     }
     path.write_text(json.dumps(manifest))
 
@@ -959,6 +965,8 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     recorder.run("participant", "add", "claude-1", "--provider", "claude")
     recorder.run("participant", "add", "codex-1", "--provider", "codex")
     recorder.run("participant", "add", "claude-2", "--provider", "claude")
+    manifest = next((recorder.home / "projects").glob("*/project.json"))
+    lower_stall_windows(manifest.parent)
     recorder.launch("claude-1")
     recorder.launch("codex-1")
     recorder.launch("claude-2")
@@ -967,7 +975,6 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     claude_lane = recorder.lanes["claude-1"]
     codex_lane = recorder.lanes["codex-1"]
     docs_lane = recorder.lanes["claude-2"]
-    lower_stall_windows(claude_lane.parent)
     recorder.run("issue", "claim", "17", cwd=codex_lane)
     recorder.run("issue", "claim", "42", cwd=claude_lane)
     recorder.run("issue", "claim", "58", cwd=docs_lane)
@@ -1026,7 +1033,7 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     drifted = recorder.latest()
     recorder.hook("claude-1", "git switch -c hotfix")
     blocked = recorder.latest()
-    time.sleep(3.0)
+    time.sleep(5.0)
     recorder.run(
         "top",
         "--once",
