@@ -508,7 +508,12 @@ def _entries(root: str) -> list[dict] | None:
 
 
 def size(path: Path) -> int:
-    """Totals the bytes of every regular file under a directory.
+    """Totals the bytes of every file under a directory, once per inode.
+
+    Worktrees and clones on one filesystem share Git objects through hard
+    links, so a file reached under several names is counted the first time
+    only. The total is then the space the files take, as `du -sb` reports
+    it, rather than the sum of every name.
 
     Args:
         path: Directory measured; symbolic links are counted, not followed.
@@ -517,12 +522,19 @@ def size(path: Path) -> int:
         The total in bytes, counting only what could be read.
     """
     total = 0
+    seen: set[tuple[int, int]] = set()
     for folder, _, files in os.walk(path, onerror=lambda error: None):
         for file in files:
             try:
-                total += os.lstat(os.path.join(folder, file)).st_size
+                found = os.lstat(os.path.join(folder, file))
             except OSError:
                 continue
+            if found.st_nlink > 1:
+                inode = (found.st_dev, found.st_ino)
+                if inode in seen:
+                    continue
+                seen.add(inode)
+            total += found.st_size
     return total
 
 
