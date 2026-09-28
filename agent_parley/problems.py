@@ -795,7 +795,7 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
         age, number, offer = items[0]
         source = issues.offer_source(offer)
         command = (
-            f"agent-parley issue assign {number} {recipient} --unassign {repo}"
+            f"agent-parley issue assign {number} --unassign {repo}"
             if source == issues.OPERATOR
             else f"agent-parley issue cancel {number} {repo}"
         )

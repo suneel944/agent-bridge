@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -580,7 +581,7 @@ def test_two_overdue_claims_on_one_lane_are_one_row(
 
 
 def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
-    bridge, repo, paired, served
+    bridge, repo, paired, served, monkeypatch, capsys
 ):
     bridge.issue(paired["lanes"]["claude"], "claim", "1")
     bridge.issue(
@@ -596,8 +597,18 @@ def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
     bridge.issue_assign(repo, "2", "codex")
     [row] = rows(bridge, problems.OFFER)
     assert row["command"] == (
-        f"agent-parley issue assign 2 codex --unassign --repo {paired['root']}"
+        f"agent-parley issue assign 2 --unassign --repo {paired['root']}"
     )
+    command, root = row["command"].split(" --repo ", 1)
+    program, *arguments = shlex.split(command)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [program, "--home", str(bridge.home), *arguments, "--repo", root],
+    )
+    assert cli.main() == 0
+    capsys.readouterr()
+    assert rows(bridge, problems.OFFER) == []
 
 
 def test_two_offers_waiting_on_one_lane_are_one_row(
