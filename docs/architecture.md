@@ -91,11 +91,14 @@ that notify are a subset of what the log already holds; the idle stretch is the
 one exception, because it has no native event of its own and is measured by the
 supervision sweep that already computes it. Suppression follows the checkpoint's
 own rule: a digest per event, per lane, in `<participant>-notify.json`, so a
-situation that has not changed sends nothing further. Credentials are read from
-the environment at send time and never written into coordination state. The send
+situation that has not changed sends nothing further. The digest is written only
+after every transport accepted the message. Credentials are read from the
+environment at send time and never written into coordination state. The send
 runs on a daemon thread, so neither a blocking hook nor a supervision sweep waits
-on a network round trip; a hook process that exits first abandons the send, which
-is the cost of the best-effort contract and the reason there is no retry queue.
+on a network round trip. A hook process that exits first abandons the send, and
+a transport can refuse it; either way the situation stays unmarked and the next
+observation of it sends again, so there is no separate retry queue. Two
+processes observing one situation at once can each send it.
 Notification is outbound only: no transport carries a command back, and none of
 them can answer a native permission prompt.
 

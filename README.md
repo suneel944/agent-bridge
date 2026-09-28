@@ -288,7 +288,9 @@ blocked on a permission prompt, a lane held by a native dialog, a lane idle
 with no claim past `stalled_after`, issues waiting on an idle claim, an issue
 that is not converging, the enforced run budget running out, a lane run that
 finished, and a hook refusal. An unchanged situation sends nothing further.
-Sending never blocks a hook or tool call; a failed send is logged and dropped.
+Sending never blocks a hook or tool call. A failed send is logged as a lane
+event, and it and a send cut short by a hook exiting are sent again the next
+time the situation is observed.
 
 Configuration is environment variables only; no token is written into
 coordination state.
