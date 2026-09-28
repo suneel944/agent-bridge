@@ -244,7 +244,7 @@ class ClaimsMixin(ReportsMixin):
                     directory, data, agent, parse_issue(number)
                 )
                 if takeover["checkpoint"]:
-                    recovery.preflight(directory, repo, takeover["checkpoint"])
+                    recovery.preflight(directory, lane, takeover["checkpoint"])
         try:
             record = change(
                 directory,
@@ -280,7 +280,7 @@ class ClaimsMixin(ReportsMixin):
             from agent_parley import recovery
 
             if recovery.current_take(record):
-                record = recovery.restore(directory, repo, record)
+                record = recovery.restore(directory, lane, record)
             record = self._free_orphaned(data, record)
             if not forge.assigned(repo, parse_issue(number)) and forge.assign(
                 repo, parse_issue(number)

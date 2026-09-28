@@ -1450,15 +1450,16 @@ def restore(directory: Path, lane: Path, record: dict) -> dict:
 
     Args:
         directory: Private project state directory.
-        lane: Recipient's assigned worktree.
+        lane: Recipient's assigned worktree root. A subdirectory is refused
+            because Git would apply the saved patches to it alone.
         record: Persisted taken-claim record.
 
     Returns:
         Record with restored checkpoint and content evidence.
 
     Raises:
-        BridgeError: If the artifact is invalid or destination has work that
-            could be overwritten.
+        BridgeError: If the artifact is invalid, the lane is not a worktree
+            root, or destination has work that could be overwritten.
     """
     saved = current_take(record).get("checkpoint") or {}
     if not saved:
@@ -1469,6 +1470,13 @@ def restore(directory: Path, lane: Path, record: dict) -> dict:
         raise BridgeError("Recovery recipient generation is invalid.")
     _artifact(directory, saved)
     resolved_lane = str(lane.resolve())
+    if str(Path(_text(lane, "rev-parse", "--show-toplevel")).resolve()) != (
+        resolved_lane
+    ):
+        raise BridgeError(
+            "Recovery destination must be the worktree root; Git applies "
+            "a patch run from a subdirectory to that subdirectory only."
+        )
     lane_id = hashlib.sha256(resolved_lane.encode()).hexdigest()[:16]
     receipt = _folder(directory) / (
         f"{saved['id']}-to-{recipient_claim}-{lane_id}.json"

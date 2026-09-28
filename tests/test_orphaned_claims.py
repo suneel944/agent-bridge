@@ -262,6 +262,44 @@ def test_a_native_exit_retains_the_generation_needed_for_recovery(
     assert taken["taken"]["from"] == "claude"
 
 
+def test_a_takeover_run_from_a_subdirectory_restores_the_whole_worktree(
+    bridge, repo, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    for folder in ("src", "tests"):
+        (lane / folder).mkdir()
+        (lane / folder / "staged.txt").write_text(f"{folder} staged\n")
+        git(lane, "add", f"{folder}/staged.txt")
+        (lane / folder / "staged.txt").write_text(f"{folder} unstaged\n")
+    recovery.capture(
+        directory,
+        roster.read(directory),
+        "claude",
+        {"hook_event_name": "PostToolUse", "tool_name": "Bash"},
+    )
+    killed(directory, "claude", STALLED + 100)
+    running(directory, "codex")
+    (peer / "src").mkdir()
+
+    supervision.poll(bridge.home, directory)
+    taken = bridge.issue(peer / "src", "claim", "42", take_orphaned=True)
+
+    for folder in ("src", "tests"):
+        assert (peer / folder / "staged.txt").read_text() == (
+            f"{folder} unstaged\n"
+        )
+    assert git(peer, "diff", "--cached", "--name-only").splitlines() == [
+        "src/staged.txt",
+        "tests/staged.txt",
+    ]
+    with pytest.raises(BridgeError, match="worktree root"):
+        recovery.restore(directory, peer / "src", taken)
+
+
 def test_takeover_restores_committed_staged_unstaged_and_untracked_work(
     bridge, repo, paired
 ):
