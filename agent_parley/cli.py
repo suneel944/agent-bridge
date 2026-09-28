@@ -395,10 +395,15 @@ def clock(text: str) -> float:
     The time of day is read in the timezone of the machine the operator types
     on, and the resulting instant is recorded absolutely. A later timezone
     change, a daylight-saving transition or a service restart therefore moves
-    nothing: the item keeps the instant it was recorded for.
+    nothing: the item keeps the instant it was recorded for. The offset is
+    the one the zone has on the target day, so a target past a
+    daylight-saving transition lands on the wall-clock time typed. A time
+    that carries its own offset, such as ``15:00+02:00``, is read in that
+    offset instead.
 
     Args:
-        text: A 24-hour time of day such as ``15:00``.
+        text: A 24-hour time of day such as ``15:00``, optionally with a
+            UTC offset.
 
     Returns:
         The next instant matching that time of day, today while it is still
@@ -411,10 +416,11 @@ def clock(text: str) -> float:
         moment = datetime.time.fromisoformat(text)
     except ValueError:
         raise ValueError(f"{text!r} is not a time of day; use 15:00.") from None
-    now = datetime.datetime.now().astimezone()
-    target = datetime.datetime.combine(now.date(), moment, now.tzinfo)
+    now = datetime.datetime.now(moment.tzinfo)
+    target = datetime.datetime.combine(now.date(), moment)
     if target <= now:
-        target += datetime.timedelta(days=1)
+        tomorrow = now.date() + datetime.timedelta(days=1)
+        target = datetime.datetime.combine(tomorrow, moment)
     return target.timestamp()
 
 
