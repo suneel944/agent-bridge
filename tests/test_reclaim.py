@@ -889,3 +889,13 @@ def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
         "agent-parley participant retire claude --repo /r"
     )
     assert young == []
+
+
+def test_size_counts_a_hard_linked_file_once(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "object").write_bytes(b"x" * 4096)
+    os.link(tmp_path / "a" / "object", tmp_path / "b" / "object")
+    (tmp_path / "b" / "own").write_bytes(b"y" * 100)
+
+    assert reclaim.size(tmp_path) == 4196
