@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from agent_parley import attachments, roster, store
 from agent_parley.state import BridgeError, lock
@@ -141,6 +142,39 @@ def _project_locks(directories: list[Path]) -> Iterator[None]:
         yield
 
 
+def _exportable_tables(db: sqlite3.Connection) -> list[str]:
+    """Names every real table an export must scope to the kept projects.
+
+    The list is read from `sqlite_master` rather than a fixed tuple so a
+    table added later is scoped automatically instead of copied whole. A
+    virtual table and the shadow tables SQLite keeps for it are left out:
+    the triggers on its content table already remove its rows when that
+    table's rows are deleted, and it carries no ownership column of its
+    own.
+
+    Args:
+        db: Open connection on the staged copy of the store.
+
+    Returns:
+        Real table names in the order SQLite created them.
+    """
+    rows = db.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY rowid"
+    ).fetchall()
+    virtual = {
+        name
+        for name, sql in rows
+        if sql and sql.upper().startswith("CREATE VIRTUAL TABLE")
+    }
+    return [
+        name
+        for name, _ in rows
+        if name not in virtual
+        and not name.startswith("sqlite_")
+        and not any(name.startswith(f"{owner}_") for owner in virtual)
+    ]
+
+
 def _snapshot(home: Path, destination: Path, roots: set[str]) -> None:
     """Copies the store through the backup interface, scoped to roots."""
     with contextlib.closing(
@@ -156,16 +190,26 @@ def _snapshot(home: Path, destination: Path, roots: set[str]) -> None:
             if row[1] in roots
         ]
         placeholders = ",".join("?" for _ in kept) or "-1"
+        root_marks = ",".join("?" for _ in roots) or "''"
         agents = f"SELECT id FROM agents WHERE project_id IN ({placeholders})"
-        for table in reversed(TABLES):
+        for table in reversed(_exportable_tables(copy)):
             columns = _columns(copy, table)
+            params: list[Any]
             if table == "projects":
-                condition = f"id NOT IN ({placeholders})"
+                condition, params = f"id NOT IN ({placeholders})", kept
             elif "project_id" in columns:
                 condition = f"project_id NOT IN ({placeholders})"
+                params = kept
+            elif "project" in columns:
+                condition = f"project NOT IN ({root_marks})"
+                params = list(roots)
+            elif "agent_id" in columns:
+                condition, params = f"agent_id NOT IN ({agents})", kept
             else:
-                condition = f"agent_id NOT IN ({agents})"
-            copy.execute(f"DELETE FROM {table} WHERE {condition}", kept)
+                raise BridgeError(
+                    f"No export rule scopes table {table!r} by project."
+                )
+            copy.execute(f"DELETE FROM {table} WHERE {condition}", params)
         copy.execute("UPDATE agents SET token_digest=NULL")
         copy.commit()
         copy.execute("VACUUM")

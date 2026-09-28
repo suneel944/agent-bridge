@@ -262,6 +262,44 @@ def test_a_native_exit_retains_the_generation_needed_for_recovery(
     assert taken["taken"]["from"] == "claude"
 
 
+def test_a_takeover_run_from_a_subdirectory_restores_the_whole_worktree(
+    bridge, repo, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    for folder in ("src", "tests"):
+        (lane / folder).mkdir()
+        (lane / folder / "staged.txt").write_text(f"{folder} staged\n")
+        git(lane, "add", f"{folder}/staged.txt")
+        (lane / folder / "staged.txt").write_text(f"{folder} unstaged\n")
+    recovery.capture(
+        directory,
+        roster.read(directory),
+        "claude",
+        {"hook_event_name": "PostToolUse", "tool_name": "Bash"},
+    )
+    killed(directory, "claude", STALLED + 100)
+    running(directory, "codex")
+    (peer / "src").mkdir()
+
+    supervision.poll(bridge.home, directory)
+    taken = bridge.issue(peer / "src", "claim", "42", take_orphaned=True)
+
+    for folder in ("src", "tests"):
+        assert (peer / folder / "staged.txt").read_text() == (
+            f"{folder} unstaged\n"
+        )
+    assert git(peer, "diff", "--cached", "--name-only").splitlines() == [
+        "src/staged.txt",
+        "tests/staged.txt",
+    ]
+    with pytest.raises(BridgeError, match="worktree root"):
+        recovery.restore(directory, peer / "src", taken)
+
+
 def test_takeover_restores_committed_staged_unstaged_and_untracked_work(
     bridge, repo, paired
 ):
@@ -517,6 +555,40 @@ def test_an_unchanged_tree_is_captured_once(bridge, repo, paired, monkeypatch):
     assert len(published) == 2
     assert third["worktree_commit"] != first["worktree_commit"]
     assert third["gate"] == {}
+
+
+def test_a_merged_recovery_records_the_gate_of_the_event_it_replaced(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    (lane / "draft.txt").write_text("gated\n")
+    passing = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "make check"},
+        "tool_response": {"exit_code": 0},
+    }
+    later = {"hook_event_name": "PostToolUse", "tool_name": "Read"}
+    request = {"directory": str(directory), "participant": "claude"}
+    owed = checkpoints.merge_recovery(
+        {**request, "payload": passing}, {**request, "payload": later}
+    )
+
+    assert owed["payload"] == later
+    assert owed["evidence"] == passing
+    saved = recovery.capture(
+        directory,
+        roster.read(directory),
+        "claude",
+        owed["payload"],
+        owed["evidence"],
+    )[0]
+
+    assert saved["last_verified_step"] == "PostToolUse: Read"
+    assert saved["gate"]["command"] == "make check"
+    assert saved["gate"]["exit_code"] == 0
 
 
 @pytest.mark.parametrize("boundary", ["head", "index", "worktree"])

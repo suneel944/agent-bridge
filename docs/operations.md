@@ -2171,8 +2171,14 @@ it spawns the configured hook command with `--adapter opencode`, and
 shared parser and flattens the result to `decision`, `reason` and `context`.
 A denied `tool.execute.before` is raised as an error inside the plugin, which
 is how an OpenCode plugin refuses a tool call; a blocked `session.idle` posts
-the reason back into the session as the next prompt; `context` is appended to
-the user's message parts. The plugin never sets a `permission.ask` status, so
+the reason back into the session as the next prompt. The service marks
+`context` delivered on every event, so the plugin holds it per session and
+appends it to the next `tool.execute.after` output or the parts of the next user
+message, whichever comes first; context returned to `session.created`,
+`tool.execute.before`, `permission.ask` or `session.idle` waits there because
+those events cannot carry text into the session. Held context lives in the
+plugin process, so an OpenCode exit before the next tool result or message
+loses it. The plugin never sets a `permission.ask` status, so
 OpenCode's own approval prompt is left to the user. OpenCode raises no end of
 session event, so `SessionEnd` is reported under `unavailable_hooks`. Resume
 passes the recorded session as `--session ID`. Plugins in the user's global
@@ -2751,7 +2757,10 @@ The command is stored as argument tokens and run without a shell, so
 redirection, expansion and chaining cannot ride into a gate, and no flag skips
 it. Removing it is an explicit `verify set ''`. `--preview` never runs it,
 because executing a configured command is a different decision from reading
-Git state.
+Git state. `verify set` runs only from an operator shell in the base checkout:
+it refuses inside an assigned worktree and in any process holding a lane's
+`AGENT_PARLEY_TOKEN`, so a lane cannot replace or clear the gate its own merge
+has to pass. `verify show` stays readable from a lane.
 
 ## Requiring a recorded approval
 
@@ -2769,7 +2778,9 @@ agent-parley reject claude-1 'Needs a test for the retry path'
 `approval set` records the requirement in the project manifest beside the
 roster, outside the target source tree, and takes any of `merge`, `pr`, both,
 or nothing at all. A repository with nothing required integrates exactly as
-before.
+before. Like `verify set`, it refuses inside an assigned worktree and in any
+process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot lift the
+requirement on its own work; `approval show` stays readable from a lane.
 
 With a step required, `participant merge` and `participant pr` refuse until a
 decision for that lane's current ready report is recorded, and the refusal

@@ -13,6 +13,7 @@ moved method reads. This module never imports `cli` at import time, because
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 import subprocess
 import time
@@ -32,7 +33,9 @@ MERGE_BUSY = "Another merge into the base checkout is running; retry later."
 class IntegrationMixin(MailMixin):
     """Lane merges, bulk integration order, and operator decisions."""
 
-    def merge(self, repo: Path, name: str, renew: bool = False) -> str:
+    def merge(
+        self, repo: Path, name: str, renew: bool = False, issue: str = ""
+    ) -> str:
         """Merges one participant's bridge branch into the base checkout.
 
         Merges serialize on `merge.lock`. The shared setup lock is held only
@@ -47,6 +50,8 @@ class IntegrationMixin(MailMixin):
             renew: Whether the operator grants the recorded unverified
                 integration a fresh set of attempts. Accepted only from the
                 base checkout, never from an assigned worktree.
+            issue: Claimed issue whose work is merged, or empty to take the
+                lane's only ready claim.
 
         Returns:
             An account of what was merged.
@@ -76,16 +81,22 @@ class IntegrationMixin(MailMixin):
                     )
             if renew:
                 self._from_base(repo, root, data, "Recovery attempts are")
-            return self._integrate_lane(root, directory, data, name, renew)
+            return self._integrate_lane(
+                root, directory, data, name, renew, issue=issue
+            )
 
     def _from_base(
         self, repo: Path, root: Path, data: dict, subject: str
     ) -> None:
-        """Refuses an operator decision made inside an assigned worktree.
+        """Refuses an operator decision made by a lane.
 
-        This is the command-line boundary between the operator and the
-        lanes, not an operating-system one: a program running as the same
-        user can write coordination state directly.
+        A launched lane carries its coordination credential in
+        `unattended.LANE_TOKEN`, and every process it starts inherits it,
+        so a lane that changes directory to the base checkout is still
+        refused, the same rule `unattended.approve` applies. This is the
+        command-line boundary between the operator and the lanes, not an
+        operating-system one: a program running as the same user can
+        write coordination state directly.
 
         Args:
             repo: Checkout the command runs in.
@@ -94,20 +105,27 @@ class IntegrationMixin(MailMixin):
             subject: What is decided, as the start of the refusal.
 
         Raises:
-            BridgeError: If the command runs inside an assigned worktree.
+            BridgeError: If the command runs inside an assigned worktree
+                or with a lane's coordination credential.
         """
         from agent_parley.cli import git, roster
+        from agent_parley.unattended import LANE_TOKEN
 
         here = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
         lanes = {
             Path(lane["lane"]).resolve()
             for lane in data["participants"].values()
         }
-        if here in lanes or roster.caller_lane(data):
+        if (
+            here in lanes
+            or roster.caller_lane(data)
+            or os.environ.get(LANE_TOKEN)
+        ):
             raise BridgeError(
-                f"{subject} recorded from the base checkout at {root}, never "
-                "from an assigned worktree, so a lane does not decide its own "
-                "work."
+                f"{subject} recorded from an operator shell in the base "
+                f"checkout at {root}, never from an assigned worktree or a "
+                f"process holding a lane's {LANE_TOKEN}, so a lane does not "
+                "decide its own work."
             )
 
     def verify_recovery(self, repo: Path) -> str:
@@ -315,6 +333,7 @@ class IntegrationMixin(MailMixin):
         renew: bool = False,
         *,
         expected: tuple[str, str] | None = None,
+        issue: str = "",
     ) -> str:
         """Runs the gate and merges one lane while its session is excluded.
 
@@ -339,6 +358,8 @@ class IntegrationMixin(MailMixin):
             expected: Claim generation and ready source commit an earlier
                 authorization was bound to, rechecked under the session
                 lock; None when the caller bound none.
+            issue: Claimed issue whose work is merged, or empty to take the
+                lane's only ready claim.
 
         Returns:
             An account of what was merged.
@@ -351,11 +372,11 @@ class IntegrationMixin(MailMixin):
                 not continue, or if the merge cannot complete unattended.
         """
         from agent_parley.cli import (
-            exact_claim,
             git,
             lifecycle,
             lock,
             merge_branch,
+            merge_claim,
             merges,
             metrics,
             roster,
@@ -375,7 +396,7 @@ class IntegrationMixin(MailMixin):
                     "nothing was merged. Retry the merge."
                 )
             self._require_approval(directory, data, name, "merge")
-            claim = exact_claim(directory, name)
+            claim = merge_claim(directory, name, issue)
             held = self._held_integration(root, directory, name, claim, renew)
             source_commit = ""
             if claim["issue"] is not None:

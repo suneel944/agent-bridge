@@ -896,6 +896,39 @@ def test_a_missing_project_root_is_retired_within_one_interval(
     assert dashboard.collect(bridge.home, False, {})["projects"] == []
 
 
+def test_prune_removes_a_bundle_no_live_claim_can_still_read(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo, create=False)[1]
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    (saved,) = recovery.capture(directory, roster.read(directory), "claude")
+    folder = directory / "recovery"
+    bundle = folder / saved["artifact"]["reference"]
+    record = folder / f"{saved['id']}.json"
+    assert bundle.exists() and record.exists()
+
+    bridge.issue(lane, "release", "1")
+    removed = recovery.prune(directory, issues.snapshot(directory))
+
+    assert removed == [saved["id"]]
+    assert not bundle.exists()
+    assert not record.exists()
+
+
+def test_prune_keeps_a_bundle_its_claim_still_owns(bridge, repo, paired):
+    directory = bridge.project(repo, create=False)[1]
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    (saved,) = recovery.capture(directory, roster.read(directory), "claude")
+    folder = directory / "recovery"
+
+    removed = recovery.prune(directory, issues.snapshot(directory))
+
+    assert removed == []
+    assert (folder / saved["artifact"]["reference"]).exists()
+
+
 def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     store.initialize(bridge.home)
     directory = bridge.project(repo, create=False)[1]
@@ -978,11 +1011,14 @@ def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
     record = {
         "claims": [
             {"issue": 7, "orphaned": True, "orphan_recorded_seconds": 7200}
-        ]
+        ],
+        "availability": {"process_alive": False},
     }
+    live = {**record, "availability": {"process_alive": True}}
 
     rows = problems._retire_rows(record, "claude", "--repo /r", "/r", 3600)
     young = problems._retire_rows(record, "claude", "--repo /r", "/r", 9000)
+    assert problems._retire_rows(live, "claude", "--repo /r", "/r", 3600) == []
 
     assert [row["condition"] for row in rows] == [problems.READY]
     assert rows[0]["command"] == (

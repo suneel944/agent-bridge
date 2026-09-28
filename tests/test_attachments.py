@@ -336,6 +336,40 @@ def test_an_offer_over_the_cap_is_attached_until_it_is_answered(
     assert not kept.exists()
 
 
+def test_a_decision_is_readable_whole_by_every_registered_lane(
+    bridge, repo, paired
+):
+    data = bridge.add_participant(repo, "kimi-1", "kimi")
+    lanes = actors(bridge, data)
+    directory = bridge.project(repo)[1]
+    body = "line of evidence\n" * 400
+    result = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": [],
+            "subject": "Interface agreed",
+            "body_md": body,
+            "idempotency_key": "decision-1",
+            "decision": True,
+        },
+    )
+    reference = result["attachment"]
+    for reader in ("codex", "kimi-1"):
+        assert attachments.body(directory, reference, reader) == body
+
+
+def test_operator_decide_and_speak_spill_a_long_body(bridge, repo, paired):
+    actors(bridge, paired)
+    directory = bridge.project(repo)[1]
+    body = "line of evidence\n" * 400
+    decided = bridge.decide(repo, body)
+    assert attachments.body(directory, decided["attachment"], "codex") == body
+    spoken = bridge.say(repo, "codex", body)
+    assert attachments.body(directory, spoken["attachment"], "codex") == body
+
+
 def test_mail_show_prints_the_reference_and_the_whole_body_on_request(
     bridge, repo, paired, monkeypatch, capsys
 ):

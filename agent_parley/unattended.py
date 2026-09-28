@@ -90,13 +90,16 @@ def policy(manifest: dict) -> dict | None:
     )
 
 
-def _operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
+def operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
     """Refuses an operator command run from a lane or a lane's shell.
 
     A launched lane carries its coordination credential in `LANE_TOKEN`, and
     every process it starts inherits it, so a lane that changes directory to
     the base checkout is still refused. Like `approve`, this is the product's
-    command-line boundary, not an operating-system one.
+    command-line boundary, not an operating-system one. The unattended
+    policy and the merge approval and verification gates all use it, so no
+    lane can widen its own integration authority or clear a gate its merge
+    has to pass.
 
     Args:
         repo: Checkout the command names.
@@ -184,7 +187,7 @@ def configure(
     from agent_parley.cli import lock, write_json
 
     root, directory = bridge.project(repo, create=False)
-    _operator_only(
+    operator_only(
         repo, root, roster.read(directory), "Unattended integration is set"
     )
     numbers = [str(number).strip().removeprefix("#") for number in issues]
@@ -329,7 +332,12 @@ def _replayed(directory: Path, name: str, key: tuple) -> dict | None:
 
 
 def _evaluate(
-    bridge: Bridge, root: Path, directory: Path, data: dict, name: str
+    bridge: Bridge,
+    root: Path,
+    directory: Path,
+    data: dict,
+    name: str,
+    issue: str = "",
 ) -> tuple[dict, str]:
     """Reads the inputs of one decision and names the first unmet condition.
 
@@ -343,6 +351,8 @@ def _evaluate(
         directory: Private state directory for the common repository.
         data: Project manifest read under the setup lock.
         name: Participant whose lane is evaluated.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         The evidence read so far, and the unmet condition, which is empty
@@ -350,7 +360,9 @@ def _evaluate(
     """
     evidence: dict = {"policy": POLICY, "participant": name, "forge": FORGE}
     try:
-        unmet = _conditions(bridge, root, directory, data, name, evidence)
+        unmet = _conditions(
+            bridge, root, directory, data, name, evidence, issue
+        )
     except (KeyError, BridgeError, OSError, subprocess.TimeoutExpired) as exc:
         unmet = (
             "An input of the decision could not be read, so eligibility "
@@ -366,6 +378,7 @@ def _conditions(
     data: dict,
     name: str,
     evidence: dict,
+    issue: str = "",
 ) -> str:
     """Checks each eligibility condition in order, filling in the evidence.
 
@@ -376,6 +389,8 @@ def _conditions(
         data: Project manifest read under the setup lock.
         name: Participant whose lane is evaluated.
         evidence: Mutable evidence, extended as each input is read.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         The first unmet condition, or an empty string when eligible.
@@ -387,8 +402,8 @@ def _conditions(
     """
     from agent_parley.cli import (
         current_branch,
-        exact_claim,
         git,
+        merge_claim,
         merges,
         reserved_overlaps,
         snapshot,
@@ -407,7 +422,7 @@ def _conditions(
         )
     evidence["target"] = recorded["target"]
     try:
-        claim = exact_claim(directory, name)
+        claim = merge_claim(directory, name, issue)
     except BridgeError as exc:
         return str(exc)
     if claim["issue"] is None:
@@ -493,7 +508,7 @@ def _conditions(
     return ""
 
 
-def integrate(bridge: Bridge, repo: Path, name: str) -> str:
+def integrate(bridge: Bridge, repo: Path, name: str, issue: str = "") -> str:
     """Integrates one lane under the project's unattended policy.
 
     The attempt holds the project merge lock throughout, so a concurrent
@@ -506,6 +521,8 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
         bridge: Coordination runtime owning the project state.
         repo: Any checkout of the target repository, outside every lane.
         name: Participant whose ready work is integrated.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         An account of the merge, or of the earlier integration a replay
@@ -526,11 +543,11 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
             f"{name} is not a participant in this project; "
             "run agent-parley participant list."
         )
-    _operator_only(repo, root, data, "Unattended integration runs")
+    operator_only(repo, root, data, "Unattended integration runs")
     with lock(directory / "merge.lock", MERGE_BUSY):
         with lock(directory / "setup.lock"):
             data = bridge._project(root, directory, verify={name})
-        evidence, unmet = _evaluate(bridge, root, directory, data, name)
+        evidence, unmet = _evaluate(bridge, root, directory, data, name, issue)
         key = (
             evidence.get("issue"),
             evidence.get("claim_id"),
@@ -552,6 +569,7 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
                 data,
                 name,
                 expected=(evidence["claim_id"], evidence["source_commit"]),
+                issue=evidence["issue"],
             )
         except subprocess.TimeoutExpired as exc:
             raise failed(
