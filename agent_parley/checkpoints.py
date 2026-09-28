@@ -206,6 +206,8 @@ UNOBSERVED = frozenset(
         Reason.SESSION_MISMATCH,
         Reason.STALE_GENERATION,
         Reason.SUPERSEDED,
+        Reason.WAKE_REQUESTED,
+        Reason.NOTIFICATION_FAILED,
     }
 )
 

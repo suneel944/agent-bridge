@@ -2907,7 +2907,9 @@ def tool_silence(directory: Path, name: str) -> float | None:
     `PreToolUse` counts while its session is still open, since a long tool
     call is work in progress. One followed by `SessionEnd` before any
     `PostToolUse` never completed, so a supervisor resume that starts a
-    tool and ends does not reset the silence clock.
+    tool and ends does not reset the silence clock. A hook call from another
+    session, or a record the service wrote itself, is not the lane's work
+    and is skipped, as :func:`silence` skips it.
 
     Args:
         directory: Private project state directory.
@@ -2923,9 +2925,12 @@ def tool_silence(directory: Path, name: str) -> float | None:
         events = checkpoints.read_events(directory, name)
     except (BridgeError, OSError, ValueError):
         return None
+    ignored = {reason.value for reason in checkpoints.UNOBSERVED}
     latest = 0.0
     pending = 0.0
     for entry in events:
+        if entry.get("reason_class") in ignored:
+            continue
         kind = entry.get("event")
         stamp = float(entry.get("ts", 0) or 0)
         if kind == "PostToolUse":
