@@ -5331,6 +5331,13 @@ def _work_backlog(
 ) -> tuple[str, dict] | None:
     """Builds a wake key for one still-actionable published work offer.
 
+    A continue offer whose lane holds no claim it can move now only names
+    waiting claims and leads. Once a wake delivered that generation, the
+    same offer is not delivered again: nothing the lane can do changed, so
+    each backoff wake only repeated it and spent attempts toward a false
+    escalation. A change to the ledger or to the leads publishes a new
+    generation, which is delivered once.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -5388,6 +5395,12 @@ def _work_backlog(
         current.get("id"),
         current.get("progress"),
     ) != (offer.get("id"), offer.get("progress")):
+        return None
+    if (
+        current["kind"] == "continue"
+        and dispatch.get("delivered")
+        and not lifecycle.actionable(ledger, name)
+    ):
         return None
     return (
         f"work:{current['id']}:{current.get('progress', current['id'])}",
@@ -5485,6 +5498,12 @@ def _write_work_dispatch(
 ) -> None:
     """Persists a dispatch outcome only for the current offer generation.
 
+    A launcher that accepted the wake, or a resume it started, marks the
+    generation delivered, so `_work_backlog` does not wake the lane again
+    with a waiting-only offer it already read. A busy refusal, an
+    unavailable socket or manual attention never reached the lane and
+    leave the mark unset.
+
     Args:
         directory: Private project state directory.
         name: Participant owning the offer.
@@ -5508,6 +5527,8 @@ def _write_work_dispatch(
             last_result=result,
             updated_at=time.time(),
         )
+        if result == "accepted" or result.startswith("resume requested"):
+            dispatch["delivered"] = True
         current["dispatch"] = dispatch
         write_json(path, current)
 
