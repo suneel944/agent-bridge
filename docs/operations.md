@@ -2162,8 +2162,14 @@ it spawns the configured hook command with `--adapter opencode`, and
 shared parser and flattens the result to `decision`, `reason` and `context`.
 A denied `tool.execute.before` is raised as an error inside the plugin, which
 is how an OpenCode plugin refuses a tool call; a blocked `session.idle` posts
-the reason back into the session as the next prompt; `context` is appended to
-the user's message parts. The plugin never sets a `permission.ask` status, so
+the reason back into the session as the next prompt. The service marks
+`context` delivered on every event, so the plugin holds it per session and
+appends it to the next `tool.execute.after` output or the parts of the next user
+message, whichever comes first; context returned to `session.created`,
+`tool.execute.before`, `permission.ask` or `session.idle` waits there because
+those events cannot carry text into the session. Held context lives in the
+plugin process, so an OpenCode exit before the next tool result or message
+loses it. The plugin never sets a `permission.ask` status, so
 OpenCode's own approval prompt is left to the user. OpenCode raises no end of
 session event, so `SessionEnd` is reported under `unavailable_hooks`. Resume
 passes the recorded session as `--session ID`. Plugins in the user's global
