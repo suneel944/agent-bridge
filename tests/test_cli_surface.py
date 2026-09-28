@@ -552,6 +552,29 @@ def test_credentials_show_redacts_every_recorded_value(
     assert "Environment: ANTHROPIC_BASE_URL=<redacted>" in printed
     assert "Required from shell: ANTHROPIC_API_KEY" in printed
     assert "{" not in printed
+    listed = envelope(
+        run(
+            monkeypatch,
+            capsys,
+            "--home",
+            str(bridge.home),
+            "credentials",
+            "list",
+            "--json",
+        ),
+        "credentials",
+    )
+    assert listed["credentials"][0]["env"] == ["ANTHROPIC_BASE_URL=<redacted>"]
+    listing = text(
+        monkeypatch,
+        capsys,
+        "--home",
+        str(bridge.home),
+        "credentials",
+        "list",
+    )
+    assert "example.invalid" not in listing
+    assert "ANTHROPIC_BASE_URL=<redacted>" in listing
 
 
 def test_provider_show_prints_labeled_fields(bridge, monkeypatch, capsys):

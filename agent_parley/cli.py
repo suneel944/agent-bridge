@@ -5719,7 +5719,10 @@ def main() -> int:
                 )
             elif args.action == "remove":
                 roster.remove(bridge.home, "credentials", args.name)
-            registered = roster.credentials(bridge.home)
+            registered = {
+                name: {**entry, "env": views.redacted(entry.get("env") or {})}
+                for name, entry in roster.credentials(bridge.home).items()
+            }
             print(
                 views.render(
                     "credentials",
