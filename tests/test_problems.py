@@ -14,6 +14,7 @@ from agent_parley import (
     cli,
     completion,
     dashboard,
+    dialogs,
     issues,
     problems,
     protocol,
@@ -250,11 +251,24 @@ def test_a_live_lane_past_the_inactive_threshold_is_a_row(
     bridge, repo, paired, served
 ):
     alive(bridge.project(repo)[1], "claude")
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
     [row] = rows(bridge, problems.INACTIVE)
     assert row["participant"] == "claude"
     assert row["actor"] == problems.BY_SERVICE
     assert row["command"].startswith("the coordination service wakes claude")
     assert [r["participant"] for r in rows(bridge)] == ["claude"]
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_a_quiet_lane_owing_no_work_is_at_rest(
+    bridge, repo, paired, served, claimed
+):
+    alive(bridge.project(repo)[1], "claude")
+    if claimed:
+        lane = paired["lanes"]["claude"]
+        bridge.issue(lane, "claim", "42")
+        bridge.report(lane, "ready", "Task done.", "", "make check")
+    assert not rows(bridge, problems.INACTIVE)
 
 
 def test_an_idle_lane_holding_a_refused_key_names_the_refused_lane(
@@ -371,6 +385,26 @@ def test_an_escalated_native_dialog_is_a_row_naming_it(
     assert row["seconds"] >= 40
 
 
+def test_a_held_permission_prompt_is_a_waiting_on_approval_row(
+    bridge, repo, paired, served
+):
+    alive(
+        bridge.project(repo)[1],
+        "claude",
+        activity="waiting for approval: Bash",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    [row] = rows(bridge, "waiting on approval")
+    assert row["participant"] == "claude"
+    assert row["detail"] == "the client is waiting for approval of Bash"
+    assert row["command"] == "answer the prompt in claude's terminal"
+    assert problems.APPROVAL == "waiting on approval"
+
+
 def test_a_paused_lane_is_resumed_rather_than_spoken_to(
     bridge, repo, paired, served
 ):
@@ -470,6 +504,59 @@ def test_an_overdue_claim_names_the_release(bridge, repo, paired, served):
         f"agent-parley issue release 42 --repo {paired['root']}"
     )
     assert row["count"] == 1
+
+
+def test_a_refused_recovery_names_its_reason_while_the_claim_stands(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    claim_id = issues.snapshot(directory)["issues"]["42"]["claim_id"]
+    refusal = directory / "recovery" / "issue-42-refusal.json"
+    refusal.parent.mkdir(exist_ok=True)
+    write_json(
+        refusal,
+        {
+            "issue": "42",
+            "claim_id": claim_id,
+            "reason": "Claim owner is waiting for operator input.",
+            "refused_at": time.time() - 120,
+        },
+    )
+    [row] = rows(bridge, problems.REFUSED)
+    assert row["participant"] == "claude"
+    assert row["seconds"] >= 120
+    assert row["detail"] == (
+        "issue #42: approved recovery refused: "
+        "Claim owner is waiting for operator input."
+    )
+
+    write_json(refusal, {**json.loads(refusal.read_text()), "claim_id": "x"})
+    assert not rows(bridge, problems.REFUSED)
+
+
+def test_a_missing_root_names_the_live_lanes_it_keeps(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    assert not rows(bridge, problems.ROOT)
+    write_json(
+        directory / supervision.ROOT_PUBLICATION,
+        {
+            "since": time.time() - 600,
+            "retired": None,
+            "state_directory": str(directory),
+            "lanes": [],
+            "live": ["claude"],
+        },
+    )
+    [row] = rows(bridge, problems.ROOT)
+    assert row["participant"] == ""
+    assert row["project"] == paired["root"]
+    assert row["seconds"] >= 600
+    assert row["detail"] == (
+        "project root is gone; live lanes kept from retirement: claude"
+    )
 
 
 def test_two_overdue_claims_on_one_lane_are_one_row(
@@ -686,6 +773,7 @@ def test_rows_are_ordered_longest_held_first_behind_the_store_and_service(
     alive(directory, "claude")
     alive(directory, "codex", updated=time.time() - 400)
     bridge.issue(paired["lanes"]["claude"], "claim", "42", within=60)
+    bridge.issue(paired["lanes"]["codex"], "claim", "43")
     state = issues.snapshot(directory)
     state["issues"]["42"]["deadline"] = time.time() - 900
     state["revision"] += 1
@@ -712,6 +800,7 @@ def test_the_json_document_carries_every_row(
     bridge, repo, paired, monkeypatch, capsys
 ):
     alive(bridge.project(repo)[1], "claude")
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge, "--json")
     assert code == 1
     document = json.loads(out)
@@ -740,6 +829,7 @@ def test_every_printed_row_names_the_lane_the_age_and_the_command(
 ):
     unwoken(bridge)
     alive(bridge.project(repo)[1], "claude")
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
     [line] = out.splitlines()
@@ -753,6 +843,7 @@ def test_the_report_closes_by_counting_what_the_service_is_handling(
     bridge, repo, paired, served, monkeypatch, capsys
 ):
     alive(bridge.project(repo)[1], "claude")
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
     printed = out.splitlines()
@@ -1060,3 +1151,49 @@ def test_top_shows_the_problem_rows_in_place_on_p(monkeypatch, tmp_path):
     assert overlay[0] == "agent-parley problems"
     assert listed[0] in overlay
     assert any("P" in key for key, _ in dashboard.KEYS)
+
+
+def test_plan_revisions_waiting_on_the_operator_are_rows(
+    bridge, repo, paired, served
+):
+    path = repo.parent / "plan.toml"
+    path.write_text(
+        '[dependencies]\n"42" = ["17"]\n"43" = ["17"]\n"44" = ["42"]\n\n'
+        '[revisions]\nscope = ["17", "42", "43", "44", "60"]\n'
+        "max_changes = 2\nmax_revisions = 5\n"
+    )
+    bridge.work_plan(repo, "apply", path)
+    lane = paired["lanes"]["claude"]
+    assert not rows(bridge, problems.ESCALATED)
+    assert not rows(bridge, problems.PROPOSED)
+    base = bridge.plan_revision(repo, "proposals")["revision"]
+    for offset, change in enumerate(
+        ({"add": ["43:42"]}, {"remove": ["43:42"]}, {"add": ["43:42"]})
+    ):
+        looped = bridge.plan_revision(
+            lane, "propose", base=base + offset, reason="loop", **change
+        )
+    assert looped["status"] == "escalated"
+    waiting = bridge.plan_revision(
+        lane, "propose", base=base + 2, add=["42:60"], reason="new"
+    )
+    assert waiting["status"] == "pending"
+    root = paired["root"]
+    [escalated] = rows(bridge, problems.ESCALATED)
+    assert escalated["participant"] == "claude"
+    assert escalated["project"] == root
+    assert escalated["detail"] == (
+        f"plan proposal {looped['id']} is escalated: #43 waits on #42 "
+        "was already revised 2 times under this plan version"
+    )
+    assert escalated["command"] == (
+        f"agent-parley plan approve {looped['id']} --repo {root} or "
+        f"agent-parley plan reject {looped['id']} --reason TEXT --repo {root}"
+    )
+    [pending] = rows(bridge, problems.PROPOSED)
+    assert pending["count"] == 1
+    assert pending["command"] == f"agent-parley plan proposals --repo {root}"
+    bridge.plan_revision(repo, "reject", waiting["id"], reason="not needed")
+    bridge.plan_revision(repo, "approve", looped["id"])
+    assert not rows(bridge, problems.ESCALATED)
+    assert not rows(bridge, problems.PROPOSED)

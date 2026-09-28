@@ -907,6 +907,43 @@ def test_the_shell_client_serves_the_decision_the_module_serves(
 
 
 @pytest.mark.skipif(not shutil.which("bash"), reason="requires bash")
+def test_the_shell_client_reads_a_payload_from_a_socket(
+    bridge, repo, paired, service
+):
+    """Node hands a hook a socketpair, where /dev/stdin cannot be opened."""
+    lane = Path(paired["lanes"]["codex"])
+    payload = {**ALLOW, "cwd": str(lane), "session_id": "s1"}
+    client = hook.write_client(str(bridge.home), sys.executable)
+    writer, reader = socket.socketpair()
+    with writer, reader:
+        process = subprocess.Popen(
+            [
+                shutil.which("bash") or "bash",
+                client,
+                "--home",
+                str(bridge.home),
+                "--directory",
+                str(lane.parent),
+                "--participant",
+                "codex",
+            ],
+            stdin=reader,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        writer.sendall(json.dumps(payload).encode())
+        writer.shutdown(socket.SHUT_WR)
+        _, stderr = process.communicate(timeout=30)
+    assert process.returncode == 0, stderr
+    assert "No such device" not in stderr
+    assert not any(
+        entry.get("reason_class") == "unreadable_payload"
+        for entry in events(lane.parent)
+    )
+
+
+@pytest.mark.skipif(not shutil.which("bash"), reason="requires bash")
 def test_the_shell_client_starts_python_when_the_service_is_down(
     bridge, repo, paired
 ):
@@ -1909,6 +1946,44 @@ def test_a_new_session_in_the_recorded_process_is_adopted(bridge, repo, paired):
         entry["reason_class"] != "session_mismatch"
         for entry in events(directory)
     )
+
+
+def test_an_untraced_new_session_keeps_a_live_launcher_identity(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    own = process.ServerProcess(os.getpid(), process.start_ticks(os.getpid()))
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "session_id": "",
+            "session_pid": own.pid,
+            "session_ticks": own.ticks,
+            "launcher_pid": own.pid,
+            "launcher_ticks": own.ticks,
+            "activity": "starting",
+            "updated": time.time() - 60,
+        },
+    )
+
+    checkpoints.checkpoint(
+        bridge.home,
+        directory,
+        "codex",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "s2",
+            "cwd": str(lane),
+        },
+        None,
+        record_only=True,
+    )
+
+    state = json.loads((directory / "codex-activity.json").read_text())
+    assert state["session_id"] == "s2"
+    assert state["session_pid"] == own.pid
+    assert state["session_ticks"] == own.ticks
 
 
 def test_a_foreign_process_editing_as_the_lane_is_denied(bridge, repo, paired):

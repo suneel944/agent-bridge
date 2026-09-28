@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -643,7 +644,12 @@ def _consume_approval(
     claim_id: str,
     authorization_id: str,
 ) -> None:
-    """Durably consumes the exact approval behind a completed transition."""
+    """Durably consumes the exact approval behind a completed transition.
+
+    A consumed approval means the recovery went through, so any refusal
+    `_refuse` recorded for the issue on an earlier pass is withdrawn and
+    `refusal` no longer reports a problem that has been resolved.
+    """
     path = _folder(directory) / f"{_identifier(issue, claim_id)}-approval.json"
     try:
         value = json.loads(path.read_text())
@@ -658,6 +664,11 @@ def _consume_approval(
     if not value.get("used_at"):
         value["used_at"] = time.time()
         write_json(path, value)
+    if re.fullmatch(r"[1-9][0-9]{0,17}", issue):
+        with contextlib.suppress(OSError):
+            (_folder(directory) / f"issue-{issue}-refusal.json").unlink(
+                missing_ok=True
+            )
 
 
 def _capacity_candidate(directory: Path, issue: str) -> dict:
@@ -888,6 +899,10 @@ def quiesce_exhausted(
     terminates that exact process identity, captures its work, then publishes
     an orphan marker. Silence or elapsed time cannot enter this path.
 
+    The process stop and capture run outside `issues.lock`, so claims,
+    releases and reports proceed while Git works. Publication retakes the
+    lock and revalidates the claim generation and approval first.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -982,65 +997,79 @@ def quiesce_exhausted(
                 "created": time.time(),
             }
             write_json(transition_path, transition)
-        with lock(directory / f"{owner}-checkpoint.lock", timeout=1):
-            try:
-                activity = json.loads(activity_path.read_text())
-            except (OSError, ValueError):
-                raise BridgeError(
-                    "Capacity owner has no session identity."
-                ) from None
-            if activity.get("session_id") != candidate.get("session_id"):
-                raise BridgeError("Capacity observation names a stale session.")
-            if manifest["participants"][owner].get("paused", False):
-                raise BridgeError(
-                    "Capacity owner is paused; resume it before live recovery."
-                )
-            from agent_parley import dialogs
-
-            reading = str(activity.get("activity", ""))
-            if reading == "idle" or reading.startswith(dialogs.APPROVAL):
-                raise BridgeError(
-                    "Capacity owner is waiting for operator input; resolve "
-                    "that native wait before live recovery."
-                )
-            pid = activity.get("session_pid")
-            ticks = activity.get("session_ticks")
-            if pid != authorization.get(
-                "session_pid"
-            ) or ticks != authorization.get("session_ticks"):
-                raise BridgeError(
-                    "Operator approval names a stale process generation."
-                )
-            alive = process.alive(pid, ticks)
-            if not alive and transition.get("phase") not in (
-                "authorized",
-                "stopped",
-                "captured",
-            ):
-                raise BridgeError("Capacity recovery process evidence changed.")
-            if alive:
-                process.ServerProcess(int(pid), str(ticks)).stop()
-            if process.alive(pid, ticks):
-                raise BridgeError("Capacity owner process did not stop.")
-            transition["phase"] = "stopped"
-            transition["stopped_at"] = time.time()
-            write_json(transition_path, transition)
-            activity["activity"] = "stopped for recovery"
-            activity["quiesced"] = {
-                "issue": issue,
-                "claim_id": claim_id,
-                "observation_id": str(candidate["observation_id"]),
-                "stopped_at": time.time(),
-            }
-            write_json(activity_path, activity)
-            saved = next(
-                value
-                for value in capture(directory, manifest, owner)
-                if value["issue"] == issue
+    with lock(directory / f"{owner}-checkpoint.lock", timeout=1):
+        current = issues.snapshot(directory)["issues"].get(issue) or {}
+        if current.get("owner") != owner or current.get("claim_id") != claim_id:
+            raise BridgeError("Capacity observation no longer owns this issue.")
+        try:
+            activity = json.loads(activity_path.read_text())
+        except (OSError, ValueError):
+            raise BridgeError(
+                "Capacity owner has no session identity."
+            ) from None
+        if activity.get("session_id") != candidate.get("session_id"):
+            raise BridgeError("Capacity observation names a stale session.")
+        if manifest["participants"][owner].get("paused", False):
+            raise BridgeError(
+                "Capacity owner is paused; resume it before live recovery."
             )
-            transition["phase"] = "captured"
-            transition["checkpoint"] = saved["id"]
-            write_json(transition_path, transition)
+        from agent_parley import dialogs
+
+        reading = str(activity.get("activity", ""))
+        if reading == "idle" or reading.startswith(dialogs.APPROVAL):
+            raise BridgeError(
+                "Capacity owner is waiting for operator input; resolve "
+                "that native wait before live recovery."
+            )
+        pid = activity.get("session_pid")
+        ticks = activity.get("session_ticks")
+        if pid != authorization.get(
+            "session_pid"
+        ) or ticks != authorization.get("session_ticks"):
+            raise BridgeError(
+                "Operator approval names a stale process generation."
+            )
+        alive = process.alive(pid, ticks)
+        if not alive and transition.get("phase") not in (
+            "authorized",
+            "stopped",
+            "captured",
+        ):
+            raise BridgeError("Capacity recovery process evidence changed.")
+        if alive:
+            process.ServerProcess(int(pid), str(ticks)).stop()
+        if process.alive(pid, ticks):
+            raise BridgeError("Capacity owner process did not stop.")
+        transition["phase"] = "stopped"
+        transition["stopped_at"] = time.time()
+        write_json(transition_path, transition)
+        activity["activity"] = "stopped for recovery"
+        activity["quiesced"] = {
+            "issue": issue,
+            "claim_id": claim_id,
+            "observation_id": str(candidate["observation_id"]),
+            "stopped_at": time.time(),
+        }
+        write_json(activity_path, activity)
+        saved = next(
+            value
+            for value in capture(directory, manifest, owner)
+            if value["issue"] == issue
+        )
+        transition["phase"] = "captured"
+        transition["checkpoint"] = saved["id"]
+        write_json(transition_path, transition)
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        current = ledger["issues"].get(issue) or {}
+        if current.get("owner") != owner or current.get("claim_id") != claim_id:
+            raise BridgeError("Capacity observation no longer owns this issue.")
+        latest = approval(directory, issue, claim_id) or {}
+        if latest.get("id") != authorization["id"]:
+            raise BridgeError(
+                "Live recovery requires operator approval for this claim "
+                "session."
+            )
         marker: dict = {
             "id": (
                 f"capacity:{claim_id}:{str(candidate['observation_id'])[:64]}"
@@ -1079,15 +1108,68 @@ def quiesce_exhausted(
     return marker
 
 
-def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
+def refusal(directory: Path, issue: str) -> dict | None:
+    """Returns the last recorded refusal of an approved live recovery.
+
+    The read never creates the recovery folder, so `problems` can call it
+    on every issue without writing to the project state directory.
+
+    Args:
+        directory: Private project state directory.
+        issue: Issue number the refusal was recorded for.
+
+    Returns:
+        The recorded issue, claim identifier, reason and refusal time, or
+        None when no readable refusal is recorded.
+    """
+    path = directory / RECOVERY_FOLDER / f"issue-{issue}-refusal.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _refuse(directory: Path, issue: str, claim_id: str, reason: str) -> None:
+    """Records why an approved live recovery could not proceed this pass."""
+    if not re.fullmatch(r"[1-9][0-9]{0,17}", issue):
+        return
+    previous = refusal(directory, issue) or {}
+    if (previous.get("claim_id"), previous.get("reason")) == (claim_id, reason):
+        return
+    write_json(
+        _folder(directory) / f"issue-{issue}-refusal.json",
+        {
+            "issue": issue,
+            "claim_id": claim_id,
+            "reason": reason,
+            "refused_at": time.time(),
+        },
+    )
+
+
+def quiesce_authorized(
+    directory: Path, manifest: dict, isolate: bool = False
+) -> list[dict]:
     """Quiesces published exhausted claims with exact operator approval.
+
+    An approved recovery can be refused by an ordinary state: the owner is
+    idle or at an approval prompt, paused, or on another session, or the
+    approval behind a completed transition is gone. The service poll calls
+    this with `isolate`, so such a refusal is recorded for its issue, read
+    back through `refusal`, and the remaining issues and the rest of the
+    poll proceed; the approval stays in place and the next poll tries again.
 
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
+        isolate: Records a refused issue and continues rather than raising.
 
     Returns:
         Orphan markers published for authorized live recovery transitions.
+
+    Raises:
+        BridgeError: If a transition is refused and `isolate` is false.
     """
     try:
         document = json.loads(
@@ -1130,12 +1212,19 @@ def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
             == transition.get("authorization_id")
             and marker.get("checkpoint") == transition.get("checkpoint")
         ):
-            _consume_approval(
-                directory,
-                issue,
-                str(transition.get("claim_id") or ""),
-                str(transition.get("authorization_id") or ""),
-            )
+            claim_id = str(transition.get("claim_id") or "")
+            try:
+                _consume_approval(
+                    directory,
+                    issue,
+                    claim_id,
+                    str(transition.get("authorization_id") or ""),
+                )
+            except BridgeError as exc:
+                if not isolate:
+                    raise
+                _refuse(directory, issue, claim_id, str(exc))
+                continue
             markers.append(marker)
             seen.add(identity)
     for candidate in candidates:
@@ -1156,7 +1245,12 @@ def quiesce_authorized(directory: Path, manifest: dict) -> list[dict]:
             and allowed.get("owner") == candidate.get("owner")
             and allowed.get("session_id") == candidate.get("session_id")
         ):
-            markers.append(quiesce_exhausted(directory, manifest, issue))
+            try:
+                markers.append(quiesce_exhausted(directory, manifest, issue))
+            except BridgeError as exc:
+                if not isolate:
+                    raise
+                _refuse(directory, issue, claim_id, str(exc))
     return markers
 
 

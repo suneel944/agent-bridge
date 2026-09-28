@@ -8,7 +8,9 @@ moved method reads. This module never imports `cli` at import time, because
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -206,6 +208,13 @@ reported.
         cannot write last and restore that session's identity over the
         launch.
 
+        The launch then moves the lane's state record to `starting` itself.
+        Liveness and hook evidence reach that record only through the
+        supervision poll, so without this a poll that sampled the lane
+        before its launch kept it `stopped` for a whole poll interval while
+        its session ran. A store that stays busy past its timeout leaves the
+        move to the next poll, as before.
+
         A resumed session asks again for permission to use this bridge's own
         MCP tools, and a service-driven resume has nobody at the keyboard to
         answer. Where the client carries per-tool approval in its own settings,
@@ -229,23 +238,27 @@ reported.
             BridgeError: If the provider, account, or lane cannot be used, or
                 the participant already has a launcher, or the repository
                 lies on a mounted Windows drive under WSL, or the lane's
-                checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`.
+                checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`, or the
+                project's enforced run budget is exhausted.
         """
         from agent_parley.cli import (
             COPILOT_EVENTS,
             LAUNCH_LOCK_SECONDS,
             amp,
+            budgets,
             configure_copilot,
             delivery,
             dialogs,
             gemini,
             json,
+            lanes,
             lock,
             opencode,
             process,
             protocol,
             roster,
             shutil,
+            store,
             subprocess,
             supervision,
             terminal,
@@ -253,6 +266,17 @@ reported.
         )
 
         process.check_repository_host(repo)
+        directory = self.project(repo, create=False)[1]
+        stopped = (
+            budgets.halted(directory, roster.read(directory))
+            if (directory / "project.json").exists()
+            else None
+        )
+        if stopped:
+            raise BridgeError(
+                f"The run budget is exhausted ({stopped['cause']}), so no "
+                f"lane is launched or resumed; {budgets.RESUME}."
+            )
         data = self.add_participant(repo, agent, provider, credential)
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
@@ -324,6 +348,8 @@ reported.
                     native["permissions"] = {
                         "allow": [protocol.TOOL_PREFIX, protocol.cli_rule()]
                     }
+                if dialogs.auto_mode(data, agent):
+                    native.setdefault("permissions", {})["defaultMode"] = "auto"
                 command = [
                     executable,
                     "--mcp-config",
@@ -496,6 +522,15 @@ reported.
                 )
                 previous.pop("last_prompt", None)
                 write_json(activity_path, previous)
+            with contextlib.suppress(sqlite3.OperationalError):
+                with store.connect(self.home, write=True) as db:
+                    lanes.transition(
+                        db,
+                        data["root"],
+                        agent,
+                        lanes.STARTING,
+                        evidence="launch: session process started",
+                    )
             try:
                 with delivery.polling(
                     self.home, lane.parent, agent, entry["adapter"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         budgets,
         checkpoints,
         completion,
+        convergence,
         evidence,
         forge,
         history,
@@ -59,6 +61,7 @@ if TYPE_CHECKING:
     from agent_parley import gemini as gemini
     from agent_parley import lanes as lanes
     from agent_parley import lifecycle as lifecycle
+    from agent_parley import merges as merges
     from agent_parley import opencode as opencode
     from agent_parley import retries as retries
     from agent_parley import tables as tables
@@ -129,6 +132,7 @@ DEFERRED_MODULES = (
     "budgets",
     "checkpoints",
     "completion",
+    "convergence",
     "copilot",
     "delivery",
     "dialogs",
@@ -380,7 +384,7 @@ def duration(text: str) -> float:
         seconds = float(text[:-1] if scale else text) * (scale or 1)
     except ValueError:
         seconds = 0.0
-    if seconds <= 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError(f"{text!r} is not a window; use 45m, 6h or 7d.")
     return seconds
 
@@ -805,6 +809,87 @@ def shown_record(record: dict) -> str:
     return text
 
 
+CLIPPED_HINT = (
+    "Lines ending in … were clipped to fit; rerun with --json for full values."
+)
+DETAIL_LABELS = {
+    "home_env": "Config home variable",
+    "config_home": "Config home",
+    "env": "Environment",
+    "require_env": "Required from shell",
+    "unavailable_hooks": "Hooks unavailable",
+}
+
+
+def fitted(lines: Sequence[str], width: int | None) -> str:
+    """Joins output lines, clipping each to the terminal it prints on.
+
+    Args:
+        lines: Lines to print, each already free of line breaks.
+        width: Columns available, or None for a pipe or a file, which
+            receives every value in full.
+
+    Returns:
+        The text to print, ending in a hint naming ``--json`` whenever a line
+        was clipped, so a shortened value never reads as complete.
+    """
+    if width is None or all(len(line) <= width for line in lines):
+        return "\n".join(lines)
+    shown = [tables.fit(line, width).rstrip() for line in lines]
+    return "\n".join([*shown, CLIPPED_HINT])
+
+
+def detail_lines(record: dict) -> list[str]:
+    """Formats one definition as labeled fields, identity first.
+
+    Args:
+        record: Provider or credential document, already redacted.
+
+    Returns:
+        One ``Label: value`` line per field, with lists and mappings joined
+        on one line and an empty value reported as ``none``.
+    """
+    lines = []
+    for name, value in record.items():
+        if isinstance(value, dict):
+            joined = ", ".join(f"{key}={item}" for key, item in value.items())
+        elif isinstance(value, list):
+            joined = ", ".join(str(item) for item in value)
+        else:
+            joined = "" if value is None else str(value)
+        label = DETAIL_LABELS.get(name, name.replace("_", " ").capitalize())
+        lines.append(f"{label}: {' '.join(joined.split()) or 'none'}")
+    return lines
+
+
+def decision_lines(page: dict) -> list[str]:
+    """Formats one page of the decision log as compact rows.
+
+    Args:
+        page: Decision page as ``Bridge.decisions`` reports it.
+
+    Returns:
+        A heading line and a body preview per decision, newest first, or one
+        sentence saying no decision matched.
+    """
+    if not page["messages"]:
+        scope = f" matching {page['query']!r}" if page["query"] else ""
+        if page["since_seconds"]:
+            scope += f" in the last {tables.age(page['since_seconds'])}"
+        return [f"No decisions recorded{scope}."]
+    lines = []
+    for row in page["messages"]:
+        subject = " ".join(str(row["subject"]).split())
+        lines.append(
+            f"Decision {row['id']}  {row['created_ts']}  "
+            f"{row['sender']}  {subject}"
+        )
+        lines.append("  " + " ".join(str(row["body_md"]).split()))
+    if page["has_more"]:
+        lines.append("More decisions match; raise --limit or narrow the query.")
+    return lines
+
+
 def reported_lanes(report: dict) -> int:
     """Counts the lanes a narrowed status reading still holds."""
     return sum(len(project["participants"]) for project in report["projects"])
@@ -1219,6 +1304,27 @@ def budget_changes(args: argparse.Namespace) -> dict | None:
     return changes
 
 
+def operator_only(action: str) -> None:
+    """Refuses an operator-authority command run from inside a lane.
+
+    Every launched lane carries its registration token in its environment
+    and the operator's own shell does not, so the check stops a lane from
+    raising, removing or clearing its run budget by accident. It is not an
+    authority boundary: a process that drops the variable passes it.
+
+    Args:
+        action: Command named in the refusal.
+
+    Raises:
+        BridgeError: If the environment belongs to a launched lane.
+    """
+    if os.environ.get("AGENT_PARLEY_TOKEN"):
+        raise BridgeError(
+            f"{action} needs operator authority and is refused from a lane; "
+            "run it from the operator's own shell."
+        )
+
+
 def selected(args: argparse.Namespace) -> bool:
     """Reports whether the command line carries any lane selector."""
     return bool(
@@ -1327,6 +1433,74 @@ def confirmed(proposal: str, assume_yes: bool) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def ignored_paths(lane: Path) -> list[str]:
+    """Names the ignored files and folders removing a worktree deletes.
+
+    Args:
+        lane: Existing worktree to inspect.
+
+    Returns:
+        Worktree-relative ignored paths, a wholly ignored folder named once
+        with its trailing slash.
+    """
+    listing = git(
+        lane,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
+    return listing.splitlines()
+
+
+SHOWN_PATHS = 20
+
+
+def shown_paths(paths: Sequence[str]) -> list[str]:
+    """Bounds a path list an operator reads to its first entries.
+
+    Args:
+        paths: Every path the caller acts on.
+
+    Returns:
+        The first `SHOWN_PATHS` paths, followed by a count of the rest when
+        any were left out.
+    """
+    shown = list(paths[:SHOWN_PATHS])
+    if len(paths) > SHOWN_PATHS:
+        shown.append(f"and {len(paths) - SHOWN_PATHS} more")
+    return shown
+
+
+def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
+    """Retires one lane after confirming the ignored files it deletes.
+
+    Args:
+        bridge: Launcher holding the private coordination state.
+        repo: Repository the command was given.
+        args: Parsed `participant retire` arguments.
+
+    Returns:
+        The account the retirement produced.
+
+    Raises:
+        BridgeError: If the operator declines or leaves the confirmation
+            unanswered, or if the retirement is refused.
+    """
+    _, data = lane_roster(bridge, repo)
+    participant = data["participants"].get(args.name)
+    lane = Path(participant["lane"]) if participant else None
+    ignored = ignored_paths(lane) if lane and lane.exists() else []
+    if ignored and not confirmed(
+        f"Retiring {args.name} deletes these ignored files:\n"
+        + "\n".join(f"- {path}" for path in shown_paths(ignored)),
+        args.yes,
+    ):
+        raise BridgeError("Declined: nothing was retired.")
+    return bridge.retire(repo, args.name, discard=ignored)
+
+
 def bulk_lanes(
     action: str,
     names: Sequence[str],
@@ -1351,8 +1525,9 @@ def bulk_lanes(
         notes: Extra lines the plan reports before the confirmation.
 
     Returns:
-        0 when every matched lane was done, when nothing matched, or when the
-        operator declined; 1 when any lane refused or failed.
+        0 when every matched lane was done or when nothing matched; 1 when
+        the operator declined or left the confirmation unanswered, or when
+        any lane refused or failed.
     """
     proposal = selection_plan(action, names, notes)
     if not names:
@@ -1360,7 +1535,7 @@ def bulk_lanes(
         return 0
     if not confirmed(proposal, assume_yes):
         print("Declined: nothing was done.")
-        return 0
+        return 1
     done: list[str] = []
     refused: list[str] = []
     for name in names:
@@ -1591,8 +1766,9 @@ def merged_lanes(
         The account the selected merge produced.
 
     Raises:
-        BridgeError: If the selection is ambiguous or names nothing, or if
-            the ordered run stops on a refusal or a failure.
+        BridgeError: If the selection is ambiguous or names nothing, if the
+            operator declines or leaves the plan unanswered, or if the
+            ordered run stops on a refusal or a failure.
     """
     narrowing = bool(
         args.provider
@@ -1601,6 +1777,28 @@ def merged_lanes(
         or args.idle
         or getattr(args, "over_budget", False)
     )
+    if getattr(args, "verify_recovery", False):
+        if (
+            preview
+            or args.name
+            or selected(args)
+            or args.group
+            or getattr(args, "renew_recovery", False)
+        ):
+            raise BridgeError(
+                "`participant merge --verify-recovery` verifies the base "
+                "checkout as it stands and names no lane; drop the lane name, "
+                "--preview, --renew-recovery, --all, --group and the "
+                "selectors."
+            )
+        return bridge.verify_recovery(repo)
+    renew = getattr(args, "renew_recovery", False)
+    if renew and (preview or not args.name or selected(args) or args.group):
+        raise BridgeError(
+            "`participant merge --renew-recovery` retries one named lane's "
+            "recorded integration; drop --preview, --all, --group and the "
+            "selectors."
+        )
     if selected(args) or args.group:
         if args.name:
             raise BridgeError(
@@ -1608,10 +1806,18 @@ def merged_lanes(
                 "lane with --all, a selected set, or one group with --group "
                 "NAME. Drop the participant name to integrate a set."
             )
-        names: list[str] = []
+        if args.group and narrowing:
+            raise BridgeError(
+                "`participant merge --group NAME` integrates the whole group, "
+                "so it takes no lane selector. Drop --provider, --outcome, "
+                "--drifted, --idle and --over-budget, or drop --group."
+            )
+        names: list[str] | None = None
         if narrowing:
             directory, data = lane_roster(bridge, repo)
             names = matching_lanes(bridge.home, directory, data, args)
+            if not names:
+                return "Selector matched no lane, so nothing merged."
         if preview:
             return bridge.integrate(
                 repo, group=args.group, preview=True, lanes=names
@@ -1626,8 +1832,13 @@ def merged_lanes(
             ),
             args.yes,
         ):
-            return "Declined: nothing was merged."
-        return bridge.integrate(repo, group=args.group, lanes=names)
+            raise BridgeError("Declined: nothing was merged.")
+        return bridge.integrate(
+            repo,
+            group=args.group,
+            lanes=names,
+            confirmed=proposed["sequence"],
+        )
     if not args.name:
         raise BridgeError(
             "`participant merge` needs a participant name, --all, a "
@@ -1636,7 +1847,7 @@ def merged_lanes(
     return (
         bridge.preview_merge(repo, args.name)
         if preview
-        else bridge.merge(repo, args.name)
+        else bridge.merge(repo, args.name, renew=renew)
     )
 
 
@@ -1908,22 +2119,26 @@ class Bridge(
             git(lane, "switch", branch)
             return f"{name} restored to {branch} from {actual}."
 
-    def retire(self, repo: Path, name: str) -> str:
+    def retire(self, repo: Path, name: str, discard: Sequence[str] = ()) -> str:
         """Removes a participant's lane while preserving any work it holds.
 
         Deliveries still unread or unacknowledged by the lane are marked
         superseded, because a lane that left answers nothing; the messages
-        themselves stay readable.
+        themselves stay readable. Removing the worktree deletes its ignored
+        files, which `git status` never reports, so they are deleted only
+        when every one of them was named in ``discard``.
 
         Args:
             repo: Any checkout of the target repository.
             name: Participant whose lane is retired.
+            discard: Ignored paths the operator agreed to delete.
 
         Returns:
             An account of what was removed and what was kept.
 
         Raises:
-            BridgeError: If the lane is busy or holds uncommitted changes.
+            BridgeError: If the lane is busy, holds uncommitted changes, or
+                holds an ignored file ``discard`` does not name.
         """
         root, directory = self.project(repo, create=False)
         roster.read(directory)
@@ -1946,6 +2161,19 @@ class Bridge(
                         raise BridgeError(
                             f"{name} has uncommitted changes. Commit or "
                             "preserve them first; retire never discards work."
+                        )
+                    kept = [
+                        path
+                        for path in ignored_paths(lane)
+                        if path not in discard
+                    ]
+                    if kept:
+                        raise BridgeError(
+                            f"{name}'s worktree holds ignored files that "
+                            f"removing it deletes: "
+                            f"{', '.join(shown_paths(kept))}. Move "
+                            "them first, or run `agent-parley participant "
+                            f"retire {name}` to confirm deleting them."
                         )
                     git(root, "worktree", "remove", str(lane))
                 git(root, "worktree", "prune")
@@ -2148,6 +2376,7 @@ class Bridge(
             state.update(activity="stopped", updated=time.time())
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
+            state.pop("session_started", None)
             state.pop("launcher_pid", None)
             state.pop("launcher_ticks", None)
             write_json(path, state)
@@ -2651,8 +2880,13 @@ class Bridge(
         for row in rows:
             if not row["reclaim"]:
                 continue
+            lane = Path(manifest["participants"][row["participant"]]["lane"])
             try:
-                self.retire(repo, row["participant"])
+                self.retire(
+                    repo,
+                    row["participant"],
+                    discard=ignored_paths(lane) if lane.exists() else (),
+                )
             except BridgeError as exc:
                 row.update(reclaim=False, removed=False, reason=str(exc))
                 continue
@@ -2722,6 +2956,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "approval",
             "verify",
+            "unattended",
             "init",
             "branch",
             "forge",
@@ -3138,6 +3373,8 @@ def issue_lines(reading: dict) -> str:
         "Reservations held: "
         + (", ".join(reading["reservations"]) or "none recorded")
     )
+    if reading.get("convergence"):
+        lines.append(convergence.describe(reading["convergence"]))
     reported = reading["history"]
     lines.append(history.describe(reported["records"], reported["holdings"]))
     return "\n".join(lines)
@@ -3197,10 +3434,35 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     stopping.add_argument("--json", action="store_true", help=JSON_HELP)
     health = commands.add_parser(
-        "status", help="Show server health and registered workspaces."
+        "status",
+        help=(
+            "Show server health and registered workspaces as one table; "
+            "`top` draws the live dashboard and `watch` follows one lane."
+        ),
     )
     health.add_argument("--json", action="store_true", help=JSON_HELP)
     add_status_filters(health)
+    health.add_argument(
+        "--all",
+        action="store_true",
+        help="Also list claims whose issue or pull request ended on the forge.",
+    )
+    health.add_argument(
+        "--all-projects",
+        action="store_true",
+        help=(
+            "Report every project, not only the one the working directory "
+            "belongs to, with dormant projects listed last."
+        ),
+    )
+    health.add_argument(
+        "--table",
+        action="store_true",
+        help=(
+            "Print the full per-lane table instead of the open-work view. "
+            "Any lane filter or a named participant prints it too."
+        ),
+    )
     commands.add_parser(
         "title",
         help=(
@@ -3212,7 +3474,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "top",
         help=(
             "Draw the dashboard of every participant's live coordination "
-            "state; `watch` follows one lane's events as a stream."
+            "state; `status` prints one table and `watch` follows one "
+            "lane's events as a stream."
         ),
     )
     watch.add_argument(
@@ -3293,7 +3556,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         metavar="LIST",
         help=(
             "Show only these columns, comma separated, such as "
-            "PARTICIPANT,STATE,IDLE. Every column is shown by default."
+            "PARTICIPANT,STATE,IDLE, or all for every column. The default "
+            "leaves out PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and "
+            "FIT."
         ),
     )
     watch.add_argument(
@@ -3624,7 +3889,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "--idempotency-key", default="", metavar="KEY", help=RETRY_HELP
     )
     steer = commands.add_parser(
-        "say", help="Send one lane a coordination message as the operator."
+        "say",
+        help=(
+            "Send one lane a coordination message as the operator; "
+            "`mail send` is a compatibility alias."
+        ),
     )
     add_say_arguments(steer)
     issue = commands.add_parser(
@@ -3871,7 +4140,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         aliases=["reclaim"],
         help=(
             "Reclaim the lane worktrees and branches whose work has landed, "
-            "keeping and reporting every lane that still holds any."
+            "keeping and reporting every lane that still holds any; "
+            "`reclaim` is a compatibility alias."
         ),
     )
     collecting.add_argument("--repo", type=Path, default=Path.cwd())
@@ -3929,9 +4199,41 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             )
         if action != "apply":
             command.add_argument("--json", action="store_true", help=JSON_HELP)
+    revising = {
+        "propose": "File a revision that adds or removes plan edges.",
+        "approve": "Approve and apply one open revision as operator.",
+        "reject": "Reject one open revision as operator.",
+        "proposals": "List the plan version, envelope and revisions.",
+    }
+    for action, summary in revising.items():
+        command = steps.add_parser(action, help=summary)
+        command.add_argument("--repo", type=Path, default=Path.cwd())
+        command.add_argument("--json", action="store_true", help=JSON_HELP)
+        if action in ("approve", "reject"):
+            command.add_argument("proposal_id")
+            command.add_argument("--reason", default="")
+        elif action == "propose":
+            command.add_argument(
+                "--base",
+                type=int,
+                required=True,
+                help="Plan version read from `plan proposals`.",
+            )
+            for edge in ("add", "remove"):
+                command.add_argument(
+                    f"--{edge}",
+                    action="append",
+                    default=[],
+                    metavar="ISSUE:BLOCKER",
+                )
+            command.add_argument("--reason", required=True)
+            command.add_argument("--evidence", action="append", default=[])
     mail = commands.add_parser(
         "mail",
-        help="Read mail, or list and cancel pending operator items.",
+        help=(
+            "Read mail, or list and cancel pending operator items; "
+            "`mail send` is an alias of `say`."
+        ),
     )
     letters = mail.add_subparsers(dest="action", required=True)
     reading = letters.add_parser("thread")
@@ -3972,8 +4274,8 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     sending = letters.add_parser(
         "send",
         help=(
-            "Send one lane a coordination message as the operator; the same "
-            "command as `say`."
+            "Compatibility alias of `say`, the canonical command; it takes "
+            "the same arguments and sends the same message."
         ),
     )
     add_say_arguments(sending)
@@ -3989,7 +4291,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     dropping.add_argument("--repo", type=Path, default=Path.cwd())
     dropping.add_argument("--json", action="store_true", help=JSON_HELP)
     deciding = commands.add_parser(
-        "decide", help="Record one decision every lane of the project reads."
+        "decide",
+        help=(
+            "Record one decision every lane of the project reads; "
+            "`decision` queries the recorded ones."
+        ),
     )
     deciding.add_argument("text", help="Decision text participants read.")
     deciding.add_argument("--repo", type=Path, default=Path.cwd())
@@ -4006,7 +4312,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     deciding.add_argument("--json", action="store_true", help=JSON_HELP)
     decision = commands.add_parser(
-        "decision", help="Read the decisions recorded for this project."
+        "decision",
+        help=(
+            "Read the decisions recorded for this project; `decide` records "
+            "a new one."
+        ),
     )
     decision_actions = decision.add_subparsers(dest="action", required=True)
     decision_list = decision_actions.add_parser("list")
@@ -4071,6 +4381,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         command.add_argument("--repo", type=Path, default=Path.cwd())
         if action == "merge":
             command.add_argument("--preview", action="store_true")
+            command.add_argument(
+                "--renew-recovery",
+                action="store_true",
+                help=(
+                    "Grant the named lane's recorded unverified integration "
+                    "a fresh set of attempts, then retry it. Accepted only "
+                    "from the base checkout."
+                ),
+            )
+            command.add_argument(
+                "--verify-recovery",
+                action="store_true",
+                help=(
+                    "Run the recorded gate on the base checkout as it stands "
+                    "and clear the unverified-integration record only if it "
+                    "passes and leaves the tree clean. Merges nothing; "
+                    "accepted only from the base checkout."
+                ),
+            )
             scope = command.add_mutually_exclusive_group()
             scope.add_argument(
                 "--all",
@@ -4096,6 +4425,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             add_selector(command)
         if action == "restart":
             command.add_argument("--task", default="")
+        if action == "retire":
+            command.add_argument(
+                "--yes",
+                action="store_true",
+                help=(
+                    "Delete the ignored files the lane's worktree holds "
+                    "without asking first."
+                ),
+            )
     limiting = roles.add_parser(
         "budget",
         help=(
@@ -4166,6 +4504,33 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     setting.add_argument("--repo", type=Path, default=Path.cwd())
+    standing = commands.add_parser(
+        "unattended",
+        help="Show, set or run the project's unattended integration policy.",
+    )
+    standings = standing.add_subparsers(dest="action", required=True)
+    standing_show = standings.add_parser("show")
+    standing_show.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_set = standings.add_parser("set")
+    standing_set.add_argument(
+        "issues",
+        nargs="*",
+        metavar="ISSUE",
+        help=(
+            "Issues whose ready work may be integrated without an operator; "
+            "pass none to remove the policy and stay operator-only."
+        ),
+    )
+    standing_set.add_argument(
+        "--target",
+        help="Branch the base checkout must have checked out.",
+    )
+    standing_set.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_run = standings.add_parser("run")
+    standing_run.add_argument(
+        "name", help="Participant whose ready work is integrated."
+    )
+    standing_run.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -4268,6 +4633,34 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ceiling_set = ceiling_actions.add_parser("set")
     ceiling_set.add_argument("--repo", type=Path, default=Path.cwd())
     add_budget_flags(ceiling_set)
+    ceiling_enforce = ceiling_actions.add_parser(
+        "enforce",
+        help=(
+            "Show or set the opt-in run budget: aggregate limits across every "
+            "lane that stop new wakes, dispatch, retries and launches."
+        ),
+    )
+    ceiling_enforce.add_argument("--repo", type=Path, default=Path.cwd())
+    for field, kind in (("tokens", int), ("calls", int), ("hours", float)):
+        ceiling_enforce.add_argument(
+            f"--{field}",
+            type=kind,
+            metavar="N",
+            help=(
+                f"Enforced limit on the {field} every lane of the run "
+                "consumes together; 0 removes it."
+            ),
+        )
+    ceiling_resume = ceiling_actions.add_parser(
+        "resume",
+        help="Clear an exhausted run budget so the service dispatches again.",
+    )
+    ceiling_resume.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_resume.add_argument(
+        "--reset",
+        action="store_true",
+        help="Start a new accounting period; use so far stops counting.",
+    )
     shared = commands.add_parser(
         "resources",
         help="Show or declare the named resources lanes may reserve.",
@@ -4410,12 +4803,19 @@ def root_parser(
 
 
 def _plain_status() -> int:
-    """Runs the unfiltered status command without building its parser."""
+    """Runs the bare status command without building its parser.
+
+    The reading is the open-work view scoped to the project the working
+    directory belongs to, or every live project outside any project.
+    """
     home = Path(
         os.environ.get("AGENT_PARLEY_HOME", "~/.local/state/agent-parley")
     )
     try:
-        Bridge(home).status(Selection(), terminal_width())
+        bridge = Bridge(home)
+        bridge.board(
+            Selection(project=bridge.project_at(Path.cwd())), terminal_width()
+        )
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"agent-parley: {exc}", file=sys.stderr)
         return 1
@@ -4511,7 +4911,9 @@ def main() -> int:
                 for name in (args.columns or "").replace(",", " ").split()
             )
             unknown = [
-                name for name in names if name not in dict(dashboard.COLUMNS)
+                name
+                for name in names
+                if name != "ALL" and name not in dict(dashboard.COLUMNS)
             ]
             if unknown:
                 parser.error(
@@ -4727,12 +5129,15 @@ def main() -> int:
             print(
                 views.render(
                     "issue",
-                    views.issue_detail(
-                        detail["ledger"],
-                        int(detail["issue"]),
-                        detail["reservations"],
-                        detail["history"],
-                    ),
+                    {
+                        **views.issue_detail(
+                            detail["ledger"],
+                            int(detail["issue"]),
+                            detail["reservations"],
+                            detail["history"],
+                        ),
+                        "convergence": detail["convergence"],
+                    },
                 )
                 if args.json
                 else issue_lines(detail)
@@ -4858,6 +5263,34 @@ def main() -> int:
                 else notification_report(probed)
             )
             return 0 if all(item["ok"] for item in probed["results"]) else 1
+        elif args.command == "plan" and args.action in (
+            "propose",
+            "approve",
+            "reject",
+            "proposals",
+        ):
+            revised = bridge.plan_revision(
+                args.repo.resolve(),
+                args.action,
+                getattr(args, "proposal_id", ""),
+                base=getattr(args, "base", 0),
+                add=getattr(args, "add", None),
+                remove=getattr(args, "remove", None),
+                reason=getattr(args, "reason", ""),
+                evidence=getattr(args, "evidence", None),
+            )
+            listing = args.action == "proposals"
+            print(
+                views.render(
+                    "plan_proposals" if listing else "plan_revision", revised
+                )
+                if args.json
+                else plan.render_revisions(revised)
+                if listing
+                else plan.render_proposal(revised)
+            )
+            if args.action == "approve" and revised["status"] != "accepted":
+                return 1
         elif args.command == "plan":
             applied = bridge.work_plan(
                 args.repo.resolve(), args.action, getattr(args, "path", None)
@@ -4937,7 +5370,7 @@ def main() -> int:
             print(
                 views.render("decision_list", decisions)
                 if args.json
-                else json.dumps(decisions, indent=2)
+                else fitted(decision_lines(decisions), terminal_width())
             )
         elif args.command == "participant":
             repository = args.repo.resolve()
@@ -4956,7 +5389,7 @@ def main() -> int:
             elif args.action == "restore":
                 print(bridge.restore(repository, args.name))
             elif args.action == "retire":
-                print(bridge.retire(repository, args.name))
+                print(retired_lane(bridge, repository, args))
             elif args.action == "merge":
                 print(merged_lanes(bridge, repository, args, preview))
             elif args.action == "pr":
@@ -5069,6 +5502,22 @@ def main() -> int:
                         {"root": data["root"], "budget": data["budget"]},
                     )
                 )
+            elif args.action == "enforce":
+                changes = budget_changes(args)
+                if changes is not None:
+                    operator_only("budget enforce")
+                print(bridge.enforce(repository, changes))
+            elif args.action == "resume":
+                operator_only("budget resume")
+                _, directory = bridge.project(repository, create=False)
+                print(
+                    budgets.resume(
+                        bridge.home,
+                        directory,
+                        roster.read(directory),
+                        args.reset,
+                    )
+                )
             else:
                 print(
                     bridge.budget(
@@ -5150,6 +5599,20 @@ def main() -> int:
                         args.steps if args.action == "set" else None,
                     )
                 )
+        elif args.command == "unattended":
+            from agent_parley import unattended
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                print(
+                    unattended.configure(
+                        bridge, repository, args.target, args.issues
+                    )
+                )
+            elif args.action == "run":
+                print(unattended.integrate(bridge, repository, args.name))
+            else:
+                print(unattended.describe(bridge, repository))
         elif args.command in ("verify", "init"):
             repository = args.repo.resolve()
             if getattr(args, "json", False):
@@ -5191,7 +5654,10 @@ def main() -> int:
                     "provider", views.provider_detail(args.name, inspected)
                 )
                 if args.json
-                else json.dumps({args.name: inspected}, indent=2)
+                else fitted(
+                    detail_lines(views.provider_detail(args.name, inspected)),
+                    terminal_width(),
+                )
             )
         elif args.command == "credentials" and args.action == "show":
             profile_shown = views.credential_detail(
@@ -5200,7 +5666,7 @@ def main() -> int:
             print(
                 views.render("credentials_show", profile_shown)
                 if args.json
-                else json.dumps(profile_shown, indent=2)
+                else fitted(detail_lines(profile_shown), terminal_width())
             )
         elif args.command == "provider":
             if args.action == "add":
@@ -5274,7 +5740,23 @@ def main() -> int:
                 print(views.render("status", narrowed))
                 matched = reported_lanes(narrowed)
             else:
-                matched = bridge.status(selection, terminal_width())
+                every_project = getattr(args, "all_projects", False)
+                if not selection.project and not every_project:
+                    selection = selection._replace(
+                        project=bridge.project_at(Path.cwd())
+                    )
+                if (
+                    getattr(args, "table", False)
+                    or selection._replace(project="").filtered()
+                ):
+                    matched = bridge.status(selection, terminal_width())
+                else:
+                    matched = bridge.board(
+                        selection,
+                        terminal_width(),
+                        every_claim=getattr(args, "all", False),
+                        every_project=every_project,
+                    )
             if matched and (
                 selection.drifted or selection.pending or selection.over_budget
             ):
@@ -5287,7 +5769,37 @@ def main() -> int:
         subprocess.TimeoutExpired,
     ) as exc:
         print(f"agent-parley: {exc}", file=sys.stderr)
+        if getattr(args, "json", False):
+            print(_error_document(exc))
         return 1
+
+
+def _error_document(exc: Exception) -> str:
+    """Frames one runtime failure as a single-line JSON error document.
+
+    The document carries the shared snapshot envelope with ``kind`` set to
+    ``error``, a stable ``type`` for the exception class and the same
+    ``message`` the human line prints. It fits on one line so it stays a
+    separate record after any partial output a command already wrote.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The error document as compact JSON text, without a trailing newline.
+    """
+    if isinstance(exc, BridgeError):
+        kind = "bridge"
+    elif isinstance(exc, subprocess.TimeoutExpired):
+        kind = "timeout"
+    elif isinstance(exc, OSError):
+        kind = "os"
+    else:
+        kind = "value"
+    return json.dumps(
+        views.document("error", {"error": {"type": kind, "message": str(exc)}}),
+        ensure_ascii=False,
+    )
 
 
 if __name__ == "__main__":

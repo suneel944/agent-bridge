@@ -13,6 +13,47 @@ from pathlib import Path
 from agent_parley import BridgeError, recommend
 from agent_parley.reports import ReportsMixin
 
+FORGE_MARKS = "forge-assigned.json"
+
+
+def forge_mark(directory: Path, number: str, *, added: bool) -> bool:
+    """Records or takes the mark of a forge assignment a claim added.
+
+    Every lane shares the operator's forge account, so the forge cannot
+    tell an assignee a person set by hand from one a claim added. A claim
+    marks the issue only when it added the assignment, and a release
+    removes the assignment only when it takes such a mark. A claim recorded
+    before marks existed carries none, so its release leaves the assignee.
+    A mark that cannot be read or written reads as absent, which keeps an
+    assignee rather than removing one.
+
+    Args:
+        directory: Private project state directory.
+        number: Bare repository issue number.
+        added: Whether to leave the issue marked after this call.
+
+    Returns:
+        Whether the issue carried the mark before this call.
+    """
+    from agent_parley.cli import json, lock, write_json
+
+    path = directory / FORGE_MARKS
+    try:
+        with lock(directory / f"{FORGE_MARKS}.lock", timeout=5):
+            try:
+                marks = json.loads(path.read_text())
+            except (OSError, ValueError):
+                marks = {}
+            if not isinstance(marks, dict):
+                marks = {}
+            held = marks.pop(number, None) is True
+            if added:
+                marks[number] = True
+            write_json(path, marks)
+    except (BridgeError, OSError):
+        return False
+    return held
+
 
 class ClaimsMixin(ReportsMixin):
     """Issue ledger transitions, claim forecasts and the work-order plan.
@@ -46,7 +87,8 @@ class ClaimsMixin(ReportsMixin):
 
         _, directory = self.project(repo)
         data = roster.read(directory)
-        if repo.resolve() != Path(data["root"]).resolve():
+        root = Path(data["root"]).resolve()
+        if repo.resolve() != root or roster.caller_lane(data):
             raise BridgeError(
                 "Live recovery approval must be recorded from the project "
                 "base checkout."
@@ -148,7 +190,11 @@ class ClaimsMixin(ReportsMixin):
         if action == "list":
             return snapshot(directory)
         lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-        if action == "unblock" and lane == Path(data["root"]).resolve():
+        if (
+            action == "unblock"
+            and lane == Path(data["root"]).resolve()
+            and not roster.caller_lane(data)
+        ):
             agent = roster.OPERATOR
         else:
             agent = roster.resolve(data, lane)
@@ -235,14 +281,18 @@ class ClaimsMixin(ReportsMixin):
             if recovery.current_take(record):
                 record = recovery.restore(directory, repo, record)
             record = self._free_orphaned(data, record)
-            forge.assign(repo, parse_issue(number))
+            if not forge.assigned(repo, parse_issue(number)) and forge.assign(
+                repo, parse_issue(number)
+            ):
+                forge_mark(directory, parse_issue(number), added=True)
             likely = self._claim_forecast(
                 repo, directory, data, agent, parse_issue(number)
             )
             if likely:
                 record = {**record, "forecast": likely}
         elif action == "release":
-            forge.unassign(repo, parse_issue(number))
+            if forge_mark(directory, parse_issue(number), added=False):
+                forge.unassign(repo, parse_issue(number))
         return record
 
     def _carry(
@@ -669,6 +719,7 @@ class ClaimsMixin(ReportsMixin):
         """
         from agent_parley.cli import (
             forge,
+            issues,
             lifecycle,
             parse_issue,
             roster,
@@ -683,6 +734,13 @@ class ClaimsMixin(ReportsMixin):
         holder = record.get("owner")
         if not holder:
             raise BridgeError(f"Issue #{issue} has no owner.")
+        if not issues.unresolved_completion(record)["unresolved"]:
+            raise BridgeError(
+                f"Issue #{issue} has no unresolved completion; the supervisor "
+                "escalates only after the holder leaves its completion "
+                f"reminders unanswered. {holder} can end the claim with "
+                f"issue release {issue}."
+            )
         participant = data["participants"].get(holder) or {}
         forge.select(repo, data)
         closing = forge.issue_completion(Path(data["root"]), issue)
@@ -801,11 +859,14 @@ class ClaimsMixin(ReportsMixin):
         Returns:
             The project root, the issue number, the published ledger and the
             issue's record in it, the reservation keys its owner holds, and
-            the history reading for the same issue.
+            the history reading for the same issue, and the convergence
+            account of an owned issue's current claim generation, or None
+            for an unowned issue.
 
         Raises:
             BridgeError: If the number is unusable or the project has none.
         """
+        from agent_parley import convergence
         from agent_parley.cli import parse_issue, roster, snapshot, store
 
         root, directory = self.project(repo, create=False)
@@ -828,6 +889,11 @@ class ClaimsMixin(ReportsMixin):
             "owner": owner,
             "reservations": held.get(identity, []),
             "history": self.history(repo, "issue", identifier),
+            "convergence": (
+                convergence.reading(directory, identifier, record["claim_id"])
+                if owner and record.get("claim_id")
+                else None
+            ),
         }
 
     def work_plan(
@@ -837,10 +903,14 @@ class ClaimsMixin(ReportsMixin):
 
         A plan records advisory dependencies and nothing else. Applying one
         claims no issue, assigns no lane and gates no transition, so a plan
-        that turns out to be wrong never blocks anybody.
+        that turns out to be wrong never blocks anybody. Only the operator
+        applies, from the project base checkout outside every lane, because
+        the plan's `[revisions]` table bounds what lanes may revise alone;
+        any checkout may show or compare.
 
         Args:
-            repo: Any checkout of the target repository.
+            repo: Any checkout of the target repository; the base checkout
+                for apply.
             action: Apply, diff, or show.
             path: Plan file for apply and diff.
 
@@ -849,16 +919,99 @@ class ClaimsMixin(ReportsMixin):
             applied plan beside current ownership for show.
 
         Raises:
-            BridgeError: If the plan file is unusable or the ledger cannot be
-                locked.
+            BridgeError: If a lane rather than the operator applies, the plan
+                file is unusable, or the ledger cannot be locked.
         """
-        from agent_parley.cli import plan, reported_ready
+        from agent_parley.cli import git, plan, reported_ready, roster
 
         _, directory = self.project(repo)
         if action == "show":
             return plan.describe(directory, reported_ready(directory))
         if path is None:
             raise BridgeError("Name the plan file to apply or compare.")
-        if action == "apply":
-            return plan.apply(directory, path)
-        return plan.diff(directory, path)
+        if action != "apply":
+            return plan.diff(directory, path)
+        if (directory / "project.json").exists():
+            data = roster.read(directory)
+            checkout = Path(git(repo, "rev-parse", "--show-toplevel"))
+            if checkout.resolve() != Path(data["root"]).resolve() or (
+                roster.caller_lane(data)
+            ):
+                raise BridgeError(
+                    "Only the operator applies a plan, from the project base "
+                    "checkout, because a plan sets the revision envelope "
+                    "lanes are held to."
+                )
+        return plan.apply(directory, path)
+
+    def plan_revision(
+        self,
+        repo: Path,
+        action: str,
+        identity: str = "",
+        *,
+        base: int = 0,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+        reason: str = "",
+        evidence: list[str] | None = None,
+    ) -> dict:
+        """Proposes, decides or lists revisions of the applied plan's edges.
+
+        A proposal run from an assigned worktree is that lane's; one run from
+        the project base checkout, outside every lane, is the operator's.
+        A lane running inside its own worktree cannot name a peer's worktree
+        as `--repo`, so it never proposes under the peer's name. Only the
+        operator approves or rejects, so a lane can never widen the
+        authority its own proposal needs.
+
+        Args:
+            repo: Assigned worktree, or the base checkout for the operator.
+            action: Propose, approve, reject, or proposals.
+            identity: Proposal identifier for approve and reject.
+            base: Plan version a proposal was written against.
+            add: `ISSUE:BLOCKER` edges a proposal records.
+            remove: `ISSUE:BLOCKER` edges a proposal drops.
+            reason: Proposal rationale, or the operator's decision note.
+            evidence: Bounded observations supporting a proposal.
+
+        Returns:
+            The proposal record, or the listing for proposals.
+
+        Raises:
+            BridgeError: If the caller lacks the authority the action needs
+                or the plan layer refuses the proposal.
+        """
+        from agent_parley.cli import git, plan, roster
+
+        _, directory = self.project(repo)
+        if action == "proposals":
+            return plan.revisions(directory)
+        data = roster.read(directory)
+        lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
+        operator = lane == Path(data["root"]).resolve() and not (
+            roster.caller_lane(data)
+        )
+        if action == "propose":
+            by = roster.OPERATOR if operator else roster.resolve(data, lane)
+            caller = roster.caller_lane(data)
+            if not operator and caller not in (None, by):
+                raise BridgeError(
+                    f"{caller} cannot propose from {by}'s worktree; run the "
+                    "proposal from your own worktree."
+                )
+            return plan.propose(
+                directory,
+                by,
+                base,
+                add or [],
+                remove or [],
+                reason,
+                evidence or [],
+            )
+        if not operator:
+            raise BridgeError(
+                "Only the operator approves or rejects a plan revision, from "
+                "the project base checkout."
+            )
+        return plan.decide(directory, identity, action == "approve", reason)

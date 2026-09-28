@@ -327,7 +327,8 @@ def test_passing_gate_that_changes_repository_cannot_complete(
         bridge.merge(repo, "codex")
 
     execution = issues.snapshot(directory)["issues"]["52"]["execution"]
-    assert execution["state"] == lifecycle.READY
+    assert execution["state"] == lifecycle.RECOVERY
+    assert execution["next_action"] == "repair integration"
     assert dirty in git(repo, "status", "--porcelain")
 
 
@@ -369,6 +370,41 @@ def test_premerge_gate_that_moves_base_head_cannot_integrate(
     assert not (repo / "pre-gate.txt").exists()
     execution = issues.snapshot(directory)["issues"]["57"]["execution"]
     assert execution["state"] == lifecycle.READY
+
+
+def test_merge_gate_leaves_the_setup_lock_to_other_operations(
+    bridge,
+    repo,
+    paired,
+    monkeypatch,
+):
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.issue_title", lambda *args: None
+    )
+    monkeypatch.setattr("agent_parley.cli.forge.assign", lambda *args: True)
+    identify(repo)
+    bridge.issue(lane, "claim", "58")
+    commit(lane, "gated.txt")
+    bridge.report(lane, "ready", "Ready", "", "tests passed")
+    bridge.verification(repo, "true")
+    original = cli.verify_base
+    seen = []
+
+    def gate(*args, **kwargs):
+        with cli.lock(directory / "setup.lock"):
+            seen.append("setup")
+        with pytest.raises(BridgeError, match="Another merge"):
+            bridge.merge(repo, "claude")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("agent_parley.cli.verify_base", gate)
+
+    bridge.merge(repo, "codex")
+
+    assert seen == ["setup", "setup"]
+    assert (repo / "gated.txt").exists()
 
 
 def test_keyed_report_retry_repairs_interrupted_lifecycle_transition(

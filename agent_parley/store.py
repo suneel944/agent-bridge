@@ -2,14 +2,16 @@
 
 import contextlib
 import fnmatch
+import functools
 import hashlib
 import json
 import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from agent_parley import (
     attachments,
@@ -56,6 +58,14 @@ BASE_NOTE = re.compile(
     r"^\W*(?:main|master|trunk|base|integration\S*|origin/\S+)\s+"
     r"(?:is|now|at|moved|advanced)\b|\bmerged\b",
     re.IGNORECASE,
+)
+CLAIM_SUPERSESSION = (
+    "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
+    "superseded_reason=? WHERE superseded_ts IS NULL AND message_id IN ("
+    "SELECT m.id FROM messages m JOIN projects p ON p.id=m.project_id "
+    "WHERE p.human_key=? AND m.claim_id=?) AND (read_ts IS NULL OR "
+    "(ack_ts IS NULL AND EXISTS (SELECT 1 FROM messages m WHERE "
+    "m.id=message_recipients.message_id AND m.ack_required=1)))"
 )
 SCHEDULE_FIELDS = (
     "id",
@@ -187,7 +197,7 @@ CREATE TABLE IF NOT EXISTS scheduled_deliveries (
  ack_within REAL, not_before REAL, condition TEXT NOT NULL DEFAULT '',
  unless_reported INTEGER NOT NULL DEFAULT 0, every_seconds REAL,
  repeats_left INTEGER NOT NULL DEFAULT 1, created_ts REAL NOT NULL,
- delivered_ts REAL, cancelled_ts REAL);
+ delivered_ts REAL, cancelled_ts REAL, cancelled_reason TEXT);
 CREATE INDEX IF NOT EXISTS undelivered ON scheduled_deliveries(project_id)
  WHERE delivered_ts IS NULL AND cancelled_ts IS NULL;
 """
@@ -203,6 +213,22 @@ CREATE TRIGGER IF NOT EXISTS message_unindexed AFTER DELETE ON messages BEGIN
  VALUES ('delete',old.id,old.subject,old.body_md);
 END;
 """
+
+
+class Transaction(sqlite3.Connection):
+    """A store connection that undoes its side files when it rolls back.
+
+    SQLite reuses the identifier of a rolled-back row in a table without
+    ``AUTOINCREMENT``, so a file written beside such a row would outlive the
+    rollback under an identifier the next record takes. A writer that creates
+    one registers its removal in ``undo``, and ``connect`` runs every removal
+    when the transaction rolls back.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Opens the connection with nothing to undo yet."""
+        super().__init__(*args, **kwargs)
+        self.undo: list[Callable[[], None]] = []
 
 
 @contextlib.contextmanager
@@ -226,8 +252,13 @@ def connect(
     accumulated sleep budget, which can overrun wall time on macOS. A writer
     holds its reservation before yielding, so its statements do not need a
     second busy wait.
+
+    A transaction that rolls back also runs every removal registered in its
+    ``undo`` list, so no file written for it outlives it.
     """
-    db = sqlite3.connect(home / DATABASE, timeout=0 if write else timeout)
+    db = sqlite3.connect(
+        home / DATABASE, timeout=0 if write else timeout, factory=Transaction
+    )
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     try:
@@ -249,6 +280,9 @@ def connect(
         db.commit()
     except BaseException:
         db.rollback()
+        for undo in db.undo:
+            with contextlib.suppress(OSError):
+                undo()
         raise
     finally:
         db.close()
@@ -356,6 +390,7 @@ def initialize(home: Path) -> None:
                 _add_supersession(db)
                 _add_topic(db)
                 _add_message_search(db)
+                _add_schedule_cancellation(db)
                 if version == SCHEMA_VERSION:
                     return
                 legacy = home / "mail.sqlite3"
@@ -415,11 +450,19 @@ def _add_claim_correlation(db: sqlite3.Connection) -> None:
     It runs after the reservation table has been rebuilt into its current
     shape, because that rebuild copies a fixed column list and would otherwise
     drop a column added before it.
+
+    The partial index on a message's claim lets closing or moving a claim
+    find the mail that claim sent without scanning every delivery while it
+    holds the write lock. Mail sent under no claim stays out of it.
     """
     for table in ("messages", "file_reservations"):
         columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         if "claim_id" not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN claim_id TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS claims ON messages(project_id,claim_id) "
+        "WHERE claim_id IS NOT NULL"
+    )
 
 
 def _add_reservation_ttl(db: sqlite3.Connection) -> None:
@@ -495,6 +538,24 @@ def _add_topic(db: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS feed ON messages(project_id,id) "
         "WHERE feed=1"
     )
+
+
+def _add_schedule_cancellation(db: sqlite3.Connection) -> None:
+    """Adds the reason a scheduled item was cancelled to an older store.
+
+    The column is additive and nullable, so an item cancelled before the
+    upgrade keeps its cancellation time and simply records no reason.
+
+    Args:
+        db: Open upgrade transaction owned by the caller.
+    """
+    columns = {
+        row[1] for row in db.execute("PRAGMA table_info(scheduled_deliveries)")
+    }
+    if "cancelled_reason" not in columns:
+        db.execute(
+            "ALTER TABLE scheduled_deliveries ADD COLUMN cancelled_reason TEXT"
+        )
 
 
 def _add_reservation_created(db: sqlite3.Connection) -> None:
@@ -763,6 +824,19 @@ def _number(value: object, name: str, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise BridgeError(f"{name} must be an integer in {low}..{high}.")
     return value
+
+
+def _whole(value: object, name: str, low: int, high: int) -> int:
+    """Validates integer bounds, taking a whole-number float as its integer.
+
+    A duration parsed from the command line, or read back from a ``REAL``
+    column, is a float even when it names whole seconds. A finite float with
+    no fraction is taken as that integer; a fractional or non-finite float,
+    a boolean or anything else out of bounds is refused.
+    """
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    return _number(value, name, low, high)
 
 
 def _flag(value: object, name: str) -> bool:
@@ -1143,7 +1217,7 @@ def _send(
     decision = _flag(args.get("decision", False), "decision")
     within = args.get("ack_within")
     if within is not None:
-        within = _number(within, "ack_within", 1, 86400 * 30)
+        within = _whole(within, "ack_within", 1, 86400 * 30)
     if ack and within is None:
         within = _ack_window(directory)
     if "reply_to" in args:
@@ -1275,6 +1349,14 @@ def _send(
     if decision:
         result["decision"] = True
     if oversized and directory is not None:
+        if isinstance(db, Transaction):
+            db.undo.append(
+                functools.partial(
+                    attachments.remove,
+                    directory,
+                    attachments.reference("message", message_id),
+                )
+            )
         stored, ref = attachments.spill(
             directory,
             "message",
@@ -1862,11 +1944,13 @@ def _expired_leases(
         project_id: Registered project whose leases are read.
 
     Returns:
-        One row per reclaimable lease, with its holder, its key and how long
-        it has been past its deadline, in holder and key order.
+        One row per reclaimable lease, with its holder, whether that holder
+        still holds a credential to be told, its key and how long it has
+        been past its deadline, in holder and key order.
     """
     return db.execute(
         "SELECT f.id,f.agent_id,f.path_pattern,a.name,"
+        "a.token_digest IS NOT NULL AS addressable,"
         "max(0,unixepoch('now')-unixepoch(f.expires_ts)) AS stale_seconds "
         "FROM file_reservations f JOIN agents a ON a.id=f.agent_id "
         "LEFT JOIN participant_presence s ON s.agent_id=f.agent_id "
@@ -1887,14 +1971,18 @@ def _reclaim(db: sqlite3.Connection, project_id: int) -> list[dict]:
     Reservations stay advisory throughout: this changes who is told that a
     key is free, not what the file system allows.
 
+    A retired holder keeps its leases but no credential, so it cannot be
+    sent mail. Its leases are still released and handed on; only the notice
+    is skipped, because nobody is left to read it.
+
     Args:
         db: Open write transaction owned by the caller.
         project_id: Registered project whose leases are swept.
 
     Returns:
         One entry per holder whose leases were reclaimed, naming that holder,
-        the released keys, the notice it was sent and the lanes that took the
-        keys from its queue.
+        the released keys, the notice it was sent, or ``None`` when it could
+        not be told, and the lanes that took the keys from its queue.
     """
     holders: dict[str, list[sqlite3.Row]] = {}
     for row in _expired_leases(db, project_id):
@@ -1913,27 +2001,29 @@ def _reclaim(db: sqlite3.Connection, project_id: int) -> list[dict]:
             "name": name,
         }
         granted = _grant_queued(db, holder, keys, reclaimed=True)
-        subject, body = _reclaim_notice(
-            keys, max(lease["stale_seconds"] for lease in leases), granted
-        )
-        message = _send(
-            db,
-            _operator(db, project_id),
-            {
-                "to": [name],
-                "subject": subject,
-                "body_md": body,
-                "idempotency_key": (
-                    f"reservation-reclaimed-"
-                    f"{max(lease['id'] for lease in leases)}"
-                ),
-            },
-        )
+        message_id = None
+        if leases[0]["addressable"]:
+            subject, body = _reclaim_notice(
+                keys, max(lease["stale_seconds"] for lease in leases), granted
+            )
+            message_id = _send(
+                db,
+                _operator(db, project_id),
+                {
+                    "to": [name],
+                    "subject": subject,
+                    "body_md": body,
+                    "idempotency_key": (
+                        f"reservation-reclaimed-"
+                        f"{max(lease['id'] for lease in leases)}"
+                    ),
+                },
+            )["id"]
         reclaimed.append(
             {
                 "agent": name,
                 "paths": keys,
-                "message_id": message["id"],
+                "message_id": message_id,
                 "granted": granted,
             }
         )
@@ -3035,6 +3125,11 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
     that had handed it work where that work went, and invalidates the
     credential the call itself authenticated with.
 
+    Each retirement keys its notices afresh. A re-admitted lane keeps its
+    identity, so a key derived from the peer alone would name the notice of
+    an earlier retirement and refuse or swallow this one after its work had
+    already been released.
+
     Args:
         home: Private bridge state root.
         actor: Authenticated project and lane.
@@ -3071,6 +3166,7 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
         for sender, numbers in report.pop("senders", {}).items()
         if sender in participants
     }
+    retiring = secrets.token_hex(8)
     with connect(home, write=True) as db:
         leases = _release(db, actor)
         notices = []
@@ -3083,7 +3179,10 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
                     "to": [sender],
                     "subject": subject,
                     "body_md": body,
-                    "idempotency_key": f"retired-{sender}"[:80],
+                    "idempotency_key": "retired-"
+                    + retiring
+                    + "-"
+                    + hashlib.sha256(sender.encode()).hexdigest()[:32],
                 },
             )
             notices.append(
@@ -3228,13 +3327,7 @@ def supersede_claim(home: Path, root: str, claim: str, reason: str) -> int:
         return 0
     with connect(home, write=True) as db:
         cursor = db.execute(
-            "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
-            "superseded_reason=? WHERE superseded_ts IS NULL AND EXISTS ("
-            "SELECT 1 FROM messages m JOIN projects p ON p.id=m.project_id "
-            "WHERE m.id=message_recipients.message_id AND p.human_key=? "
-            "AND m.claim_id=? AND (message_recipients.read_ts IS NULL OR "
-            "(m.ack_required=1 AND message_recipients.ack_ts IS NULL)))",
-            (reason[:MAX_SUPERSEDE_REASON], root, claim),
+            CLAIM_SUPERSESSION, (reason[:MAX_SUPERSEDE_REASON], root, claim)
         )
         return cursor.rowcount
 
@@ -4180,6 +4273,9 @@ def schedule(home: Path, root: str, item: dict) -> dict:
     recipient = str(item.get("recipient", ""))
     body = str(item.get("body_md", ""))
     repeats = int(item.get("repeats_left", 1))
+    within = item.get("ack_within")
+    if within is not None:
+        within = _whole(within, "ack_within", 1, 86400 * 30)
     if kind not in ("message", "offer"):
         raise BridgeError("A scheduled item is a message or an offer.")
     if not recipient:
@@ -4209,7 +4305,7 @@ def schedule(home: Path, root: str, item: dict) -> dict:
                 str(item.get("issue", "")),
                 str(item.get("dedup_key", "")),
                 int(bool(item.get("ack_required"))),
-                item.get("ack_within"),
+                within,
                 item.get("not_before"),
                 str(item.get("condition", "")),
                 int(bool(item.get("unless_reported"))),
@@ -4324,6 +4420,11 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
     a bounded repeat commit together in one write transaction, so an
     interrupted poll either delivers the occurrence once or leaves it waiting.
 
+    A send the store refuses, such as one to a retired lane that holds no
+    credential or one whose key already names a different message, would be
+    refused the same way on every later poll. The item is cancelled instead,
+    with the refusal recorded as its reason, rather than retried forever.
+
     Args:
         home: Private bridge state root.
         root: Canonical project key registered with the store.
@@ -4331,12 +4432,13 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
         name: Registered identity of the addressed participant.
 
     Returns:
-        Whether the item was delivered and the message identifier it produced.
+        Whether the item was delivered and the message identifier it produced,
+        with the recorded reason under ``cancelled`` when the send was refused.
         A participant that has not registered with the store yet leaves the
         item waiting rather than losing it.
 
     Raises:
-        BridgeError: If the project is not registered or the send is invalid.
+        BridgeError: If the project is not registered.
     """
     if not (home / DATABASE).exists():
         raise BridgeError(NO_PROJECT)
@@ -4364,18 +4466,35 @@ def deliver_schedule(home: Path, root: str, identifier: int, name: str) -> dict:
         key = row["dedup_key"]
         if row["sequence"]:
             key = f"{key}-{row['sequence']}"
-        sent = _send(
-            db,
-            dict(actor),
-            {
-                "to": [name],
-                "subject": row["subject"],
-                "body_md": row["body_md"],
-                "idempotency_key": key,
-                "ack_required": bool(row["ack_required"]),
-                "ack_within": row["ack_within"],
-            },
-        )
+        db.execute("SAVEPOINT delivery")
+        try:
+            sent = _send(
+                db,
+                dict(actor),
+                {
+                    "to": [name],
+                    "subject": row["subject"],
+                    "body_md": row["body_md"],
+                    "idempotency_key": key,
+                    "ack_required": bool(row["ack_required"]),
+                    "ack_within": row["ack_within"],
+                },
+            )
+        except BridgeError as exc:
+            db.execute("ROLLBACK TO delivery")
+            db.execute("RELEASE delivery")
+            db.execute(
+                "UPDATE scheduled_deliveries SET cancelled_ts=?,"
+                "cancelled_reason=? WHERE id=?",
+                (time.time(), str(exc)[:MAX_SUPERSEDE_REASON], identifier),
+            )
+            return {
+                "id": identifier,
+                "delivered": False,
+                "message_id": None,
+                "cancelled": str(exc),
+            }
+        db.execute("RELEASE delivery")
         _advance_schedule(db, row, time.time())
         return {
             "id": identifier,
@@ -4685,6 +4804,40 @@ def usage(
                 stale_lease_age=row["stale_lease_age"],
             )
     return report
+
+
+def served_since(home: Path, root: str, cursor: int) -> tuple[int, int]:
+    """Counts the calls served for one project after an event cursor.
+
+    Retention retires old events, so a count of retained events can fall;
+    counting only identifiers past a durable cursor never counts a call
+    twice and never loses one to retirement. A cursor beyond every stored
+    identifier means the event table was recreated, and counting restarts
+    from its first row.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        cursor: Highest event identifier already counted.
+
+    Returns:
+        The number of newly served calls and the new cursor.
+    """
+    if not (home / DATABASE).exists():
+        return 0, cursor
+    with reading(home) as db:
+        highest = db.execute(
+            "SELECT coalesce(max(id),0) FROM events"
+        ).fetchone()[0]
+        if int(highest) < cursor:
+            cursor = 0
+        row = db.execute(
+            "SELECT count(e.id),coalesce(max(e.id),?) FROM events e "
+            "JOIN projects p ON p.id=e.project_id "
+            "WHERE p.human_key=? AND e.id>?",
+            (cursor, root, cursor),
+        ).fetchone()
+    return int(row[0]), int(row[1])
 
 
 def transfer_reservations(

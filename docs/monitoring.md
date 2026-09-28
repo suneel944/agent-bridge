@@ -4,15 +4,16 @@ Every reading here is read-only: no lock is taken, no vendor is asked, no model
 call is made and nothing in coordination state moves. The field-by-field
 reference for the same views is in [Operations](operations.md#reading-status).
 
-## Three presence states
+## Four presence states
 
-A lane is reported in one of three states, and they are not interchangeable:
+A lane is reported in one of four states, and they are not interchangeable:
 
 | State | What it means | What it is not |
 | --- | --- | --- |
 | `active` | The lane served a coordination call inside the configured interval. | — |
 | `idle` | The session process is alive, but nothing was served inside the inactivity threshold. | Not a lost lane, and not an error. |
 | `stopped` | The recorded session process is gone. | Not merely a quiet lane. |
+| `unknown` | The session's process identity cannot be trusted. | Never inferred dead from its age; it is left for you to inspect. |
 
 A live lane past the inactivity threshold therefore reads `idle`; only a dead
 process reads `stopped`. The distinction is what lets `problems`, the wake
@@ -23,7 +24,9 @@ and no ownership moves.
 The send result keeps the older operator wording for the dead case. A message
 addressed to a `stopped` lane is summarised as `queued for NAME (unreachable)`,
 and one addressed to an `idle` lane as `queued for NAME (idle; wake
-requested)`. A presence row written before this release still carries
+requested)`, and one addressed to an `unknown` lane as `queued for NAME
+(process identity unavailable; manual attention required)`. A presence row
+written before this release still carries
 `unreachable` and is read as `stopped`.
 
 `idle` names the oldest waiting item and how long it has waited, so a lane that
@@ -51,7 +54,8 @@ owns the client's terminal, so it reads that screen and reports it. The activity
 column then shows `dialog: ` and the dialog's name, the activity record carries
 a `dialog` entry with the last screen lines, a wake addressed to the lane is
 refused with `manual attention required`, and you get one notification with the
-screen text. A recognized usage limit also records the provider capacity as
+screen text when [notifications](operations.md#notifications) are configured.
+A recognized usage limit also records the provider capacity as
 exhausted with the reset instant the screen names, so the lane is parked with
 that reason and restored when the reset passes. A screen that names no reset
 is probed on a doubling backoff capped at one hour; an accepted probe or a
@@ -148,19 +152,44 @@ A prompt for any other command escalates as before. A participant entry
 overrides the project entry, so one lane can stay fully interactive.
 
 A lane the supervisor launches or resumes runs in the client's default
-permission mode; no permission mode is passed. A lane you started by hand and
+permission mode unless you record `auto_mode`. A lane you started by hand and
 switched to the client's auto mode does not carry that choice into a
 supervisor-driven resume, so a resumed lane parks on the first shell command
 outside your own allow list and the two rules above. Record that command in
-the client's own permission settings to keep such a lane moving. Codex CLI
+the client's own permission settings to keep such a lane moving, or record
+`"auto_mode": true` for the project under `supervision` or for one lane. With
+it on, a launched `claude` lane's session settings carry
+`permissions.defaultMode` set to `auto`: the client's own classifier approves
+routine commands and still stops a risky one. The client ignores `auto` from a
+project's own `.claude/settings.json`, which is why the launch carries it. The
+default is off, a lane entry overrides the project, a value that is not a
+boolean is refused, and no bypass mode is ever passed. Codex CLI
 0.153.4 has no per-tool approval surface of its own — its approval settings are
 whole-session policies — so its launch is left untouched and its prompts are
 reported for you to answer.
 
+## Tab titles
+
+An attached lane's terminal tab names the lane first, then its state and claim
+progress, such as `[codex] idle with claim #412 - 2/5 done`, so a tab strip of
+lanes reads as a summary without opening any of them. `agent-parley title`
+prints the same line for a native status line and prints nothing outside a
+lane. The supervision key `titles` turns the tab title off; the details are in
+[Operations](operations.md).
+
 ## `status`
 
-`status` prints the server line, the code line, the state directory and then one
-table per project, a row per participant: ownership, activity and outcomes.
+`status` prints the server line, the code line, the state directory and then,
+per project, the open work: each live claim's issue, title, owner, lane state,
+last event and pull request, then one line per lane with its state, live claim
+count and current task. Inside a project checkout it reports that project only;
+`--all-projects` adds the rest, dormant ones last, and `--all` adds claims whose
+issue is closed or whose pull request ended. Titles and open state come from a
+bounded read of the forge's open issues, cached for 300 seconds in the project
+state directory; a failed read falls back to that cache with one `Forge:` line.
+`--json` stays the complete reading of every
+project. `status --table` prints one table per project, a row per participant:
+ownership, activity and outcomes.
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-status.svg" width="880" alt="agent-parley status listing issue owners, a pending handoff, and a lane on the wrong branch">
@@ -183,9 +212,9 @@ agent-parley status --idle            # live lanes past the inactivity threshold
 agent-parley status --outcome blocked --provider codex
 ```
 
-`--drifted` and `--pending` exit non-zero when a lane matches, so a shell gate
-fails on drift without parsing the table. Columns shrink to the terminal, and a
-redirected stream receives every column instead.
+`--drifted`, `--pending` and `--over-budget` exit non-zero when a lane
+matches, so a shell gate fails on drift without parsing the table. Columns
+shrink to the terminal, and a redirected stream receives every column instead.
 
 A pending handoff is reported with the offering lane's head commit, the
 reservations that move with it and the remaining work from its last report, in
@@ -209,22 +238,67 @@ read stays on screen regardless. The header counts what was left out;
 agent-parley top --provider codex
 agent-parley top --provider claude --provider codex
 agent-parley top --sort IDLE --reverse
-agent-parley top --project payments --participant codex
+agent-parley top --repo payments --participant codex
 agent-parley top --columns PARTICIPANT,STATE,ISSUES,IDLE
 agent-parley top --all
 ```
 
+The screen reads like Linux `top`: three summary lines, one row per lane, and
+a short list of notes under the table. Each `!` note names a lane and says
+what waits on you: branch drift, rejected calls, an unfit reason, a pending
+split or pull offer, a failed review. Notes take the place of a NOTE column, so
+long reasons never truncate, and monochrome output says everything colour
+emphasises. `--once` ends with one line that points at the live view.
+
+```text
+$ agent-parley top --once --columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
+agent-parley top - 04:37:10  server running  projects 1  read 0.02s
+Lanes: 3 total, 2 working, 1 idle   Issues: 3 held, 1 offered
+Mail: 1 unread, 1 unacked   Leases: 2 held   Hooks (all retained): 7 events, 2 denied (29%)   Context: 2.5kB
+Selection: columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
+
+project /home/dev/payments-api
+PARTICIPANT     STATE                   ISSUES      MAIL       LEASES     DENIALS    IDLE      TASK
+claude-1        working 5s              #42         0/0        1 5s       1/3        0s        Fix refund rounding for partial capt…
+claude-2        working 5s              #58         0/0        1 5s       0/2        0s        Document the refund API for merchants
+codex-1         idle 5s                 #17+1       1/1        0          1/2        0s        Rename the shared money helper
+
+! codex-1  on branch refund-spike, not its assigned branch
+! codex-1  idle; acknowledgement of message 1 for claude-1 waiting 5s
+! codex-1  unfit (mail): it owes an acknowledgement 5s old
+Live view: top without --once; ? explains each column.
+```
+
+This is the output behind the README screenshot, recorded by
+`scripts/record_demo.py --screenshots` against three lanes whose native
+clients are stubs.
+
+The first line names the server, the time, the project count and the idle
+total. The second counts lanes by state and the issues they hold, and says how
+many lanes are hidden. The third totals mail, leases, hook decisions and
+injected context. A count that is zero and says nothing is left out.
+
+Each lane is one row. The default columns are PARTICIPANT, STATE, BRANCH,
+ISSUES, MAIL, LEASES, DENIALS, TOKENS, IDLE and TASK, the lane's last prompt.
+`--columns all` adds PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and FIT.
+A lane that needs you also gets one line under the table, marked with `!`:
+a stall, an operator edit, a base advance, an orphan claim, a budget marker,
+a failed fit check or an escalated dispatch. On a bounded screen the notes
+take at most a third of the page, and a last note counts the rest; `P` lists
+every problem. `?` shows the column legend.
+
 With a dozen lanes open the whole table is rarely what you want. `--provider`
-narrows the view to the participants driven by one provider, and the header
+narrows the view to the participants driven by one provider, and the summary
 counts only the rows it shows.
 
 `top` fits the terminal it is given. Every column is as wide as the widest value
-in the frame, and a terminal too narrow for the whole set drops the
-lowest-priority columns in a fixed order and names them under the header instead
-of clipping every cell. Rows past the fold are paged, never dropped: the footer
-reads `rows 1-8 of 31`. `--once` prints at the width of the terminal and at the
-full width of the table when the output is a pipe, so a captured file keeps
-every column intact.
+in the frame. STATE and TASK, like top's COMMAND column, take the width the
+others leave, so one long cell ends in `…` instead of pushing columns out. A
+terminal too narrow for the whole set drops the lowest-priority columns in a
+fixed order and names them under the summary. Rows past the fold are paged,
+never dropped: the footer reads `rows 1-8 of 31`. `--once` prints at the width
+of the terminal and at the full width of the table when the output is a pipe,
+so a captured file keeps every chosen column intact.
 
 The same choices are reachable from the live view with single keys:
 
@@ -236,13 +310,13 @@ The same choices are reachable from the live view with single keys:
 | `r` | Reverse the order. |
 | `f` | Narrow to participants, comma separated; empty clears. |
 | `o` | Narrow to projects, comma separated; empty clears. |
-| `c` | Choose the columns shown; empty shows all. |
+| `c` | Choose the columns shown; empty is the default set, `all` every one. |
 | `a` | Show or hide stopped lanes and projects whose root is gone. |
 | `P` | Show the `problems` rows in place until any key returns. |
 | `?` | Show the key map and the column legend. |
 | `q` | Leave. The view never writes state. |
 
-The header also carries how long the frame took to read. Git reads dominate
+The first summary line also carries how long the frame took to read. Git reads dominate
 a frame, so the live view reads each lane's branch and each project's
 operator edits and base advances at most once every five seconds; the rest
 of the frame is read on every redraw, keeping a normal frame under a second.
@@ -250,7 +324,8 @@ of the frame is read on every redraw, keeping a normal frame under a second.
 A lane that drifted from its branch, holds a stale lease, had a call rejected,
 owns an overdue issue or lost its session process is drawn in colour where the
 terminal offers it and in bold where it does not. Each of those also prints its
-own marker in the table, so a monochrome pipe reads exactly the same.
+own marker in the table or a note under it, so a monochrome pipe reads exactly
+the same.
 
 `running; no hooks` means the session needs relaunching to obtain checkpoint
 reporting. `top --once` prints full detail.
@@ -264,7 +339,7 @@ blank when nothing could be read.
 
 `top` carries an `IDLE` column: how long each lane went without coordination
 activity inside the window, with the project total and the worst lane in the
-header. `status` prints the same figure and, under it, every pending item with
+first summary line. `status` prints the same figure and, under it, every pending item with
 the seconds it has already waited — a message before its first read, an
 `ack_required` message before acknowledgement, a handoff offer before an answer,
 a `ready` report before integration. Every figure comes from records the runtime
@@ -295,7 +370,20 @@ every condition an operator should act on: a lane stalled or inactive past its
 supervision threshold, a claim past its deadline, a handoff offer with no
 answer, a message awaiting acknowledgement past `--ack-after`, a lane whose
 branch drifted or whose worktree is dirty with no recent activity, a lane over
-its advisory budget, a store schema behind the code, and a service that is down.
+its advisory budget, a lane holding more claims than `max_claims_per_lane`, a
+store schema behind the code, and a service that is down. It also lists an
+issue `not converging`, an `integration unverified` on the base checkout, a
+`recovery refused`, an `escalated plan revision` and the `plan revisions
+pending`, a `run budget exhausted` or `run budget unmetered`, an `unresolved
+completion`, a project reporting `root missing` or `supervision failing`, and
+a lane needing `wake attention`. Every condition, when it is
+raised and what clears it, is in the
+[Operations](operations.md#triage-with-problems) table.
+
+A quiet lane counts as inactive only while it owes work: it holds a claim that
+has not reported ready or been verified complete, or it is paused, held by a
+prompt or stopped answering wakes. A lane that delivered everything it holds is
+at rest, and `problems` does not list it.
 
 Retiring a lane supersedes the shares it still owed an acknowledgement, so
 they never bounce. `problems` names that once per retired lane under `shares
@@ -303,6 +391,16 @@ to a retired lane`, for example `3 shares to codex superseded: codex retired`.
 The row is informational and offers nothing to run; it clears when those
 shares' acknowledgement deadlines pass, or a day after retirement for a share
 sent without a deadline.
+
+Two readings wake a lane before they could ever reach this list. A lane
+waiting on its own pull request is sent one supervisor message, and so a wake,
+when that pull request's checks finish, a review lands or its merge state
+changes. A claim whose verification keeps failing with no verified improvement
+is asked once to change approach, and only a repeat is escalated to you as
+`not converging`. Both are described under
+[waking](operations.md#availability-reminders-and-waking) in Operations. The
+changes that reach you outside the terminal are listed under
+[Notifications](operations.md#notifications).
 
 Each lane contributes one row per cause, not one row per item: a lane sitting
 on twenty unacknowledged messages is a single row carrying that count and the
@@ -318,7 +416,9 @@ counting operator rows against service rows.
 An empty list exits zero with one line saying so; any row exits 1, so a shell
 or a cron can notice. `--json` prints the same rows, and `P` in `top` shows
 them in place. The view reads the same snapshot `status` prints and moves
-nothing itself.
+nothing itself. The one write beside it is `problems ack MESSAGE_ID`, which
+records your own acknowledgement of a message a lane left unanswered and clears
+that row and nothing else.
 
 ## `doctor`
 

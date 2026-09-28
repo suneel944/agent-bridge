@@ -22,6 +22,26 @@ MAX_REMAINING_BYTES = 200
 MAX_RESERVATIONS = 32
 MAX_RESERVATION_BYTES = 240
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
+ENDED = "pull request ended"
+
+
+def delivered(record: dict) -> bool:
+    """Reports whether a claim has no work left for its holder.
+
+    Args:
+        record: Published ledger record for one issue.
+
+    Returns:
+        True when the claim's current generation reported ready or was
+        verified complete. It then waits on verification and integration,
+        not on its holder. A ready report from an earlier generation does
+        not count, because the claim it described is gone.
+    """
+    execution = lifecycle.state(record)
+    return execution["state"] in (
+        lifecycle.READY,
+        lifecycle.COMPLETE,
+    ) and execution["claim_id"] == record.get("claim_id")
 
 
 def deadline_state(record: dict, now: float = 0.0) -> dict:
@@ -52,14 +72,9 @@ def deadline_state(record: dict, now: float = 0.0) -> dict:
     """
     stamp = now or time.time()
     deadline = record.get("deadline")
-    execution = lifecycle.state(record)
-    delivered = execution["state"] in (
-        lifecycle.READY,
-        lifecycle.COMPLETE,
-    ) and execution["claim_id"] == record.get("claim_id")
     over = (
         int(stamp - deadline)
-        if deadline and stamp > deadline and not delivered
+        if deadline and stamp > deadline and not delivered(record)
         else 0
     )
     budget = record.get("budget")
@@ -154,6 +169,56 @@ def released(record: dict) -> bool:
     if history and history[-1].get("action") in ("release", "resolve"):
         return True
     return lifecycle.state(record)["state"] == lifecycle.COMPLETE
+
+
+def ended(record: dict) -> bool:
+    """Reports whether a claim's work already ended on the forge.
+
+    The reading uses only what supervision cached in the ledger, so a status
+    reading never waits on the forge. An issue reads as ended when its
+    execution is verified complete, when its unresolved completion is
+    escalated, or when supervision observed its issue or pull request end
+    inside the current owner's generation and that owner has not answered.
+
+    Args:
+        record: Published ledger record for one issue, or an empty mapping.
+
+    Returns:
+        Whether the claim describes finished rather than open work.
+    """
+    prompt = record.get("handoff_prompt") or {}
+    return bool(
+        lifecycle.state(record)["state"] == lifecycle.COMPLETE
+        or unresolved_completion(record)["unresolved"]
+        or (
+            prompt.get("trigger") == ENDED
+            and prompt.get("holder") == record.get("owner")
+            and not prompt.get("responded_at")
+        )
+    )
+
+
+def closed(record: dict) -> bool:
+    """Reports whether a claim's issue closed inside its current generation.
+
+    Unlike `ended`, the reading holds after the holder answers the completion
+    reminder. Answering it reports the finished work; it does not reopen the
+    issue, so the claim stays work that already ended on the forge.
+
+    Args:
+        record: Published ledger record for one issue, or an empty mapping.
+
+    Returns:
+        Whether the claim is `ended`, or supervision observed its issue or
+        pull request end after the current owner's generation began.
+    """
+    prompt = record.get("handoff_prompt") or {}
+    return ended(record) or (
+        prompt.get("trigger") == ENDED
+        and bool(record.get("owner"))
+        and prompt.get("holder") == record.get("owner")
+        and float(prompt.get("created", 0) or 0) >= claimed_since(record)
+    )
 
 
 def unresolved_completion(record: dict) -> dict:
@@ -859,7 +924,11 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
     looking held while no peer may take it, so the cap is checked where a
     lane takes on a new issue. The refusal names every claim the lane holds
     with how long each has gone without progress, so the lane can see which
-    one to release or offer.
+    one to release or offer. A delivered claim does not count: it waits on
+    verification and integration, not on its holder, and counting it would
+    stop every lane once nobody integrates. A claim whose issue closed does
+    not count either, as `closed` reads it: its work already ended on the
+    forge, so the lane has nothing left to do on it.
 
     Args:
         ledger: Issue records keyed by number, read under the ledger lock.
@@ -870,7 +939,13 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
         BridgeError: If the lane already holds the cap.
     """
     held = sorted(
-        (number for number, item in ledger.items() if item["owner"] == agent),
+        (
+            number
+            for number, item in ledger.items()
+            if item["owner"] == agent
+            and not delivered(item)
+            and not closed(item)
+        ),
         key=int,
     )
     if not cap or len(held) < cap:
@@ -1266,7 +1341,7 @@ def _change(
                 elif action == "release":
                     retired = str(record.get("claim_id") or "")
                     retired_reason = f"issue #{issue} released"
-                    lifecycle.released(record)
+                    lifecycle.released(record, closed=closed(record))
                     attachments.remove(directory, record.get("attachment", ""))
                     record.pop("attachment", None)
                     inherited = record.pop("handoff", None) or {}

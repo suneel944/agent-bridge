@@ -439,6 +439,44 @@ class SettingsMixin(BridgeCore):
             + f" Standing: {standing}. A budget informs and does not gate."
         )
 
+    def enforce(self, repo: Path, changes: dict | None = None) -> str:
+        """Reports or records the run budget a project opted into enforcing.
+
+        A run budget sums every lane's tokens, served calls and session
+        hours and, once any enforced sum reaches its limit, refuses new
+        wakes, dispatches, retries and launches until an operator resumes
+        the run. It is recorded apart from the advisory budgets, which stay
+        advisory and never gate. Recording a limit never clears a recorded
+        exhaustion; only ``budget resume`` does.
+
+        Args:
+            repo: Any checkout of the target repository.
+            changes: Flag values per field; None reports the current
+                standing. A field left None is unchanged and 0 removes it;
+                removing every field returns the project to advisory only.
+
+        Returns:
+            An account of the enforced limits and the run's standing.
+
+        Raises:
+            BridgeError: If the repository has no project or a limit is
+                unusable.
+        """
+        from agent_parley.cli import budgets, lock, roster, write_json
+
+        _, directory = self.project(repo, create=False)
+        if changes is not None:
+            with lock(directory / "setup.lock"):
+                data = roster.read(directory)
+                before = dict(data.get("run_budget") or {})
+                data["run_budget"] = roster.merged_budget(before, changes)
+                if data["run_budget"]:
+                    budgets.start(self.home, directory, data, before)
+                else:
+                    data.pop("run_budget")
+                write_json(directory / "project.json", data)
+        return budgets.run_account(self.home, directory, roster.read(directory))
+
     @staticmethod
     def _budget_account(recorded: dict) -> str:
         """Words the limits one record carries of its own."""

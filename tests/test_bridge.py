@@ -25,6 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agent_parley import (
     checkpoints,
+    cli,
     dashboard,
     evidence,
     forge,
@@ -1155,8 +1156,9 @@ def test_top_reports_every_participant_and_writes_no_state(
     }
     dashboard.run(bridge.home, lambda: False, once=True)
     output = capsys.readouterr().out
-    assert "agent-parley top  server: not running" in output
-    assert "denials 0 (0%)" in output
+    assert "agent-parley top - " in output
+    assert "server not running" in output
+    assert "0 denied (0%)" in output
     assert "#77" in output
     assert "Wire the dashboard" in output
     assert "working" in output and "stopped" in output
@@ -1166,28 +1168,38 @@ def test_top_reports_every_participant_and_writes_no_state(
 
 
 def test_top_reports_only_the_selected_providers(bridge, repo, paired, capsys):
-    dashboard.run(bridge.home, lambda: False, once=True, providers=("codex",))
+    dashboard.run(
+        bridge.home,
+        lambda: False,
+        once=True,
+        providers=("codex",),
+        columns=("ALL",),
+    )
     selected = capsys.readouterr().out
     assert "codex/default" in selected
     assert "claude/default" not in selected
-    assert "participants 1" in selected
+    assert "Lanes: 1 total" in selected
     assert "provider codex" in selected
 
     dashboard.run(
-        bridge.home, lambda: False, once=True, providers=("claude", "codex")
+        bridge.home,
+        lambda: False,
+        once=True,
+        providers=("claude", "codex"),
+        columns=("ALL",),
     )
     both = capsys.readouterr().out
     assert "claude/default" in both and "codex/default" in both
-    assert "participants 2" in both
+    assert "Lanes: 2 total" in both
 
     dashboard.run(bridge.home, lambda: False, once=True, providers=("kimi",))
     none = capsys.readouterr().out
     assert "no participants for the selected provider" in none
-    assert "participants 0" in none
+    assert "Lanes: 0 total" in none
 
     dashboard.run(bridge.home, lambda: False, once=True)
     unfiltered = capsys.readouterr().out
-    assert "participants 2" in unfiltered
+    assert "Lanes: 2 total" in unfiltered
     assert "provider " not in unfiltered
 
 
@@ -1211,8 +1223,7 @@ def test_top_marks_a_lease_past_its_time_to_live_as_stale(
     dashboard.run(bridge.home, lambda: False, once=True)
     stale = capsys.readouterr().out
     assert "1!1" in stale
-    assert "past a declared time to live" in stale
-    assert "still held" in stale
+    assert "1 stale" in stale
 
 
 def usage_record(identifier, tokens):
@@ -1297,10 +1308,9 @@ def test_top_reports_tokens_each_native_client_recorded(
     assert rows["codex"]["tokens"] == 2500
 
     dashboard.run(bridge.home, lambda: False, once=True)
-    output = capsys.readouterr().out
-    lines = output.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert any(
-        line.startswith("PARTICIPANT") and line.endswith("FIT")
+        line.startswith("PARTICIPANT") and line.endswith("TASK")
         for line in lines
     )
     assert (
@@ -1311,7 +1321,7 @@ def test_top_reports_tokens_each_native_client_recorded(
         next(line for line in lines if line.startswith("codex ")).split()[-3]
         == "2.5k"
     )
-    assert "not billed spend" in output
+    assert "not billed spend" in " ".join(dashboard.keymap())
 
 
 def test_top_leaves_tokens_blank_without_readable_session_records(
@@ -1324,11 +1334,11 @@ def test_top_leaves_tokens_blank_without_readable_session_records(
     dashboard.run(bridge.home, lambda: False, once=True)
     lines = capsys.readouterr().out.splitlines()
     assert any(
-        line.startswith("PARTICIPANT") and line.endswith("FIT")
+        line.startswith("PARTICIPANT") and line.endswith("TASK")
         for line in lines
     )
     row = next(line for line in lines if line.startswith("claude "))
-    assert row.split()[-3:] == ["0", "0s+", "-"]
+    assert row.split()[-3:] == ["0/0", "0s+", "-"]
 
 
 def test_token_reading_survives_a_malformed_session_record(
@@ -1759,8 +1769,11 @@ def test_claim_and_release_mirror_onto_the_forge_after_the_ledger(
         "agent_parley.cli.forge.issue_title", lambda directory, number: None
     )
     monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: False
+    )
+    monkeypatch.setattr(
         "agent_parley.cli.forge.assign",
-        lambda directory, number: mirrored.append(("assign", number)),
+        lambda directory, number: not mirrored.append(("assign", number)),
     )
     monkeypatch.setattr(
         "agent_parley.cli.forge.unassign",
@@ -1779,6 +1792,40 @@ def test_claim_and_release_mirror_onto_the_forge_after_the_ledger(
     with pytest.raises(AssertionError):
         bridge.issue(claude, "claim", "432")
     assert bridge.issue(repo, "list")["issues"]["432"]["owner"] == "claude"
+
+
+def test_a_release_keeps_an_assignee_the_claim_did_not_add(
+    bridge, repo, paired, monkeypatch
+):
+    claude = Path(paired["lanes"]["claude"])
+    mirrored = []
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.issue_title", lambda directory, number: None
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: True
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assign",
+        lambda directory, number: not mirrored.append(("assign", number)),
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.unassign",
+        lambda directory, number: mirrored.append(("unassign", number)),
+    )
+    bridge.issue(claude, "claim", "568")
+    bridge.issue(claude, "release", "568")
+    assert mirrored == []
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assigned", lambda directory, number: False
+    )
+    monkeypatch.setattr(
+        "agent_parley.cli.forge.assign",
+        lambda directory, number: mirrored.append(("assign", number)),
+    )
+    bridge.issue(claude, "claim", "568")
+    bridge.issue(claude, "release", "568")
+    assert mirrored == [("assign", "568")]
 
 
 def test_a_report_requires_one_claim_and_comments_on_that_issue(
@@ -2538,6 +2585,99 @@ def test_retire_keeps_a_branch_that_still_holds_commits(bridge, repo, paired):
     assert "kept.txt" in git(repo, "show", "--name-only", "kept-codex")
 
 
+def ignored_lane(repo, paired):
+    """Leaves one ignored file in the codex lane and returns the lane."""
+    lane = Path(paired["lanes"]["codex"])
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text(".env\n")
+    (lane / ".env").write_text("TOKEN=local\n")
+    return lane
+
+
+def retire_command(bridge, repo, monkeypatch, *flags):
+    """Runs `participant retire codex` and returns its exit status."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "participant",
+            "retire",
+            "codex",
+            "--repo",
+            str(repo),
+            *flags,
+        ],
+    )
+    return cli.main()
+
+
+def test_retire_refuses_an_ignored_file_it_was_not_told_to_delete(
+    bridge, repo, paired
+):
+    lane = ignored_lane(repo, paired)
+
+    with pytest.raises(BridgeError, match=r"ignored files .*\.env"):
+        bridge.retire(repo, "codex")
+
+    assert (lane / ".env").read_text() == "TOKEN=local\n"
+
+
+def test_retire_lists_ignored_files_and_keeps_them_when_unanswered(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+
+    def closed(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", closed)
+
+    assert retire_command(bridge, repo, monkeypatch) == 1
+    printed = capsys.readouterr()
+    assert "- .env" in printed.out
+    assert "Declined: nothing was retired." in printed.err
+    assert (lane / ".env").exists()
+
+
+def test_retire_with_yes_deletes_the_listed_ignored_files(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+
+    assert retire_command(bridge, repo, monkeypatch, "--yes") == 0
+    assert "- .env" in capsys.readouterr().out
+    assert not lane.exists()
+
+
+def test_retire_bounds_the_ignored_files_it_lists(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    lane = ignored_lane(repo, paired)
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info" / "exclude").write_text(".env\n*.log\n")
+    for index in range(25):
+        (lane / f"run-{index:02}.log").write_text("output\n")
+
+    with pytest.raises(BridgeError) as refusal:
+        bridge.retire(repo, "codex")
+    assert ", and 6 more." in str(refusal.value)
+    assert "run-20.log" not in str(refusal.value)
+
+    assert retire_command(bridge, repo, monkeypatch, "--yes") == 0
+    printed = capsys.readouterr().out
+    assert "- and 6 more" in printed
+    assert "run-20.log" not in printed
+    assert not lane.exists()
+
+
 @pytest.mark.parametrize("dirty", [False, True])
 @pytest.mark.parametrize("operation", ["show", "set", "retire", "merge"])
 def test_unregistered_commands_leave_repository_and_state_untouched(
@@ -2978,6 +3118,10 @@ def test_merge_runs_the_repository_verification_command_first(
 
 
 GH_STUB = """#!/bin/sh
+if [ "$1" = "api" ]; then
+  echo operator
+  exit 0
+fi
 if [ "$1" = "issue" ]; then
   cat "$GH_ISSUE"
   exit 0

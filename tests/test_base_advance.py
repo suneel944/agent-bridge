@@ -81,7 +81,7 @@ def test_a_base_commit_on_a_reserved_path_marks_the_lane_and_notifies(
     marker = rows["claude"]["base_advance"]
     assert marker.startswith("base advanced over held path shared.txt")
     assert "nothing was rebased" in marker
-    assert any(line == f"    {marker}" for line in dashboard.render(view))
+    assert f"! claude  {marker}" in dashboard.render(view)
     bridge.status(cli.Selection(participant="claude"))
     assert marker in capsys.readouterr().out
     bridge.status(cli.Selection(participant="codex"))

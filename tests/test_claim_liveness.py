@@ -2,13 +2,14 @@
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from agent_parley import issues, lifecycle, process, store, supervision
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, lock, write_json
 
 WINDOW = 300
 IDLE_AFTER = 3600
@@ -230,6 +231,109 @@ def test_a_project_may_raise_the_claim_cap(bridge, paired):
         assert bridge.issue(lane, "claim", number)["owner"] == "claude"
     with pytest.raises(BridgeError, match="max_claims_per_lane is 3"):
         bridge.issue(lane, "claim", "10")
+
+
+def test_a_delivered_claim_does_not_count_toward_the_cap(bridge, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    for number in ("7", "8"):
+        bridge.issue(lane, "claim", number)
+    lifecycle.record_report(
+        directory, "claude", "ready", "a" * 40, "", issue="7"
+    )
+    assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "10")
+
+
+def test_a_claim_on_a_closed_issue_does_not_count_toward_the_cap(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    for number in ("7", "8"):
+        bridge.issue(lane, "claim", number)
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "9")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        for number in ("7", "8"):
+            ledger["issues"][number]["handoff_prompt"] = {
+                "trigger": issues.ENDED,
+                "holder": "claude",
+                "created": time.time(),
+                "responded_at": time.time(),
+            }
+        write_json(directory / "issues.json", ledger)
+    assert bridge.issue(lane, "claim", "9")["owner"] == "claude"
+    assert bridge.issue(lane, "claim", "10")["owner"] == "claude"
+    with pytest.raises(BridgeError, match="max_claims_per_lane is 2"):
+        bridge.issue(lane, "claim", "11")
+
+
+def test_ready_work_on_a_closed_issue_releases_without_requeueing(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        record = ledger["issues"]["7"]
+        record["execution"] = {
+            **lifecycle.state(record),
+            "authorized": True,
+            "state": lifecycle.READY,
+            "claim_id": record["claim_id"],
+        }
+        write_json(directory / "issues.json", ledger)
+    with pytest.raises(BridgeError, match="Ready work must remain claimed"):
+        bridge.issue(lane, "release", "7")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["7"]["handoff_prompt"] = {
+            "trigger": issues.ENDED,
+            "holder": "claude",
+            "created": time.time(),
+            "responded_at": time.time(),
+        }
+        write_json(directory / "issues.json", ledger)
+    released = bridge.issue(lane, "release", "7")
+    assert released["owner"] is None
+    assert released["ended_on_forge"]
+    assert "7" not in lifecycle.actionable(issues.snapshot(directory))
+    reclaimed = bridge.issue(lane, "claim", "7")
+    assert reclaimed["owner"] == "claude"
+    assert "ended_on_forge" not in reclaimed
+
+
+def test_resolve_without_an_escalation_names_release(bridge, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "7")
+    with pytest.raises(BridgeError, match="issue release 7"):
+        bridge.issue_resolve(lane, "7")
+
+
+def test_a_wake_waits_out_a_brief_setup_lock_holder(bridge, paired):
+    registered(bridge, paired)
+    directory = Path(paired["lanes"]["claude"]).parent
+    held = threading.Event()
+
+    def hold():
+        with lock(directory / "setup.lock"):
+            held.set()
+            time.sleep(0.3)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait()
+    flags = supervision._wake_flags(bridge.home, directory, "claude")
+    holder.join()
+    assert flags["present"]
 
 
 def blocking_an_idle_claim(bridge, paired, monkeypatch):

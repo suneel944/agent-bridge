@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx2
@@ -171,6 +172,7 @@ def test_stop_ends_a_recorded_session_and_keeps_its_claims(
                 "activity": "working",
                 "session_pid": child.pid,
                 "session_ticks": process.start_ticks(child.pid),
+                "session_started": time.time(),
             },
         )
         message = bridge.stop(repo, "claude")
@@ -180,6 +182,7 @@ def test_stop_ends_a_recorded_session_and_keeps_its_claims(
         state = json.loads((directory / "claude-activity.json").read_text())
         assert state["activity"] == "stopped"
         assert "session_pid" not in state
+        assert "session_started" not in state
         assert cli.snapshot(directory)["issues"]["7"]["owner"] == "claude"
     finally:
         if child.poll() is None:

@@ -26,7 +26,18 @@ import sqlite3
 import time
 from pathlib import Path
 
-from agent_parley import dialogs, issues, roster, store, supervision, tables
+from agent_parley import (
+    budgets,
+    dialogs,
+    issues,
+    merges,
+    plan,
+    recovery,
+    roster,
+    store,
+    supervision,
+    tables,
+)
 from agent_parley.state import BridgeError
 
 STORE = "store"
@@ -38,6 +49,7 @@ OVERDUE = "overdue claim"
 OVER_CAP = "claims over cap"
 OFFER = "unanswered offer"
 UNRESOLVED = "unresolved completion"
+DIVERGING = "not converging"
 ACK = "awaiting acknowledgement"
 BOUNCE = "bounced share"
 RETIRED = "shares to a retired lane"
@@ -51,13 +63,20 @@ HELD = "held by a native dialog"
 READY = "ready to retire"
 HOLDING = "holding a refused key"
 FOREIGN = "second session"
+REFUSED = "recovery refused"
+INTEGRATION = "integration unverified"
+ROOT = "root missing"
+ESCALATED = "escalated plan revision"
+PROPOSED = "plan revisions pending"
+RUN_BUDGET = "run budget exhausted"
+RUN_UNMETERED = "run budget unmetered"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
 
 DIALOG = "busy:input"
 RETRY = "busy:repeat"
-APPROVAL = "busy:approval"
+BUSY_APPROVAL = "busy:approval"
 ATTENTION = "manual attention required"
 PAUSED = "paused"
 
@@ -66,7 +85,7 @@ WAKE_DETAILS = {
     RETRY: (
         "wake refused because the previous accepted wake produced no checkpoint"
     ),
-    APPROVAL: (
+    BUSY_APPROVAL: (
         "wake refused because the client is waiting for a native approval"
     ),
     ATTENTION: "wake requires operator attention",
@@ -229,6 +248,21 @@ def _recorded(value: str | None, now: float) -> float:
         return now
 
 
+def _age(value: object, now: float) -> int:
+    """Measures whole seconds since an instant recorded as Unix seconds.
+
+    Args:
+        value: Unix seconds a state file recorded, or anything unreadable.
+        now: Unix time the age is measured against.
+
+    Returns:
+        The non-negative age, or zero when no readable instant is recorded.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return 0
+    return max(0, int(now - value))
+
+
 def _listed(paths: list[str]) -> str:
     """Names the first few changed paths and counts the rest."""
     shown = ", ".join(paths[:3])
@@ -284,7 +318,8 @@ def _cap_rows(
     Every path that moves ownership to a lane refuses it past the cap, but a
     ledger written before a path was capped, or a cap lowered after claims
     were taken, can still hold more. Nothing moves them automatically, so the
-    excess is named for the operator to release or offer.
+    excess is named for the operator to release or offer. A delivered claim
+    does not count, as it does not where the cap is enforced.
 
     Args:
         record: One participant record from the status reading.
@@ -297,7 +332,11 @@ def _cap_rows(
         One row counting the claims past the cap and naming the newest-numbered
         of them as the one to release, or no row within the cap.
     """
-    held = [claim["issue"] for claim in record["claims"]]
+    held = [
+        claim["issue"]
+        for claim in record["claims"]
+        if not claim.get("delivered")
+    ]
     if len(held) <= cap:
         return []
     excess = len(held) - cap
@@ -409,6 +448,43 @@ def _unresolved_rows(
     ]
 
 
+def _diverging_rows(
+    record: dict, name: str, repo: str, root: str
+) -> list[dict]:
+    """Reports each claim whose convergence account escalated.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+
+    Returns:
+        One row per claim whose repeated verified failures outlasted the
+        request to change approach. The holder keeps the claim; any handoff
+        or reassignment is the operator's or the holder's explicit act.
+    """
+    rows = []
+    for claim in record["claims"]:
+        shown = claim.get("convergence") or {}
+        if shown.get("stage") != "escalated":
+            continue
+        rows.append(
+            _row(
+                DIVERGING,
+                f"issue #{claim['issue']}: {shown['failures']} failing "
+                f"verification results, signature {shown['signature']} "
+                f"x{shown['repeats']}, no verified improvement for "
+                f"{shown['since_milestone_seconds']}s",
+                f"agent-parley issue show {claim['issue']} {repo}",
+                int(shown["since_milestone_seconds"]),
+                name,
+                root,
+            )
+        )
+    return rows
+
+
 def _ack_rows(
     record: dict,
     name: str,
@@ -499,8 +575,12 @@ def _lane_rows(
         reported with the lanes it refused and how long it has been quiet,
         because the refused lane saw the refusal and nobody else did. A
         second client sending hooks under the lane's identity is named with
-        its process while it lasts, because its events are ignored. A lane
-        that retired reports only the worktree it kept,
+        its process while it lasts, because its events are ignored. A quiet
+        lane is inactive only while it owes work, meaning a claim it has not
+        delivered, or while something recorded keeps it from its next turn.
+        A lane that delivered everything it holds is at rest, and waking it
+        spends a turn on nothing. A lane that retired reports only the
+        worktree it kept,
         because its quiet is the state the operator asked for and every
         other remedy here would wake a lane that has given its work back.
     """
@@ -601,7 +681,14 @@ def _lane_rows(
                 actor,
             )
         )
-    elif quiet and availability["process_alive"]:
+    elif (
+        quiet
+        and availability["process_alive"]
+        and (
+            _blocked(record)
+            or any(not claim.get("delivered") for claim in record["claims"])
+        )
+    ):
         command, actor = _remedy(name, repo, record, waking)
         rows.append(
             _row(
@@ -622,6 +709,7 @@ def _lane_rows(
         _retire_rows(record, name, repo, root, config["orphan_retire_after"])
     )
     rows.extend(_unresolved_rows(record, name, repo, root, now))
+    rows.extend(_diverging_rows(record, name, repo, root))
     rows.extend(_ack_rows(record, name, repo, root, ack_after, waking))
     refused = (record.get("mail") or {}).get("refused") or []
     if quiet and refused:
@@ -839,6 +927,237 @@ def _retired_rows(home: Path, project: dict) -> list[dict]:
     return rows
 
 
+def _refused_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Derives one row per issue whose approved live recovery was refused.
+
+    The service retries an approved recovery on every poll and records why
+    the last attempt could not proceed. The row lasts while the refused
+    claim is still the issue's current claim, so a release, a handoff or a
+    completed recovery clears it.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the refusal ages are measured against.
+
+    Returns:
+        Zero or more rows, one per refused issue, on the owning lane.
+    """
+    rows = []
+    with contextlib.suppress(OSError, ValueError):
+        ledger = issues.snapshot(directory)["issues"]
+        for number, record in ledger.items():
+            refused = recovery.refusal(directory, number)
+            if not refused or not record.get("claim_id"):
+                continue
+            if refused.get("claim_id") != record["claim_id"]:
+                continue
+            rows.append(
+                _row(
+                    REFUSED,
+                    f"issue #{number}: approved recovery refused: "
+                    f"{refused.get('reason', '')}",
+                    "clear what the reason names in the owner's lane; the "
+                    "service retries the recovery on every poll",
+                    _age(refused.get("refused_at"), now),
+                    str(record.get("owner") or ""),
+                    root,
+                )
+            )
+    return rows
+
+
+def _integration_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports the integration the project's base has not verified.
+
+    The record is one per project, so this is the single escalation an
+    unverified base raises, on the lane that may repair it and with the
+    command that moves it on. A conflict whose merge was aborted leaves the
+    base as verified before the attempt, so it raises no row here; its claim
+    carries the repair state instead.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key, which is the base checkout's path.
+        now: Unix time the record's age is measured against.
+
+    Returns:
+        One row while the base carries an unverified integration, or none.
+    """
+    try:
+        held = merges.integration_record(directory)
+    except BridgeError as unreadable:
+        return [
+            _row(
+                INTEGRATION,
+                str(unreadable),
+                "inspect the record the detail names",
+                project=root,
+            )
+        ]
+    if held is None:
+        return []
+    with contextlib.suppress(BridgeError, OSError):
+        if not merges.integration_holds(Path(root), held):
+            return []
+    owner = merges.integration_owner(directory, held)
+    result = held["result"][:12] or "an unfinished merge"
+    return [
+        _row(
+            INTEGRATION,
+            f"{held['kind']} at {result}, attempt {held['attempt']} of "
+            f"{held['limit']}: {held['detail'] or 'no gate result recorded'}",
+            merges.integration_remedy(Path(root), held, owner),
+            _age(held.get("recorded_at"), now),
+            owner or str(held["lane"]),
+            root,
+        )
+    ]
+
+
+def _root_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports a project whose root checkout is gone, naming the lanes kept.
+
+    The supervisor retires every lane one interval after the root goes
+    missing, except a lane whose session process is still alive or whose
+    activity record cannot be read. Those lanes keep the project out of
+    retirement until their sessions end, so the row names them.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the absence is measured against.
+
+    Returns:
+        One row while the supervisor records the root as missing, or none.
+    """
+    try:
+        recorded = json.loads(
+            (directory / supervision.ROOT_PUBLICATION).read_text()
+        )
+    except (OSError, ValueError):
+        return []
+    if not isinstance(recorded, dict) or recorded.get("retired"):
+        return []
+    live = [str(name) for name in recorded.get("live") or []]
+    detail = (
+        f"project root is gone; live lanes kept from retirement: "
+        f"{', '.join(live)}"
+        if live
+        else "project root is gone; lanes retire one interval after it went"
+    )
+    return [
+        _row(
+            ROOT,
+            detail,
+            "restore the root checkout, or end the named sessions so the "
+            "next poll retires them",
+            _age(recorded.get("since"), now),
+            project=root,
+            count=max(len(live), 1),
+        )
+    ]
+
+
+def _plan_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports the plan revisions that wait on the operator.
+
+    A lane's revision that repeats a contradiction is escalated rather than
+    applied, and one outside the envelope is kept pending; neither changes
+    the ledger, so nothing else would bring it to the operator. Each
+    escalated proposal is its own row on the proposing lane, carrying the
+    commands that settle it, and the pending proposals share one row that
+    names the listing. Both are bounded by the proposals the plan retains.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the proposal ages are measured against.
+
+    Returns:
+        One row per escalated proposal and at most one for the pending ones.
+    """
+    try:
+        filed = plan.recorded(directory).get("proposals", {})
+    except (OSError, ValueError):
+        return []
+    retained = list(filed.values())[-plan.MAX_PROPOSALS :]
+    where = f"--repo {root}"
+    rows = [
+        _row(
+            ESCALATED,
+            f"plan proposal {item['id']} is escalated: "
+            + "; ".join(item.get("held", [])),
+            f"agent-parley plan approve {item['id']} {where} or "
+            f"agent-parley plan reject {item['id']} --reason TEXT {where}",
+            _age(item.get("at"), now),
+            str(item.get("by") or ""),
+            root,
+        )
+        for item in retained
+        if item.get("status") == plan.ESCALATED
+    ]
+    pending = [item for item in retained if item.get("status") == plan.PENDING]
+    if pending:
+        rows.append(
+            _row(
+                PROPOSED,
+                f"{len(pending)} plan proposals outside the revision "
+                "envelope await the operator",
+                f"agent-parley plan proposals {where}",
+                max(_age(item.get("at"), now) for item in pending),
+                project=root,
+                count=len(pending),
+            )
+        )
+    return rows
+
+
+def _run_rows(
+    directory: Path, manifest: dict, root: str, now: float
+) -> list[dict]:
+    """Reports an exhausted run budget and every lane it cannot meter.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Project manifest.
+        root: Canonical project key.
+        now: Unix time the exhaustion's age is measured against.
+
+    Returns:
+        One row while the run budget is exhausted; otherwise one row per
+        lane refused because its use cannot be metered, or none.
+    """
+    stopped = budgets.halted(directory, manifest)
+    if not stopped:
+        return [
+            _row(
+                RUN_UNMETERED,
+                f"{name} cannot be metered: no readable token records while "
+                "a token limit is enforced, or a live session not started by "
+                "agent-parley run while an hours limit is; no wake, dispatch "
+                "or retry starts for it",
+                f"agent-parley budget enforce --tokens 0 --hours 0 --repo "
+                f"{root} (or relaunch the lane with agent-parley run on a "
+                "provider whose transcripts Parley reads)",
+                participant=name,
+                project=root,
+            )
+            for name in budgets.unmetered(directory, manifest)
+        ]
+    return [
+        _row(
+            RUN_BUDGET,
+            f"{stopped['cause']}; no wake, dispatch, retry or launch starts",
+            f"agent-parley budget resume --repo {root} (add --reset to start "
+            "a new accounting period, or raise the limit with agent-parley "
+            "budget enforce)",
+            _age(stopped.get("at"), now),
+            project=root,
+        )
+    ]
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -904,6 +1223,11 @@ def derive(
         aged.extend(_offer_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
         aged.extend(_retired_rows(home, project))
+        aged.extend(_refused_rows(directory, project["root"], stamp))
+        aged.extend(_integration_rows(directory, project["root"], stamp))
+        aged.extend(_root_rows(directory, project["root"], stamp))
+        aged.extend(_plan_rows(directory, project["root"], stamp))
+        aged.extend(_run_rows(directory, data, project["root"], stamp))
     aged.sort(key=lambda row: -(row["seconds"] or 0))
     return rows + aged
 

@@ -44,6 +44,8 @@ class Event(StrEnum):
     INBOUND_LOCKED = "inbound_locked"
     NATIVE_DIALOG = "native_dialog"
     IDLE_BLOCKER = "idle_blocker"
+    NON_CONVERGENCE = "non_convergence"
+    RUN_BUDGET_EXHAUSTED = "run_budget_exhausted"
 
 
 TITLES: dict[str, str] = {
@@ -55,6 +57,8 @@ TITLES: dict[str, str] = {
     Event.INBOUND_LOCKED: "Inbound status queries are locked",
     Event.NATIVE_DIALOG: "A lane is held by a native dialog",
     Event.IDLE_BLOCKER: "Other issues wait on an idle claim",
+    Event.NON_CONVERGENCE: "An issue is not converging",
+    Event.RUN_BUDGET_EXHAUSTED: "The enforced run budget is exhausted",
 }
 
 KEY_FIELDS: dict[str, tuple[str, ...]] = {
@@ -66,6 +70,8 @@ KEY_FIELDS: dict[str, tuple[str, ...]] = {
     Event.INBOUND_LOCKED: ("detail",),
     Event.NATIVE_DIALOG: ("dialog", "detail"),
     Event.IDLE_BLOCKER: ("issue", "claim"),
+    Event.NON_CONVERGENCE: ("issue", "claim", "milestone"),
+    Event.RUN_BUDGET_EXHAUSTED: ("since",),
 }
 
 REFUSALS = frozenset({"branch_drift", "branch_switch"})
