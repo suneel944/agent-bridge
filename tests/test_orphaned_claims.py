@@ -1356,6 +1356,24 @@ def test_the_notice_is_recorded_once_for_one_orphaning(bridge, repo, paired):
     assert len(inbox(bridge, paired, "codex")) == 1
 
 
+def test_the_notice_skips_lanes_that_cannot_take_the_work(bridge, repo, paired):
+    registered(bridge, paired)
+    bridge.add_participant(repo, "spare", "codex")
+    store.register(bridge.home, paired["root"], "spare")
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    killed(directory, "claude", STALLED + 100)
+    killed(directory, "spare", STALLED + 100)
+    running(directory, "codex")
+
+    supervision.poll(bridge.home, directory)
+
+    assert issues.snapshot(directory)["issues"]["42"]["orphan"]
+    assert len(inbox(bridge, paired, "codex")) == 1
+    assert not inbox(bridge, paired, "spare")
+
+
 def test_a_live_owner_is_never_taken_from(bridge, repo, paired):
     lane = Path(paired["lanes"]["claude"])
     peer = Path(paired["lanes"]["codex"])

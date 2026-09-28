@@ -425,8 +425,10 @@ the dead session, and the next session the lane records clears it.
 The same poll marks the claims of a lane whose state is `dead`: a session
 process gone, or a clean `SessionEnd` with no process left to check, past the
 stall threshold. It writes an orphan marker on each of
-its ledger records and sending every other lane one notice that names those
-issues and the reservations the dead lane still holds. The marker is an
+its ledger records and sending one notice that names those issues and the
+reservations the dead lane still holds to every other lane that could take
+them; a lane that is itself dead, reclaimed or retired gets no notice. The
+marker is an
 observation: the issue keeps its owner and the reservations keep their holder
 until a peer records `issue claim --take-orphaned`, which writes a `take`
 transition naming the previous owner and the reason and then releases that
