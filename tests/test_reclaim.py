@@ -637,6 +637,26 @@ def test_a_worktree_with_unmerged_commits_is_kept(bridge, repo, idle):
     assert path.exists()
 
 
+def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-4")
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text(".env\n")
+    (path / ".env").write_text("SECRET=1\n")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    kept = worktree_of(swept, path)
+    assert kept["reason"] == reclaim.IGNORED
+    assert kept["paths"] == [".env"]
+    assert kept["reclaim"] is False
+    assert path.exists()
+    assert (path / ".env").exists()
+
+
 def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
     path = made(repo, tmp_path, "operator-wt")
     aged(path)
