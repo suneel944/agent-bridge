@@ -7,6 +7,7 @@ moved method reads. This module never imports `cli` at import time.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -72,6 +73,10 @@ class ClaimsMixin(ReportsMixin):
     ) -> dict:
         """Records operator approval for one live claim recovery.
 
+        A launched lane carries its coordination credential in
+        `unattended.LANE_TOKEN`, and every process it starts inherits it, so
+        a lane that changes directory to the base checkout is still refused.
+
         Args:
             repo: Project base checkout, never a participant lane.
             number: Repository issue number whose claim may be stopped.
@@ -81,17 +86,24 @@ class ClaimsMixin(ReportsMixin):
             Approval bound to the current owner, claim and native session.
 
         Raises:
-            BridgeError: If invoked from a lane or no exact live claim exists.
+            BridgeError: If invoked from a lane, with a lane's coordination
+                credential, or no exact live claim exists.
         """
+        from agent_parley import unattended
         from agent_parley.cli import parse_issue, roster
 
         _, directory = self.project(repo)
         data = roster.read(directory)
         root = Path(data["root"]).resolve()
-        if repo.resolve() != root or roster.caller_lane(data):
+        if (
+            repo.resolve() != root
+            or roster.caller_lane(data)
+            or os.environ.get(unattended.LANE_TOKEN)
+        ):
             raise BridgeError(
-                "Live recovery approval must be recorded from the project "
-                "base checkout."
+                "Live recovery approval must be recorded from an operator "
+                "shell in the project base checkout, never from a process "
+                f"holding a lane's {unattended.LANE_TOKEN}."
             )
         from agent_parley import recovery
 

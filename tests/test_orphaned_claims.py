@@ -1616,3 +1616,18 @@ def test_a_reclaim_of_an_own_orphan_keeps_the_handoff(bridge, repo, paired):
     assert reclaimed["handoff"] == accepted["handoff"]
     assert reclaimed["claim_id"] != accepted["claim_id"]
     assert "orphan" not in reclaimed
+
+
+def test_a_lane_token_in_the_base_checkout_cannot_approve_recovery(
+    bridge, repo, paired, monkeypatch
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    monkeypatch.setenv("AGENT_PARLEY_TOKEN", "lane-token")
+
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        bridge.authorize_recovery(repo, "42", "stop the peer's claim")
+
+    assert not list(directory.rglob("issue-42-*-quiesce.json"))
+    assert issues.snapshot(directory)["issues"]["42"]["owner"] == "claude"
