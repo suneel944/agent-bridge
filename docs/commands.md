@@ -82,7 +82,7 @@ on standard output and export to a file.
 | `participant resume NAME` | Let a paused lane act again. |
 | `participant stop NAME` | End a lane's session from the base checkout; keep its claims. |
 | `participant restart NAME` | Start a crashed, wedged or stopped lane again; keep its uncommitted work. `--task` is the new session's opening instruction. |
-| `participant merge NAME` | Run the configured gate and merge; `--preview` only inspects. `--all` integrates every lane reported ready in recorded dependency order and `--group NAME` one group of the applied plan, each stopping at the first refusal or failure. A failed or interrupted integration is recorded and holds further merges until the lane holding its issue retries it; `--renew-recovery` grants a recorded integration three more attempts, and `participant merge --verify-recovery` (no lane name, base checkout only) runs the recorded gate on the base as it stands and clears the record only if it passes and leaves the tree clean. |
+| `participant merge NAME` | Run the configured gate and merge; `--preview` only inspects. A lane holding several claims merges its only ready one; `--issue N` names the claim when several are ready. `--all` integrates every lane reported ready in recorded dependency order and `--group NAME` one group of the applied plan, each stopping at the first refusal or failure. A failed or interrupted integration is recorded and holds further merges until the lane holding its issue retries it; `--renew-recovery` grants a recorded integration three more attempts, and `participant merge --verify-recovery` (no lane name, base checkout only) runs the recorded gate on the base as it stands and clears the record only if it passes and leaves the tree clean. |
 | `participant pr NAME` | Push the lane branch and open or locate its pull request. |
 | `participant budget NAME` | Show or set the lane's advisory `--tokens`, `--calls` and `--hours` limits; `0` removes one. Crossing a limit marks the lane and stops nothing. |
 | `... --all --provider N --outcome S --drifted --idle --over-budget` | Select several lanes for one `say`, `issue assign`, `participant stop/pause/resume/pr/merge`; one plan and one confirmation, `--yes` to skip it. |
@@ -115,7 +115,7 @@ on standard output and export to a file.
 | `verify set COMMAND` | Set that command; an empty string removes it. |
 | `unattended show` | Show the unattended integration policy, or that integration is operator-only. |
 | `unattended set ISSUE ... --target BRANCH` | Authorize unattended integration of those issues into `BRANCH`; no issues removes the policy. Base checkout only. |
-| `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal. Base checkout only. |
+| `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal; `--issue N` names the claim when the lane holds several ready ones. Base checkout only. |
 | `init show` | Show the command every new lane runs before it starts. |
 | `init set COMMAND` | Set that command; an empty string removes it. |
 | `mail show ID` | Print one message this lane sent or received; `--full` adds the whole attachment. |

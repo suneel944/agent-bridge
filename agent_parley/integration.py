@@ -32,7 +32,9 @@ MERGE_BUSY = "Another merge into the base checkout is running; retry later."
 class IntegrationMixin(MailMixin):
     """Lane merges, bulk integration order, and operator decisions."""
 
-    def merge(self, repo: Path, name: str, renew: bool = False) -> str:
+    def merge(
+        self, repo: Path, name: str, renew: bool = False, issue: str = ""
+    ) -> str:
         """Merges one participant's bridge branch into the base checkout.
 
         Merges serialize on `merge.lock`. The shared setup lock is held only
@@ -47,6 +49,8 @@ class IntegrationMixin(MailMixin):
             renew: Whether the operator grants the recorded unverified
                 integration a fresh set of attempts. Accepted only from the
                 base checkout, never from an assigned worktree.
+            issue: Claimed issue whose work is merged, or empty to take the
+                lane's only ready claim.
 
         Returns:
             An account of what was merged.
@@ -76,7 +80,9 @@ class IntegrationMixin(MailMixin):
                     )
             if renew:
                 self._from_base(repo, root, data, "Recovery attempts are")
-            return self._integrate_lane(root, directory, data, name, renew)
+            return self._integrate_lane(
+                root, directory, data, name, renew, issue=issue
+            )
 
     def _from_base(
         self, repo: Path, root: Path, data: dict, subject: str
@@ -315,6 +321,7 @@ class IntegrationMixin(MailMixin):
         renew: bool = False,
         *,
         expected: tuple[str, str] | None = None,
+        issue: str = "",
     ) -> str:
         """Runs the gate and merges one lane while its session is excluded.
 
@@ -339,6 +346,8 @@ class IntegrationMixin(MailMixin):
             expected: Claim generation and ready source commit an earlier
                 authorization was bound to, rechecked under the session
                 lock; None when the caller bound none.
+            issue: Claimed issue whose work is merged, or empty to take the
+                lane's only ready claim.
 
         Returns:
             An account of what was merged.
@@ -351,11 +360,11 @@ class IntegrationMixin(MailMixin):
                 not continue, or if the merge cannot complete unattended.
         """
         from agent_parley.cli import (
-            exact_claim,
             git,
             lifecycle,
             lock,
             merge_branch,
+            merge_claim,
             merges,
             metrics,
             roster,
@@ -375,7 +384,7 @@ class IntegrationMixin(MailMixin):
                     "nothing was merged. Retry the merge."
                 )
             self._require_approval(directory, data, name, "merge")
-            claim = exact_claim(directory, name)
+            claim = merge_claim(directory, name, issue)
             held = self._held_integration(root, directory, name, claim, renew)
             source_commit = ""
             if claim["issue"] is not None:

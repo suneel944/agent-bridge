@@ -219,7 +219,9 @@ no peer reservation covers a changed path. The merge is the
 `participant merge` step with the same locks, approvals and gate, and every
 attempt records a decision in the lane's report log. It never pushes, never
 repairs an unverified integration, and the service never runs it on its own:
-it is an operator command. The full policy is in
+it is an operator command. A lane holding several claims integrates its only
+ready one; when several are ready, name one with `--issue N`, which
+`participant merge NAME` accepts too. The full policy is in
 [Operations](operations.md#requiring-a-recorded-approval).
 
 ## Revising the plan
