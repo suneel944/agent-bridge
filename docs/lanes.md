@@ -47,7 +47,10 @@ runs only when a lane is created, never on a resume, and `participant add` runs
 it as well. `AGENT_PARLEY_BASE` names the base checkout while it runs, so the
 command can copy a file Git does not track. A non-zero exit refuses the launch
 and reports the exit status with the tail of the output; the worktree is left in
-place so you can see what happened.
+place so you can see what happened. Like `verify set`, `init set` runs only from
+an operator shell in the base checkout: it refuses inside an assigned worktree
+and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
+a command every later lane runs. `init show` stays readable from a lane.
 
 ## Steering a lane
 
