@@ -498,6 +498,26 @@ def test_a_merge_timeout_before_any_change_burns_no_attempt(
     assert after["result"] == before["result"]
 
 
+def test_a_gate_timeout_after_the_merge_is_recorded_unverified(
+    bridge, repo, paired, monkeypatch
+):
+    hang = (
+        "import pathlib, time; "
+        "pathlib.Path('slow.txt').exists() and time.sleep(30)"
+    )
+    bridge.verification(repo, shlex.join([sys.executable, "-c", hang]))
+    ready(bridge, paired, "claude", "42", {"slow.txt": "slow\n"})
+    monkeypatch.setattr("agent_parley.worktrees.VERIFY_TIMEOUT", 1)
+
+    with pytest.raises(BridgeError, match="timed out"):
+        bridge.merge(repo, "claude")
+
+    held = merges.integration_record(bridge.project(repo)[1])
+    assert held["kind"] == merges.GATE_FAILED
+    assert held["result"] == git(repo, "rev-parse", "HEAD")
+    assert execution(bridge, repo, "42")["state"] == lifecycle.RECOVERY
+
+
 def test_a_first_merge_timeout_leaves_no_record(
     bridge, repo, paired, monkeypatch
 ):

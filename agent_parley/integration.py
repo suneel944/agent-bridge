@@ -55,10 +55,11 @@ class IntegrationMixin(MailMixin):
             BridgeError: If the lane drifted, if the participant holds a
                 running session, if the project requires an operator approval
                 the lane's current ready report does not have, if the
-                repository's verification command fails, if the base carries
-                an unverified integration this lane may not repair or whose
-                attempts are used, or if the merge cannot complete unattended.
-            subprocess.TimeoutExpired: If verification exceeds its timeout.
+                repository's verification command fails or times out, if the
+                base carries an unverified integration this lane may not
+                repair or whose attempts are used, or if the merge cannot
+                complete unattended.
+            subprocess.TimeoutExpired: If a Git query exceeds its timeout.
         """
         from agent_parley.cli import lock, roster
 
@@ -128,9 +129,9 @@ class IntegrationMixin(MailMixin):
         Raises:
             BridgeError: If run from an assigned worktree, if the base holds
                 a merge in progress or uncommitted changes, if the gate
-                fails, or if the gate moves HEAD or changes the tree. The
-                record stands in every case.
-            subprocess.TimeoutExpired: If verification exceeds its timeout.
+                fails or times out, or if the gate moves HEAD or changes the
+                tree. The record stands in every case.
+            subprocess.TimeoutExpired: If a Git query exceeds its timeout.
         """
         from agent_parley.cli import git, lock, merges, roster, verify_base
 
@@ -921,7 +922,7 @@ class IntegrationMixin(MailMixin):
                 continue
             try:
                 outcome = self._integrate_lane(root, directory, data, name)
-            except BridgeError as failure:
+            except (BridgeError, subprocess.TimeoutExpired) as failure:
                 stopped = name
                 report.append(f"- {name}: stopped. {failure}")
                 continue
