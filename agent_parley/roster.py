@@ -47,6 +47,8 @@ SCHEMES = ("participant", "lane")
 VARIABLE = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 SECRET_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL")
 OPERATOR = "operator"
+LANE_TOKEN = "AGENT_PARLEY_TOKEN"
+"""Environment variable a launched lane and its children carry."""
 RESERVED = frozenset(
     {
         "bridge",
@@ -1368,6 +1370,25 @@ def caller_lane(manifest: dict) -> str | None:
         if here == lane or lane in here.parents:
             return name
     return None
+
+
+def from_lane(manifest: dict) -> bool:
+    """Reports whether a lane runs the command, by directory or credential.
+
+    Operator-only commands refuse when this is true. The working directory
+    alone misses a lane that changes directory to the base checkout, but a
+    launched lane carries `LANE_TOKEN` and every process it starts inherits
+    it. Like the directory check, this is the command-line boundary between
+    the operator and the lanes, not an operating-system one.
+
+    Args:
+        manifest: Manifest using the participant roster layout.
+
+    Returns:
+        True when the working directory is inside a lane or the environment
+        holds a lane's coordination credential.
+    """
+    return caller_lane(manifest) is not None or bool(os.environ.get(LANE_TOKEN))
 
 
 def describe(manifest: dict) -> str:

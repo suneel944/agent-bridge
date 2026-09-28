@@ -38,7 +38,6 @@ dispatch from the supervision service is deliberately not wired here.
 
 from __future__ import annotations
 
-import os
 import shlex
 import sqlite3
 import subprocess
@@ -118,11 +117,7 @@ def operator_only(repo: Path, root: Path, manifest: dict, action: str) -> None:
         Path(lane["lane"]).resolve()
         for lane in manifest["participants"].values()
     }
-    if (
-        here in lanes
-        or roster.caller_lane(manifest)
-        or os.environ.get(LANE_TOKEN)
-    ):
+    if here in lanes or roster.from_lane(manifest):
         raise BridgeError(
             f"{action} from an operator shell in the base checkout at "
             f"{root}, never from an assigned worktree or a process holding "
