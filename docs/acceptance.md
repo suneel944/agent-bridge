@@ -176,8 +176,9 @@ watch a lane over time are decided from the frames, because a lane that
 stalled for an hour and recovered leaves nothing behind at the end.
 
 **Every backlog issue reported.** Each seeded issue must end at `ready`
-or `blocked`, and a `blocked` ending must carry a reason: the summary
-the lane filed with the report, read from the lane's durable report log.
+or `blocked`, and a `blocked` ending must carry a reason: the remaining
+work the lane filed with the report, read from the same record in the
+lane's durable report log.
 This proves the loop closes without an operator: lanes pick up work,
 finish it or say why they cannot, and nothing is left silently claimed.
 
@@ -187,8 +188,9 @@ command that clears it. A row with no command, or one that waits on a
 lane, is a situation the service noticed and could not route.
 
 **No worktree outlived its claim.** The product keeps one worktree per
-lane and none per issue, so a lane that holds no claim when the run ends
-must leave its worktree clean. Uncommitted or untracked changes there, or
+lane and none per issue, so a lane that holds no undelivered claim when
+the run ends must leave its worktree clean. A claim already reported
+ready or verified does not keep the worktree. Uncommitted or untracked changes there, or
 a worktree Git cannot read, are work no claim owns. Stranded work was the
 reclamation gap the audit found, and it accumulates silently across a
 long run.
@@ -198,15 +200,19 @@ any hook lock expiry in `server.log`. Both are faults the operator never
 sees at the time and both cost a lane its turn. The service rewrites its
 log in place at its bound and moves the oldest lines to `server.log.1`,
 so the verdict reads both files and counts every entry stamped at or
-after the run's start, not the bytes past an offset.
+after the run's start, not the bytes past an offset. `server.log.1` is
+bounded too, so when the oldest stamped line in both files is later than
+the run's start, the log no longer covers the run and the condition
+fails as unreadable.
 
-**No lane idled on an open claim.** No frame may show a lane reading as
-stalled while it holds a claim, and no lane may leave one claim unworked
-for more than the default `claim_idle_after` of 3,600 seconds, summed
-over the run. Between two frames that both show the claim, the growth of the
-lane's `idle_seconds` reading counts as unworked time, and the whole gap
-counts when the lane's session process was not alive at its start. The
-stalled reading needs unanswered mail, so this total is what catches a
+**No lane idled on an open claim.** Delivered claims are skipped. No
+frame may show a lane reading as stalled while it holds an undelivered
+claim, and no frame may show such a claim whose `last_event_seconds` is
+past the default `claim_idle_after` of 3,600 seconds. That reading is
+the age of the claim's own last generation start or report, the same
+one the service's idle-claim rule uses. It grows whether the holder is
+idle, woken and not working, or dead, so it needs no process reading.
+The stalled reading needs unanswered mail, so the age is what catches a
 lane idle on an empty inbox or a claim whose holder died. A lane idle
 with work it owns is the trust breach the audit opened this milestone on:
 the issue is not being worked, no peer can take it, and the status line

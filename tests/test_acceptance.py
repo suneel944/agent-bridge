@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -55,6 +56,20 @@ sys.exit(1)
 """
 BLOCKED = SHIM.replace(
     '"action": "ready",', '"action": "blocked", "report_id": "r1",'
+)
+HOLDING = SHIM.replace(
+    'elif command[0] == "problems":',
+    'elif command[0] == "status":\n'
+    "    lane = {{\n"
+    '        "participant": "claude",\n'
+    '        "claims": [{{"issue": 1, "delivered": DELIVERED}}],\n'
+    "    }}\n"
+    "    print(\n"
+    "        json.dumps(\n"
+    '            {{"projects": [{{"root": "ROOT", "participants": [lane]}}]}}\n'
+    "        )\n"
+    "    )\n"
+    'elif command[0] == "problems":',
 )
 NEIGHBOUR = SHIM.replace(
     '{{"problems": []}}',
@@ -168,6 +183,34 @@ def test_a_dirty_lane_worktree_fails_the_run(tmp_path):
     assert condition["detail"] == [str(lane)]
 
 
+@pytest.mark.parametrize(("delivered", "stranded"), [(True, 1), (False, 0)])
+def test_only_an_undelivered_claim_keeps_a_dirty_worktree(
+    tmp_path, delivered, stranded
+):
+    home, repo = estate(tmp_path)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(
+        [*git, "commit", "--allow-empty", "-m", "seed"], cwd=repo, check=True
+    )
+    lane = tmp_path / "claude"
+    subprocess.run(
+        [*git, "worktree", "add", "-b", "claude", str(lane)],
+        cwd=repo,
+        check=True,
+    )
+    (lane / "left.txt").write_text("unfinished\n")
+    frames = repo / "acceptance" / "frames.jsonl"
+    record(frames, [lane_frame(False, [], 0, True)])
+    template = HOLDING.replace("ROOT", str(repo)).replace(
+        "DELIVERED", str(delivered)
+    )
+    decided = acceptance.verdict(
+        shim(tmp_path, template), home, repo, LANES, 1, frames
+    )
+    condition = decided["conditions"]["no worktree outlived its claim"]
+    assert len(condition["detail"]) == stranded
+
+
 def test_seeding_writes_one_task_per_backlog_issue(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-identity"))
     acceptance.workspace(tmp_path, 3)
@@ -207,39 +250,57 @@ def test_an_idle_lane_holding_a_claim_fails_the_run(tmp_path):
     assert decided["passed"] is False
 
 
-def held(at, idle_seconds, process_alive=True):
+def held(
+    age, process_alive=True, delivered=False, idle_seconds=0, stalled=False
+):
     """Builds a frame of a lane holding #1 with an empty inbox."""
-    sample = lane_frame(False, [1], 0, process_alive)
-    sample["at"] = at
-    sample["status"]["participants"][0]["idle_seconds"] = idle_seconds
+    sample = lane_frame(stalled, [1], 0, process_alive)
+    lane = sample["status"]["participants"][0]
+    lane["idle_seconds"] = idle_seconds
+    lane["claims"][0].update(last_event_seconds=age, delivered=delivered)
     return sample
 
 
 def test_a_lane_idle_on_a_claim_with_no_mail_fails_the_run():
     limit = acceptance.IDLE_CLAIM_SECONDS
-    taken = [
-        held(0.0, 0),
-        held(limit / 2, limit / 2),
-        held(limit + 2, limit + 2),
-    ]
+    taken = [held(0), held(limit / 2), held(limit + 1)]
     assert acceptance._idle_claims(taken) == ["claude#1"]
 
 
 def test_a_claim_held_by_a_dead_process_fails_the_run():
     limit = acceptance.IDLE_CLAIM_SECONDS
-    taken = [held(0.0, 0, False), held(limit + 1, 0, False)]
+    taken = [held(60, False), held(limit + 1, False)]
     assert acceptance._idle_claims(taken) == ["claude#1"]
 
 
-def test_a_lane_working_its_claim_or_briefly_down_passes():
+def test_a_lane_woken_often_that_never_works_its_claim_fails_the_run():
     limit = acceptance.IDLE_CLAIM_SECONDS
     taken = [
-        held(0.0, 0),
-        held(limit, 60),
-        held(limit + 60, 60, False),
-        held(limit + 120, 60),
-        held(2 * limit, 120),
+        held(limit / 2, idle_seconds=240),
+        held(limit / 2 + 300, idle_seconds=30),
+        held(limit + 1, idle_seconds=20),
     ]
+    assert acceptance._idle_claims(taken) == ["claude#1"]
+
+
+def test_an_unknown_process_on_a_fresh_claim_passes():
+    taken = [held(60, None), held(360, None), held(660, None)]
+    assert acceptance._idle_claims(taken) == []
+
+
+def test_a_delivered_claim_never_idles_its_lane():
+    limit = acceptance.IDLE_CLAIM_SECONDS
+    taken = [
+        held(60, delivered=True, idle_seconds=0),
+        held(10 * limit, delivered=True, idle_seconds=10 * limit),
+        held(20 * limit, False, delivered=True, stalled=True),
+    ]
+    assert acceptance._idle_claims(taken) == []
+
+
+def test_a_lane_reporting_on_its_claim_passes():
+    limit = acceptance.IDLE_CLAIM_SECONDS
+    taken = [held(limit - 60), held(30), held(limit - 1), held(0)]
     assert acceptance._idle_claims(taken) == []
 
 
@@ -377,10 +438,15 @@ def test_a_fault_rotated_out_of_the_log_still_fails_the_run(
     )
     before = (home / "server.log").stat().st_size
     acceptance.mark(repo)
+    trim = state.trim_log
     monkeypatch.setattr(
         server,
         "trim_log",
-        lambda path: state.trim_log(path, ceiling=160, records=2),
+        lambda path: (
+            trim(path, ceiling=160, records=2)
+            if path.name == server.LOG_NAME
+            else trim(path)
+        ),
     )
     with (home / "server.log").open("a") as stream:
         with contextlib.redirect_stdout(stream):
@@ -398,13 +464,28 @@ def test_a_fault_rotated_out_of_the_log_still_fails_the_run(
     assert condition["detail"]["broken_pipe"] == 1
 
 
-def test_a_blocked_report_with_no_summary_fails_the_run(tmp_path):
+def test_a_log_trimmed_past_the_run_start_is_unreadable(tmp_path):
+    home, repo = estate(tmp_path)
+    acceptance.mark(repo)
+    later = time.strftime(acceptance.STAMP, time.localtime(time.time() + 60))
+    (home / "server.log.1").write_text(f"{later} ready port 1\n")
+    (home / "server.log").write_text(f"{later} ready port 2\n")
+    assert acceptance._log_faults(home, repo)["readable"] is False
+    frames = repo / "acceptance" / "frames.jsonl"
+    record(frames, [lane_frame(False, [], 0, True)])
+    decided = acceptance.verdict(shim(tmp_path), home, repo, LANES, 1, frames)
+    assert decided["conditions"]["service log is clean"]["passed"] is False
+
+
+def test_a_blocked_report_with_no_remaining_fails_the_run(tmp_path):
     home, repo = estate(tmp_path)
     directory = home / "projects" / "one"
     frames = repo / "acceptance" / "frames.jsonl"
     record(frames, [lane_frame(False, [], 0, True)])
     metrics.record_report(
-        directory, "claude", {"id": "r1", "kind": "report", "summary": ""}
+        directory,
+        "claude",
+        {"id": "r1", "kind": "report", "summary": "stuck", "remaining": ""},
     )
     decided = acceptance.verdict(
         shim(tmp_path, BLOCKED), home, repo, LANES, 1, frames
@@ -414,7 +495,7 @@ def test_a_blocked_report_with_no_summary_fails_the_run(tmp_path):
     assert decided["endings"]["1"]["state"] == "blocked"
 
 
-def test_a_blocked_report_with_a_summary_counts_as_reported(tmp_path):
+def test_a_blocked_report_with_remaining_work_counts_as_reported(tmp_path):
     home, repo = estate(tmp_path)
     directory = home / "projects" / "one"
     frames = repo / "acceptance" / "frames.jsonl"
@@ -422,7 +503,12 @@ def test_a_blocked_report_with_a_summary_counts_as_reported(tmp_path):
     metrics.record_report(
         directory,
         "claude",
-        {"id": "r1", "kind": "report", "summary": "needs a schema decision"},
+        {
+            "id": "r1",
+            "kind": "report",
+            "summary": "stuck",
+            "remaining": "needs a schema decision",
+        },
     )
     decided = acceptance.verdict(
         shim(tmp_path, BLOCKED), home, repo, LANES, 1, frames

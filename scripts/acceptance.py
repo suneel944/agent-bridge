@@ -698,10 +698,12 @@ def _reports(cli: str, home: Path, repo: Path, issues: int) -> dict:
         blocked report leaves the report as the ending. An issue nobody
         reported on maps to an empty state, which is what fails the run.
 
-    The reason is the summary the lane filed, read from the lane's own
-    durable report log by the report's identifier. The history line
-    itself only restates the state, so it would give every ending a
-    reason. A report the log no longer holds has no reason.
+    The reason is the ``--remaining`` text the lane filed, which is where
+    the run's task prompt tells a blocked lane to say why, read from the
+    lane's own durable report log by the report's identifier. The
+    history line itself only restates the state, and every report must
+    carry a summary, so neither could leave an ending without a reason.
+    A report the log no longer holds has no reason.
     """
     directory = _directory(home, repo)
     filed: dict[str, dict[str, dict]] = {}
@@ -724,7 +726,7 @@ def _reports(cli: str, home: Path, repo: Path, issues: int) -> dict:
                 entry = filed[owner].get(str(event.get("report_id", "")), {})
                 ending = {
                     "state": action,
-                    "reason": str(entry.get("summary", "") or "").strip(),
+                    "reason": str(entry.get("remaining", "") or "").strip(),
                     "owner": owner,
                 }
         endings[str(number)] = ending
@@ -752,7 +754,10 @@ def _log_faults(home: Path, repo: Path) -> dict:
     the entry that printed them, and is counted when that entry was
     stamped in or after the second the run began. Lines above the first
     stamp belong to an entry whose first line rotated away; they are
-    counted only when the run recorded no start.
+    counted only when the run recorded no start. The rotated file is
+    bounded too, so a noisy run can drop its own earliest entries; when
+    the oldest stamped entry left is later than the start, part of the
+    run is gone and the log reads as unmeasured rather than clean.
     """
     since = int(
         float(_read(repo / "acceptance" / "start.json").get("at", 0) or 0)
@@ -766,6 +771,7 @@ def _log_faults(home: Path, repo: Path) -> dict:
     except OSError:
         rotated = ""
     counted = not since
+    oldest: float | None = None
     kept: list[str] = []
     for line in [*rotated.splitlines(), *current.splitlines()]:
         try:
@@ -773,12 +779,14 @@ def _log_faults(home: Path, repo: Path) -> dict:
         except ValueError:
             stamp = None
         if stamp is not None:
+            if oldest is None:
+                oldest = stamp.timestamp()
             counted = stamp.timestamp() >= since
         if counted:
             kept.append(line)
     text = "\n".join(kept)
     return {
-        "readable": True,
+        "readable": not (since and oldest is not None and oldest > since),
         "broken_pipe": text.count("BrokenPipeError"),
         "hook_expiry": text.count("retry later") + text.count("expired"),
     }
@@ -790,7 +798,10 @@ def _worktrees(repo: Path, lanes: list[str], holding: set[str]) -> list[str]:
     Args:
         repo: Throwaway project the lanes coordinate over.
         lanes: Lane specifications as ``name:provider[:credentials]``.
-        holding: Lanes that still hold a claim when the run ends.
+        holding: Lanes that still hold a claim not yet delivered when
+            the run ends. A delivered claim stays held until it is
+            integrated, which a run without a forge never does, so it
+            leaves the lane with no work that could explain dirt.
 
     Returns:
         The path of every lane worktree whose lane holds no claim and
@@ -848,50 +859,31 @@ def _idle_claims(taken: list[dict]) -> list[str]:
 
     Returns:
         One entry per lane and issue seen stalled with that claim open,
-        or held without being worked for more than `IDLE_CLAIM_SECONDS`
-        over the run, which is the condition an operator would have had
-        to rescue by hand.
+        or with the claim unadvanced for more than `IDLE_CLAIM_SECONDS`,
+        which is the condition an operator would have had to rescue by
+        hand.
 
     The stalled reading needs unanswered mail, so it never names a lane
-    idle on an empty inbox. Between two frames that both show a lane
-    holding a claim, the growth of the lane's own ``idle_seconds``
-    reading, capped at the gap, is time the claim was not worked. A gap
-    that opens with the lane's session process not alive counts whole,
-    because a lane with no process accrues no idle time of its own.
+    idle on an empty inbox. A claim advances only on evidence bound to
+    it, its generation's start or a report naming it, and the status
+    reading publishes the age of that evidence as ``last_event_seconds``.
+    That age grows the same way whether the holder sits idle, is woken
+    every few minutes and does something else, or has no live process,
+    and it is the reading the product's own ``claim_idle_after`` rule
+    measures. A delivered claim waits on verification and integration,
+    not on its holder, so it is never counted.
     """
     found: set[str] = set()
-    unworked: dict[str, float] = {}
-    for index, record in enumerate(taken):
-        later = taken[index + 1] if index + 1 < len(taken) else {}
-        gap = float(later.get("at", 0) or 0) - float(record.get("at", 0) or 0)
-        following = {
-            lane.get("participant"): lane
-            for lane in (later.get("status") or {}).get("participants") or []
-        }
+    for record in taken:
         for lane in (record.get("status") or {}).get("participants") or []:
             name = str(lane.get("participant", "?"))
-            claims = {str(claim["issue"]) for claim in lane.get("claims") or []}
-            if (lane.get("idle") or {}).get("stalled"):
-                found.update(f"{name}#{number}" for number in claims)
-            after = following.get(lane.get("participant")) or {}
-            kept = claims & {
-                str(claim["issue"]) for claim in after.get("claims") or []
-            }
-            if not kept or gap <= 0:
-                continue
-            if not (lane.get("availability") or {}).get("process_alive"):
-                idle = gap
-            else:
-                grown = float(after.get("idle_seconds", 0) or 0) - float(
-                    lane.get("idle_seconds", 0) or 0
-                )
-                idle = min(gap, max(0.0, grown))
-            for number in kept:
-                key = f"{name}#{number}"
-                unworked[key] = unworked.get(key, 0.0) + idle
-    found.update(
-        key for key, seconds in unworked.items() if seconds > IDLE_CLAIM_SECONDS
-    )
+            stalled = (lane.get("idle") or {}).get("stalled")
+            for claim in lane.get("claims") or []:
+                if claim.get("delivered"):
+                    continue
+                age = claim.get("last_event_seconds")
+                if stalled or (age is not None and age > IDLE_CLAIM_SECONDS):
+                    found.add(f"{name}#{claim['issue']}")
     return sorted(found)
 
 
@@ -1074,7 +1066,7 @@ def verdict(
             "participants"
         )
         or []
-        if lane.get("claims")
+        if any(not claim.get("delivered") for claim in lane.get("claims") or [])
     }
     stranded = _worktrees(repo, lanes, holding)
     counters = lane_counters(home, repo, lanes)
