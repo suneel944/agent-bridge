@@ -2324,11 +2324,13 @@ class Bridge(
     def stop(self, repo: Path, name: str) -> str:
         """Ends one lane's native session from the base checkout.
 
-        The lane is told once that the operator is ending its session, then
-        the recorded session process is signalled exactly as a normal exit
+        The recorded session process is signalled exactly as a normal exit
         signals it and given a bounded time to leave; a process that ignores
         that signal is sent `SIGKILL`, and the session record is cleared only
-        once the process is verified gone. Identity is the recorded
+        once the process is verified gone. No notice is mailed to the lane:
+        the session is gone before it could read one, so the mail would only
+        reach the next session, including the one `restart` launches, as an
+        instruction to end, and would count as backlog. Identity is the recorded
         process ID together with its kernel creation time, checked here and
         again inside the platform's terminate step, so a recycled process ID
         is never signalled. The command-line check used to recognize the
@@ -2382,8 +2384,6 @@ class Bridge(
                 f"{name} has no verified running session to stop. "
                 f"{self._holdings(directory, name)}"
             )
-        with contextlib.suppress(BridgeError, OSError):
-            self.say(repo, name, "The operator is ending this session.")
         process.ServerProcess(pid, ticks).stop()
         if process.alive(pid, ticks):
             raise BridgeError(

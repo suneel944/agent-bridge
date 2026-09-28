@@ -268,6 +268,57 @@ def test_restart_ends_a_wedged_session_before_launching(
         child.wait(10)
 
 
+def lane_actor(bridge, paired, name):
+    """Registers one lane so operator mail reaches its inbox."""
+    store.initialize(bridge.home)
+    return store.authenticate(
+        bridge.home,
+        store.register(bridge.home, paired["root"], name)["registration_token"],
+    )
+
+
+def unread_bodies(bridge, actor):
+    """Returns the bodies waiting in a lane's inbox."""
+    inbox = store.call(
+        bridge.home, actor, "fetch_inbox", {"include_bodies": True}
+    )
+    return [message.get("body_md", "") for message in inbox["messages"]]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_stopped_or_restarted_lane_reads_no_stale_stop_notice(
+    bridge, repo, paired, monkeypatch, restart
+):
+    directory = Path(paired["lanes"]["claude"]).parent
+    actor = lane_actor(bridge, paired, "claude")
+    captured = capture_launch(bridge, monkeypatch)
+    child = subprocess.Popen([sys.executable, "-c", SLEEPER])
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "waiting for approval",
+                "updated": 1.0,
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        if restart:
+            assert bridge.restart(repo, "claude") == 0
+            assert captured[0][0] == "claude"
+        else:
+            assert "ended from the base checkout" in bridge.stop(repo, "claude")
+        assert child.wait(10) is not None
+        assert not any(
+            "operator is ending" in body
+            for body in unread_bodies(bridge, actor)
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(10)
+
+
 def test_stop_kills_a_session_that_ignores_sigterm(
     bridge, repo, paired, monkeypatch
 ):
