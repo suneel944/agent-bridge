@@ -221,6 +221,32 @@ def closed(record: dict) -> bool:
     )
 
 
+def deadline_notice(record: dict) -> dict:
+    """Returns the deadline notice a record still stands behind.
+
+    A notice names the holder that owned the claim when it breached. It is
+    frozen text, so once that holder releases, completes or loses the claim,
+    or the issue closes on the forge, replaying it would tell the lane to
+    pause for work it no longer holds. Readers therefore see a notice only
+    while its holder still owns an open claim, which also silences notices
+    older ledgers kept after ownership ended.
+
+    Args:
+        record: Published ledger record for one issue, or an empty mapping.
+
+    Returns:
+        The recorded notice, or an empty mapping when it no longer applies.
+    """
+    notice = record.get("deadline_notice") or {}
+    if (
+        notice.get("holder")
+        and notice["holder"] == record.get("owner")
+        and not closed(record)
+    ):
+        return notice
+    return {}
+
+
 def unresolved_completion(record: dict) -> dict:
     """Derives the unresolved-completion escalation a claim reads as.
 

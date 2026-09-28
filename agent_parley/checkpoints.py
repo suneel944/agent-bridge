@@ -27,7 +27,7 @@ from agent_parley import (
     roster,
     store,
 )
-from agent_parley.issues import describe, snapshot
+from agent_parley.issues import deadline_notice, describe, snapshot
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 MAX_CONTEXT_BYTES = 1536
@@ -2704,9 +2704,9 @@ def checkpoint(
                             and not item["handoff_prompt"].get("responded_at")
                         ]
                         reminders += [
-                            item["deadline_notice"]["text"]
+                            notice["text"]
                             for item in issues["issues"].values()
-                            if (notice := item.get("deadline_notice"))
+                            if (notice := deadline_notice(item))
                             and (
                                 notice["holder"] == agent
                                 or agent in notice.get("waiting", [])
