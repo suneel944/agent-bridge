@@ -249,7 +249,10 @@ class StatusMixin(BridgeCore):
             state needs. A store behind this build is
             not consistent: every process running this code queries columns it
             does not have, so reporting it as compatible would describe a
-            healthy system while every lane is denied. The report also names
+            healthy system while every lane is denied. A registered project
+            whose root checkout no longer exists is not consistent either,
+            and the `projects` component names each such root. The report
+            also names
             the kernel release, the WSL generation or ``none``, and whether
             ``pidfd_open`` is available, so a platform gap is read here
             before a lane is started.
@@ -293,12 +296,15 @@ class StatusMixin(BridgeCore):
                 "compatible": state in store.SCHEMA_USABLE,
             }
         )
+        manifests = [
+            json.loads(path.read_text())
+            for path in (self.home / "projects").glob("*/project.json")
+        ]
         served = self.health()
         serving = served.get("status") or protocol.STOPPED
         stale = serving == protocol.STALE
         stopped = serving == protocol.STOPPED and any(
-            json.loads(path.read_text()).get("participants")
-            for path in (self.home / "projects").glob("*/project.json")
+            manifest.get("participants") for manifest in manifests
         )
         remedy = protocol.RELAUNCH if stale else ""
         components.append(
@@ -309,6 +315,23 @@ class StatusMixin(BridgeCore):
                 "state": protocol.OK if serving == "ready" else serving,
                 "remedy": protocol.START if stopped else remedy,
                 "compatible": not stale and not stopped,
+            }
+        )
+        gone = sorted(
+            str(manifest["root"])
+            for manifest in manifests
+            if manifest.get("root") and not Path(manifest["root"]).exists()
+        )
+        components.append(
+            {
+                "component": "projects",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": protocol.ROOT_GONE if gone else protocol.OK,
+                "remedy": (
+                    protocol.RESTORE_ROOT + ", ".join(gone) if gone else ""
+                ),
+                "compatible": not gone,
             }
         )
         return {

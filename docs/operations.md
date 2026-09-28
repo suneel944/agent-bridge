@@ -348,6 +348,12 @@ as a
 `Code: stale` line, and `agent-parley up` then starts a service on the code in
 the checkout.
 
+The `projects` component is `ok` while every registered project's root
+checkout exists. A project whose root is gone, such as a probe run from a
+temporary directory, puts it in `root gone`, names each such root, and makes
+the verdict not consistent until the checkout is restored or that project's
+state folder is removed.
+
 The store has four states. `absent` means no store has been created yet, which
 is consistent because the service writes it at the current schema. `ok` means
 the store matches this build. `needs migration` means the store predates this
@@ -2299,7 +2305,10 @@ the same pass and published under `worktrees` in `reclaim.json`. Every
 worktree `git worktree list` reports is attributed to a lane by path, when it
 sits inside a lane's worktree, or by branch, when its branch is the lane's
 name or branch followed by `-` or `/`, such as `claude-pr-12`. One inside the
-project state directory belongs to the project. A worktree nothing accounts
+project state directory belongs to the project, and so does one under the
+`agent-bridge` folder beside a state root named `agent-parley`, such as
+`~/.local/state/agent-bridge`, where lanes lived before the rename. A
+worktree nothing accounts
 for is reported with reason `no lane made it` and never touched, even with
 `--force`.
 
