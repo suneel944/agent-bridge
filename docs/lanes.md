@@ -345,8 +345,9 @@ one, and `history participant NAME --kind approval` lists the decisions with
 the rest of the chain.
 
 `approve` and `reject` run from the base checkout and refuse to run inside an
-assigned worktree, so no lane records the approval of its own work through
-these commands. That is this tool's command-line boundary and not an
+assigned worktree, or with a lane's `AGENT_PARLEY_TOKEN` in the environment
+even after changing directory to the base checkout, so no lane records the
+approval of its own work through these commands. That is this tool's command-line boundary and not an
 operating-system one: a program running as you can write coordination state
 directly. The decision also records that a human decided, not that the code is
 correct; the verification command, the attribution scan and GitHub's own
