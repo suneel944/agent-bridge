@@ -29,12 +29,13 @@ Git registers each against the project repository. Those are read from
 lane, the project state directory or the state root the product used
 before its rename, or by branch, when their branch is named after a lane.
 A worktree no lane accounts for is the operator's and is never touched. An
-attributed one is removed when it is clean, carries no commit that neither
-the base checkout nor its upstream has, and either the base already holds
-its head, its lane retired, or it has been untouched past the inactivity
-threshold. Uncommitted changes and unpushed commits keep it
-unless the operator forces the removal, and a forced removal first writes a
-recovery checkpoint holding both.
+attributed one is removed when it is clean, holds no file Git ignores,
+carries no commit that neither the base checkout nor its upstream has, and
+either the base already holds its head, its lane retired, or it has been
+untouched past the inactivity threshold. Uncommitted changes and unpushed
+commits keep it unless the operator forces the removal, and a forced
+removal first writes a recovery checkpoint holding both; an ignored file
+keeps it regardless, because no force can recover what was never tracked.
 """
 
 import os
@@ -43,7 +44,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_parley import forge, issues, store
+from agent_parley import forge, issues, retirement, store
 from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
@@ -76,6 +77,7 @@ SESSION = "a session is running in it"
 IDLE = "an idle session is still running in it"
 CLAIMED = "it still holds a claim"
 UNCOMMITTED = "it holds uncommitted changes"
+IGNORED = "it holds files Git does not track elsewhere"
 UNMERGED = "its branch holds commits the base checkout does not have"
 UNUSED = "its branch never left the commit its lane was created from"
 UNPUSHED = "its branch holds commits its upstream does not have"
@@ -608,7 +610,10 @@ def _stray(
     Returns:
         The condition that decided it and any paths or commits it names.
         Only a condition in `REMOVABLE` allows a removal, and only one in
-        `FORCEABLE` allows a forced one.
+        `FORCEABLE` allows a forced one. A worktree holding files Git
+        ignores is always kept: `git worktree remove` would delete them
+        with the tree, and no force writes a checkpoint of untracked
+        content, so a forced removal could not protect them either.
     """
     path = Path(entry["path"])
     if entry["locked"]:
@@ -622,6 +627,11 @@ def _stray(
         return UNREADABLE, []
     if changed:
         return UNCOMMITTED, changed
+    ignored = retirement.ignored_files(str(path))
+    if ignored is None:
+        return UNREADABLE, []
+    if ignored:
+        return IGNORED, ignored
     head = entry["head"]
     if not head:
         return UNREADABLE, []
@@ -679,10 +689,11 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     the project even when no single lane accounts for it, and one nothing
     accounts for is the operator's and is never removed. An
     attributed worktree is removed only when Git holds no lock on it, no
-    session runs in its lane, it is clean, every commit beyond the base is
-    on its upstream, and the base holds its head, its lane retired, or it
-    has not changed within the inactivity threshold. A registration whose
-    directory is already gone is reclaimed by dropping that registration.
+    session runs in its lane, it is clean, it holds no file Git ignores,
+    every commit beyond the base is on its upstream, and the base holds its
+    head, its lane retired, or it has not changed within the inactivity
+    threshold. A registration whose directory is already gone is reclaimed
+    by dropping that registration.
 
     Args:
         directory: Private project state directory holding the lanes.
