@@ -80,6 +80,7 @@ DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
+SESSION_HELD = "busy:session"
 WORKING = "working"
 WAITING = "waiting"
 TOOL_TIMEOUT = 600
@@ -5617,6 +5618,28 @@ def _mail_digest(rows: list) -> list[str]:
     return [str(identifier) for identifier in newest]
 
 
+def session_held(directory: Path, name: str) -> bool:
+    """Reports whether a live launcher or operation holds the session lock.
+
+    The lock is what a resumed launcher takes first, so probing it reads
+    the one fact that decides whether a resume can start, independently of
+    the presence the lane's record states. The probe holds the lock only
+    for the instant it takes to acquire and release it.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose session lock is probed.
+
+    Returns:
+        True when another process holds `<name>.session.lock`.
+    """
+    try:
+        with lock(directory / f"{name}.session.lock"):
+            return False
+    except LockBusy:
+        return True
+
+
 def wake(
     home: Path,
     directory: Path,
@@ -5658,6 +5681,15 @@ def wake(
     and an idle one is still asked for a turn, so a store
     that has not seeded the record never silences a wake. A reading that
     would record nothing leaves the presence reading as it is.
+
+    A recorded state can be wrong about the process, so before resuming a
+    lane its record calls stopped or dead the session lock is probed with
+    `session_held`. A launcher that still holds it is asked for a turn over
+    its wake socket instead, and a resume is spawned only once nothing holds
+    the lock. When the socket does not answer either, the wake is recorded
+    as `SESSION_HELD`, a busy refusal that spends no attempt and that
+    `status` and `problems` report, rather than as a requested resume the
+    lock would refuse.
 
     The attempt bound counts wakes without progress. Each attempt records the
     lane's progress marker from `_lane_activity`: its `HEAD` moves, the state
@@ -5888,6 +5920,10 @@ def wake(
             result = "busy:stale"
         elif observed["process_alive"]:
             result = terminal.request(directory, name)
+        elif session_held(directory, name):
+            result = terminal.request(directory, name)
+            if result == "unavailable":
+                result = SESSION_HELD
         elif (observed["process_alive"] is False or stopped) and session:
             entry = roster.provider(home, participant["provider"])
             if entry["adapter"] in roster.ADAPTERS and not entry.get(
