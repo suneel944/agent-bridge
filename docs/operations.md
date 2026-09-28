@@ -2370,6 +2370,14 @@ participant event log a served checkpoint records into, under the reason
 class `polled_delivery`, so `agent-parley top` counts its bytes in `CONTEXT`
 like any other lane's.
 
+Each delivery appends a batch headed `## Batch N, written <UTC time>`, and
+delivery never marks mail read, because the lane may not have read the file
+yet. A batch stays while any message it carried is unread and leaves once the
+lane calls `mark_message_read` for all of them; a batch without mail stays
+only until a newer one is written, and at most eight are kept. A quiet
+interval drops read batches and removes the file once none remain, so a lane
+tells a new batch from one it already read by its number.
+
 Polled delivery is delivery, never enforcement. It cannot deny a tool call,
 cannot hold a turn open, and reaches the lane only as text that lane has to
 read, so an adapter missing a required guard is still refused at launch. It
