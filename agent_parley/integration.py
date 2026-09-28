@@ -81,11 +81,14 @@ class IntegrationMixin(MailMixin):
     def _from_base(
         self, repo: Path, root: Path, data: dict, subject: str
     ) -> None:
-        """Refuses an operator decision made inside an assigned worktree.
+        """Refuses an operator decision made by a lane.
 
-        This is the command-line boundary between the operator and the
-        lanes, not an operating-system one: a program running as the same
-        user can write coordination state directly.
+        `roster.from_lane` also reads a lane's coordination credential, so a
+        lane that changes directory to the base checkout is still refused,
+        as `unattended.operator_only` refuses it. This is the command-line
+        boundary between the operator and the lanes, not an operating-system
+        one: a program running as the same user can write coordination state
+        directly.
 
         Args:
             repo: Checkout the command runs in.
@@ -94,7 +97,8 @@ class IntegrationMixin(MailMixin):
             subject: What is decided, as the start of the refusal.
 
         Raises:
-            BridgeError: If the command runs inside an assigned worktree.
+            BridgeError: If the command runs inside an assigned worktree,
+                names one as its checkout, or runs with a lane's token.
         """
         from agent_parley.cli import git, roster
 
@@ -103,11 +107,11 @@ class IntegrationMixin(MailMixin):
             Path(lane["lane"]).resolve()
             for lane in data["participants"].values()
         }
-        if here in lanes or roster.caller_lane(data):
+        if here in lanes or roster.from_lane(data):
             raise BridgeError(
                 f"{subject} recorded from the base checkout at {root}, never "
-                "from an assigned worktree, so a lane does not decide its own "
-                "work."
+                "from an assigned worktree or a process holding a lane's "
+                f"{roster.LANE_TOKEN}, so a lane does not decide its own work."
             )
 
     def verify_recovery(self, repo: Path) -> str:

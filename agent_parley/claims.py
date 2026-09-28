@@ -88,7 +88,7 @@ class ClaimsMixin(ReportsMixin):
         _, directory = self.project(repo)
         data = roster.read(directory)
         root = Path(data["root"]).resolve()
-        if repo.resolve() != root or roster.caller_lane(data):
+        if repo.resolve() != root or roster.from_lane(data):
             raise BridgeError(
                 "Live recovery approval must be recorded from the project "
                 "base checkout."
@@ -193,7 +193,7 @@ class ClaimsMixin(ReportsMixin):
         if (
             action == "unblock"
             and lane == Path(data["root"]).resolve()
-            and not roster.caller_lane(data)
+            and not roster.from_lane(data)
         ):
             agent = roster.OPERATOR
         else:
@@ -938,7 +938,7 @@ class ClaimsMixin(ReportsMixin):
             data = roster.read(directory)
             checkout = Path(git(repo, "rev-parse", "--show-toplevel"))
             if checkout.resolve() != Path(data["root"]).resolve() or (
-                roster.caller_lane(data)
+                roster.from_lane(data)
             ):
                 raise BridgeError(
                     "Only the operator applies a plan, from the project base "
@@ -993,7 +993,7 @@ class ClaimsMixin(ReportsMixin):
         data = roster.read(directory)
         lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
         operator = lane == Path(data["root"]).resolve() and not (
-            roster.caller_lane(data)
+            roster.from_lane(data)
         )
         if action == "propose":
             by = roster.OPERATOR if operator else roster.resolve(data, lane)

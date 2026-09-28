@@ -108,6 +108,21 @@ def test_a_lane_naming_the_base_checkout_cannot_approve_recovery(
         bridge.authorize_recovery(repo, "42", "usage limit")
 
 
+def test_a_lane_token_in_the_base_checkout_cannot_decide(
+    bridge, repo, paired, awaiting, monkeypatch
+):
+    monkeypatch.setenv("AGENT_PARLEY_TOKEN", "lane-token")
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        bridge.approve(repo, "codex")
+    with pytest.raises(BridgeError, match="base checkout"):
+        bridge.authorize_recovery(repo, "42", "usage limit")
+    with pytest.raises(BridgeError, match="assigned agent worktree"):
+        bridge.issue(repo, "unblock", "42", on="17")
+    monkeypatch.delenv("AGENT_PARLEY_TOKEN")
+    with pytest.raises(BridgeError, match="approve codex"):
+        bridge.merge(repo, "codex")
+
+
 def test_a_lane_naming_the_base_checkout_cannot_unblock_as_operator(
     bridge, repo, paired, monkeypatch
 ):
