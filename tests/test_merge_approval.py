@@ -100,6 +100,18 @@ def test_a_lane_naming_the_base_checkout_cannot_approve_itself(
         bridge.merge(repo, "codex")
 
 
+def test_a_lane_in_the_base_checkout_with_its_token_cannot_approve_itself(
+    bridge, repo, paired, awaiting, monkeypatch
+):
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_PARLEY_TOKEN", "lane-token")
+    with pytest.raises(BridgeError, match="AGENT_PARLEY_TOKEN"):
+        bridge.approve(repo, "codex")
+    monkeypatch.delenv("AGENT_PARLEY_TOKEN")
+    with pytest.raises(BridgeError, match="approve codex"):
+        bridge.merge(repo, "codex")
+
+
 def test_a_lane_naming_the_base_checkout_cannot_approve_recovery(
     bridge, repo, paired, monkeypatch
 ):

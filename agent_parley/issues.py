@@ -624,7 +624,9 @@ def change(
             from the arguments a key is compared against.
 
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, retry, or lock checks
@@ -928,7 +930,8 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                 continue
             record["offer"] = _operator_offer(request, number, budgets)
             record["request"] = None
-            record["history"].append(
+            lifecycle.append_history(
+                record,
                 {
                     "action": "grant",
                     "actor": "supervisor",
@@ -938,7 +941,7 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                     "request": None,
                     "offer_id": request["id"],
                     "claim_id": record.get("claim_id"),
-                }
+                },
             )
             granted.append(number)
         if granted:
@@ -1163,8 +1166,15 @@ def _change(
     claim changes rather than derived when a lane is woken, because only the
     transition knows which generation stopped mattering and why.
 
+    A plain claim of an unowned issue with a pending offer is refused, naming
+    the recipient. Ownership of offered work moves only on the recipient's
+    acceptance, so a claim cannot silently drop the offer, its summary and
+    its attached diff.
+
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, or lock checks fail.
@@ -1217,6 +1227,16 @@ def _change(
                 raise BridgeError(
                     f"Issue #{issue} has no orphaned owner to take it from; "
                     "claim it without --take-orphaned."
+                )
+            elif record and (pending := record.get("offer")):
+                recipient = pending["to"]
+                raise BridgeError(
+                    f"Issue #{issue} is offered to you; accept it with "
+                    f"issue accept {issue} --offer-id {pending['id']}."
+                    if recipient == agent
+                    else f"Issue #{issue} is offered to {recipient}; "
+                    f"{recipient} answers the offer, or the operator "
+                    "withdraws it with issue assign --unassign, first."
                 )
             if not record or record["owner"] != agent:
                 _within_cap(state["issues"], agent, cap)
@@ -1310,6 +1330,8 @@ def _change(
                     )
                     lifecycle.claimed(record, record["claim_id"])
                     cleared = _clear_recovery(record)
+                    if ended := record.pop("ended_on_forge", None):
+                        cleared["ended_on_forge"] = ended
                     if offer.get("attachment"):
                         record["attachment"] = offer["attachment"]
                     record["handoff"] = inherited
@@ -1428,10 +1450,20 @@ def _change(
             history["taken"] = dict(record["taken"])
         if cleared:
             history["cleared"] = cleared
-        record["history"].append(history)
+        lifecycle.append_history(record, history)
         state["issues"][issue] = record
         if scope:
-            retries.remember(state, scope, fingerprint, retries.SERVED, record)
+            retries.remember(
+                state,
+                scope,
+                fingerprint,
+                retries.SERVED,
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "history"
+                },
+            )
         state["revision"] += 1
         write_json(directory / "issues.json", state)
     if retired:
@@ -1729,4 +1761,53 @@ def exact_claim(directory: Path, name: str, issue: str = "") -> dict:
         return {"issue": None, "claim_id": None}
     else:
         number = next(iter(owned))
+    return {"issue": int(number), "claim_id": owned[number].get("claim_id")}
+
+
+def merge_claim(directory: Path, name: str, issue: str = "") -> dict:
+    """Selects the one claim a lane merge integrates.
+
+    A lane may hold several claims when `max_claims_per_lane` allows it.
+    Without an explicit issue, the merge takes the only claim whose work is
+    reported ready or awaits integration recovery, and refuses only when
+    several are, so a lane holding one ready claim beside unfinished ones
+    stays mergeable.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant that owns the lane.
+        issue: Explicit issue selection, or empty to infer it.
+
+    Returns:
+        Issue number and claim identifier, or empty fields when no claim is
+        held and none was requested.
+
+    Raises:
+        BridgeError: If the selection is not currently owned, or if several
+            owned claims are ready and none was named.
+    """
+    owned = {
+        number: record
+        for number, record in snapshot(directory)["issues"].items()
+        if record["owner"] == name
+    }
+    if issue or len(owned) < 2:
+        return exact_claim(directory, name, issue)
+    ready = sorted(
+        (
+            number
+            for number, record in owned.items()
+            if lifecycle.state(record)["state"]
+            in (lifecycle.READY, lifecycle.RECOVERY)
+        ),
+        key=int,
+    )
+    if len(ready) != 1:
+        listed = ", ".join(f"#{number}" for number in ready)
+        raise BridgeError(
+            f"{name} owns multiple issues and "
+            + (f"{listed} are ready" if ready else "none is ready")
+            + "; name one with --issue."
+        )
+    number = ready[0]
     return {"issue": int(number), "claim_id": owned[number].get("claim_id")}

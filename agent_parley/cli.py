@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import shlex
     import shutil
     import socket as socket
+    import sqlite3
     import string
     import subprocess
     import textwrap
@@ -91,6 +92,7 @@ if TYPE_CHECKING:
         snapshot,
     )
     from agent_parley.issues import exact_claim as exact_claim
+    from agent_parley.issues import merge_claim as merge_claim
     from agent_parley.merges import attributed_commits
     from agent_parley.merges import group_lanes as group_lanes
     from agent_parley.merges import group_refusal as group_refusal
@@ -174,7 +176,7 @@ MOVED_CALLABLES = {
         "release_copilot",
     ),
     "forge": ("report_comment",),
-    "issues": ("exact_claim", "held_claim"),
+    "issues": ("exact_claim", "held_claim", "merge_claim"),
     "merges": (
         "attributed_commits",
         "group_lanes",
@@ -211,6 +213,7 @@ DEFERRED_STANDARD_MODULES = (
     "shlex",
     "shutil",
     "socket",
+    "sqlite3",
     "string",
     "subprocess",
     "textwrap",
@@ -1786,6 +1789,18 @@ def merged_lanes(
         or args.idle
         or getattr(args, "over_budget", False)
     )
+    issue = getattr(args, "issue", "")
+    if issue and (
+        not args.name
+        or selected(args)
+        or args.group
+        or getattr(args, "verify_recovery", False)
+    ):
+        raise BridgeError(
+            "`participant merge --issue` picks a claim of one named lane; "
+            "name the lane and drop --all, --group, --verify-recovery and "
+            "the selectors."
+        )
     if getattr(args, "verify_recovery", False):
         if (
             preview
@@ -1856,7 +1871,7 @@ def merged_lanes(
     return (
         bridge.preview_merge(repo, args.name)
         if preview
-        else bridge.merge(repo, args.name, renew=renew)
+        else bridge.merge(repo, args.name, renew=renew, issue=issue)
     )
 
 
@@ -2282,7 +2297,12 @@ class Bridge(
         directory, _, _ = self._lane(repo, name)
         with lock(directory / "setup.lock"):
             data = roster.read(directory)
-            participant = data["participants"][name]
+            participant = data["participants"].get(name)
+            if participant is None:
+                raise BridgeError(
+                    f"{name} was retired while this command ran; nothing "
+                    "changed."
+                )
             if participant.get("paused", False) is not resume:
                 state = "paused" if not resume else "not paused"
                 return f"{name} is already {state}; nothing changed."
@@ -2329,11 +2349,13 @@ class Bridge(
     def stop(self, repo: Path, name: str) -> str:
         """Ends one lane's native session from the base checkout.
 
-        The lane is told once that the operator is ending its session, then
-        the recorded session process is signalled exactly as a normal exit
+        The recorded session process is signalled exactly as a normal exit
         signals it and given a bounded time to leave; a process that ignores
         that signal is sent `SIGKILL`, and the session record is cleared only
-        once the process is verified gone. Identity is the recorded
+        once the process is verified gone. No notice is mailed to the lane:
+        the session is gone before it could read one, so the mail would only
+        reach the next session, including the one `restart` launches, as an
+        instruction to end, and would count as backlog. Identity is the recorded
         process ID together with its kernel creation time, checked here and
         again inside the platform's terminate step, so a recycled process ID
         is never signalled. The command-line check used to recognize the
@@ -2387,8 +2409,6 @@ class Bridge(
                 f"{name} has no verified running session to stop. "
                 f"{self._holdings(directory, name)}"
             )
-        with contextlib.suppress(BridgeError, OSError):
-            self.say(repo, name, "The operator is ending this session.")
         process.ServerProcess(pid, ticks).stop()
         if process.alive(pid, ticks):
             raise BridgeError(
@@ -4427,6 +4447,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                     "accepted only from the base checkout."
                 ),
             )
+            command.add_argument(
+                "--issue",
+                default="",
+                help=(
+                    "Claimed issue whose work the named lane merges when it "
+                    "holds several; defaults to its only ready claim."
+                ),
+            )
             scope = command.add_mutually_exclusive_group()
             scope.add_argument(
                 "--all",
@@ -4556,6 +4584,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     standing_run = standings.add_parser("run")
     standing_run.add_argument(
         "name", help="Participant whose ready work is integrated."
+    )
+    standing_run.add_argument(
+        "--issue",
+        default="",
+        help=(
+            "Claimed issue to integrate when the lane holds several; "
+            "defaults to its only ready claim."
+        ),
     )
     standing_run.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
@@ -5637,7 +5673,11 @@ def main() -> int:
                     )
                 )
             elif args.action == "run":
-                print(unattended.integrate(bridge, repository, args.name))
+                print(
+                    unattended.integrate(
+                        bridge, repository, args.name, args.issue
+                    )
+                )
             else:
                 print(unattended.describe(bridge, repository))
         elif args.command in ("verify", "init"):
@@ -5794,14 +5834,37 @@ def main() -> int:
         return 0
     except (
         BridgeError,
+        KeyError,
         OSError,
         ValueError,
+        sqlite3.Error,
         subprocess.TimeoutExpired,
     ) as exc:
-        print(f"agent-parley: {exc}", file=sys.stderr)
+        print(f"agent-parley: {_error_message(exc)}", file=sys.stderr)
         if getattr(args, "json", False):
             print(_error_document(exc))
         return 1
+
+
+def _error_message(exc: Exception) -> str:
+    """Words one runtime failure as the line the CLI prints.
+
+    A missing key reads as its quoted key alone, so it is named as a record
+    that vanished, which is how one reaches the handler: another process
+    retired or removed it between the command's read and its use.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The message both the human line and the error document carry.
+    """
+    if isinstance(exc, KeyError):
+        return (
+            f"No record {exc.args[0]!r} any more; another command changed "
+            "the project while this one ran. Rerun it."
+        )
+    return str(exc)
 
 
 def _error_document(exc: Exception) -> str:
@@ -5824,10 +5887,15 @@ def _error_document(exc: Exception) -> str:
         kind = "timeout"
     elif isinstance(exc, OSError):
         kind = "os"
+    elif isinstance(exc, KeyError):
+        kind = "missing"
+    elif isinstance(exc, sqlite3.Error):
+        kind = "store"
     else:
         kind = "value"
+    message = _error_message(exc)
     return json.dumps(
-        views.document("error", {"error": {"type": kind, "message": str(exc)}}),
+        views.document("error", {"error": {"type": kind, "message": message}}),
         ensure_ascii=False,
     )
 

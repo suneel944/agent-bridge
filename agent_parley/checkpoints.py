@@ -3089,6 +3089,7 @@ def recover(
     agent: str,
     payload: dict,
     timeout: float = LOCK_SECONDS,
+    evidence: dict | None = None,
 ) -> bool:
     """Writes the recovery checkpoint a decision left for after its reply.
 
@@ -3103,13 +3104,17 @@ def recover(
     another caller is already running raises `LockBusy` rather than
     recording an error. The activity file is rewritten
     only when the checkpoint ids or the error changed, and never created,
-    so an unchanged tree adds no write after the reply.
+    so an unchanged tree adds no write after the reply. Gate evidence from
+    ``evidence`` is dropped when its session was fenced, as that session's
+    own capture would have written nothing.
 
     Args:
         directory: Common project state directory.
         agent: Assigned native lane name.
         payload: Native lifecycle event the decision observed.
         timeout: Seconds to wait for the lane's checkpoint lock.
+        evidence: Earlier event carried by `merge_recovery` whose gate
+            evidence is recorded when ``payload`` ran no gate command.
 
     Returns:
         Whether a checkpoint was attempted.
@@ -3126,9 +3131,13 @@ def recover(
     with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
         if recovery.stale_session(directory, agent, payload):
             return False
+        if evidence is not None and recovery.stale_session(
+            directory, agent, evidence
+        ):
+            evidence = None
     manifest = roster.read(directory)
     try:
-        saved = recovery.capture(directory, manifest, agent, payload)
+        saved = recovery.capture(directory, manifest, agent, payload, evidence)
         outcome: dict = {"recovery_checkpoints": [item["id"] for item in saved]}
     except LockBusy:
         raise
@@ -3154,6 +3163,34 @@ def recover(
         if after != before:
             write_json(path, state)
     return True
+
+
+def merge_recovery(waiting: dict, owed: dict) -> dict:
+    """Returns one recovery request standing for a waiting and a newer one.
+
+    The newer request supplies the event the capture records. When it ran
+    no gate command, the most recent event among the requests it replaces
+    that did run one travels with it as ``evidence``, so a burst of events
+    queues one capture without losing the gate evidence an earlier one had.
+
+    Args:
+        waiting: The lane's request still waiting behind a running capture.
+        owed: The newer ``recovery`` request `serve` returned.
+
+    Returns:
+        The request to run in place of both.
+    """
+    from agent_parley import recovery
+
+    if recovery.gate_evidence(owed["payload"]):
+        return owed
+    if recovery.gate_evidence(waiting["payload"]):
+        earlier = waiting["payload"]
+    else:
+        earlier = waiting.get("evidence")
+    if earlier is None:
+        return owed
+    return {**owed, "evidence": earlier}
 
 
 def serve(

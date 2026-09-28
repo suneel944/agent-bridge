@@ -327,7 +327,12 @@ def _replayed(directory: Path, name: str, key: tuple) -> dict | None:
 
 
 def _evaluate(
-    bridge: Bridge, root: Path, directory: Path, data: dict, name: str
+    bridge: Bridge,
+    root: Path,
+    directory: Path,
+    data: dict,
+    name: str,
+    issue: str = "",
 ) -> tuple[dict, str]:
     """Reads the inputs of one decision and names the first unmet condition.
 
@@ -341,6 +346,8 @@ def _evaluate(
         directory: Private state directory for the common repository.
         data: Project manifest read under the setup lock.
         name: Participant whose lane is evaluated.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         The evidence read so far, and the unmet condition, which is empty
@@ -348,7 +355,9 @@ def _evaluate(
     """
     evidence: dict = {"policy": POLICY, "participant": name, "forge": FORGE}
     try:
-        unmet = _conditions(bridge, root, directory, data, name, evidence)
+        unmet = _conditions(
+            bridge, root, directory, data, name, evidence, issue
+        )
     except (KeyError, BridgeError, OSError, subprocess.TimeoutExpired) as exc:
         unmet = (
             "An input of the decision could not be read, so eligibility "
@@ -364,6 +373,7 @@ def _conditions(
     data: dict,
     name: str,
     evidence: dict,
+    issue: str = "",
 ) -> str:
     """Checks each eligibility condition in order, filling in the evidence.
 
@@ -374,6 +384,8 @@ def _conditions(
         data: Project manifest read under the setup lock.
         name: Participant whose lane is evaluated.
         evidence: Mutable evidence, extended as each input is read.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         The first unmet condition, or an empty string when eligible.
@@ -385,8 +397,8 @@ def _conditions(
     """
     from agent_parley.cli import (
         current_branch,
-        exact_claim,
         git,
+        merge_claim,
         merges,
         reserved_overlaps,
         snapshot,
@@ -405,7 +417,7 @@ def _conditions(
         )
     evidence["target"] = recorded["target"]
     try:
-        claim = exact_claim(directory, name)
+        claim = merge_claim(directory, name, issue)
     except BridgeError as exc:
         return str(exc)
     if claim["issue"] is None:
@@ -491,7 +503,7 @@ def _conditions(
     return ""
 
 
-def integrate(bridge: Bridge, repo: Path, name: str) -> str:
+def integrate(bridge: Bridge, repo: Path, name: str, issue: str = "") -> str:
     """Integrates one lane under the project's unattended policy.
 
     The attempt holds the project merge lock throughout, so a concurrent
@@ -504,6 +516,8 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
         bridge: Coordination runtime owning the project state.
         repo: Any checkout of the target repository, outside every lane.
         name: Participant whose ready work is integrated.
+        issue: Claimed issue to integrate, or empty to take the lane's only
+            ready claim.
 
     Returns:
         An account of the merge, or of the earlier integration a replay
@@ -528,7 +542,7 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
     with lock(directory / "merge.lock", MERGE_BUSY):
         with lock(directory / "setup.lock"):
             data = bridge._project(root, directory, verify={name})
-        evidence, unmet = _evaluate(bridge, root, directory, data, name)
+        evidence, unmet = _evaluate(bridge, root, directory, data, name, issue)
         key = (
             evidence.get("issue"),
             evidence.get("claim_id"),
@@ -550,6 +564,7 @@ def integrate(bridge: Bridge, repo: Path, name: str) -> str:
                 data,
                 name,
                 expected=(evidence["claim_id"], evidence["source_commit"]),
+                issue=evidence["issue"],
             )
         except subprocess.TimeoutExpired as exc:
             raise failed(

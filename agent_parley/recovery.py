@@ -321,28 +321,36 @@ def _publish_bundle(
     return size, digest
 
 
+def gate_evidence(payload: dict) -> dict:
+    """Returns bounded gate evidence from a native event.
+
+    Args:
+        payload: Native lifecycle event.
+
+    Returns:
+        The gate command, its exit code and the time it was read, or an
+        empty dict when the event ran no recognized gate command.
+    """
+    command = str((payload.get("tool_input") or {}).get("cmd") or "")
+    if not re.search(r"\b(pytest|mypy|ruff)\b|\bmake\s+check\b", command):
+        return {}
+    response = payload.get("tool_response") or {}
+    return {
+        "command": command.encode()[:MAX_STEP_BYTES].decode(errors="ignore"),
+        "exit_code": (
+            response.get("exit_code") if isinstance(response, dict) else None
+        ),
+        "observed_at": time.time(),
+    }
+
+
 def _step(payload: dict) -> tuple[str, dict]:
     """Returns bounded last-step and gate evidence from a native event."""
     event = str(payload.get("hook_event_name") or "")
     tool = str(payload.get("tool_name") or "")
     step = ": ".join(item for item in (event, tool) if item)
     step = step.encode()[:MAX_STEP_BYTES].decode(errors="ignore")
-    command = str((payload.get("tool_input") or {}).get("cmd") or "")
-    gate: dict = {}
-    if re.search(r"\b(pytest|mypy|ruff)\b|\bmake\s+check\b", command):
-        response = payload.get("tool_response") or {}
-        gate = {
-            "command": command.encode()[:MAX_STEP_BYTES].decode(
-                errors="ignore"
-            ),
-            "exit_code": (
-                response.get("exit_code")
-                if isinstance(response, dict)
-                else None
-            ),
-            "observed_at": time.time(),
-        }
-    return step, gate
+    return step, gate_evidence(payload)
 
 
 def capture(
@@ -350,6 +358,7 @@ def capture(
     manifest: dict,
     agent: str,
     payload: dict | None = None,
+    evidence: dict | None = None,
 ) -> list[dict]:
     """Captures every claim owned by one lane under the lane's capture lock.
 
@@ -366,6 +375,8 @@ def capture(
         manifest: Current participant manifest.
         agent: Participant whose owned claims are captured.
         payload: Optional native lifecycle event supplying step evidence.
+        evidence: Optional earlier native event whose gate evidence is
+            recorded when ``payload`` ran no gate command.
 
     Returns:
         Checkpoint records published for the lane's current claims.
@@ -375,7 +386,7 @@ def capture(
         BridgeError: If the lane or Git state cannot be captured.
     """
     with lock(directory / f"{agent}-capture.lock", timeout=1):
-        return _capture(directory, manifest, agent, payload)
+        return _capture(directory, manifest, agent, payload, evidence)
 
 
 def _capture(
@@ -383,6 +394,7 @@ def _capture(
     manifest: dict,
     agent: str,
     payload: dict | None = None,
+    evidence: dict | None = None,
 ) -> list[dict]:
     """Captures every claim owned by one lane into private durable bundles.
 
@@ -402,6 +414,8 @@ def _capture(
         manifest: Current participant manifest.
         agent: Participant whose owned claims are captured.
         payload: Optional native lifecycle event supplying step evidence.
+        evidence: Optional earlier native event whose gate evidence is
+            recorded when ``payload`` ran no gate command.
 
     Returns:
         Checkpoint records published for the lane's current claims.
@@ -426,6 +440,8 @@ def _capture(
     folder = _folder(directory)
     fingerprint = _fingerprint(lane)
     step, gate = _step(payload or {})
+    if not gate and evidence:
+        gate = gate_evidence(evidence)
     unchanged = []
     for number, record in owned:
         identifier = _identifier(number, str(record["claim_id"]))
@@ -1450,15 +1466,16 @@ def restore(directory: Path, lane: Path, record: dict) -> dict:
 
     Args:
         directory: Private project state directory.
-        lane: Recipient's assigned worktree.
+        lane: Recipient's assigned worktree root. A subdirectory is refused
+            because Git would apply the saved patches to it alone.
         record: Persisted taken-claim record.
 
     Returns:
         Record with restored checkpoint and content evidence.
 
     Raises:
-        BridgeError: If the artifact is invalid or destination has work that
-            could be overwritten.
+        BridgeError: If the artifact is invalid, the lane is not a worktree
+            root, or destination has work that could be overwritten.
     """
     saved = current_take(record).get("checkpoint") or {}
     if not saved:
@@ -1469,6 +1486,13 @@ def restore(directory: Path, lane: Path, record: dict) -> dict:
         raise BridgeError("Recovery recipient generation is invalid.")
     _artifact(directory, saved)
     resolved_lane = str(lane.resolve())
+    if str(Path(_text(lane, "rev-parse", "--show-toplevel")).resolve()) != (
+        resolved_lane
+    ):
+        raise BridgeError(
+            "Recovery destination must be the worktree root; Git applies "
+            "a patch run from a subdirectory to that subdirectory only."
+        )
     lane_id = hashlib.sha256(resolved_lane.encode()).hexdigest()[:16]
     receipt = _folder(directory) / (
         f"{saved['id']}-to-{recipient_claim}-{lane_id}.json"
