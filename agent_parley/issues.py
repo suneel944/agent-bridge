@@ -1163,6 +1163,11 @@ def _change(
     claim changes rather than derived when a lane is woken, because only the
     transition knows which generation stopped mattering and why.
 
+    A plain claim of an unowned issue with a pending offer is refused, naming
+    the recipient. Ownership of offered work moves only on the recipient's
+    acceptance, so a claim cannot silently drop the offer, its summary and
+    its attached diff.
+
     Returns:
         The persisted issue record, including transition history.
 
@@ -1217,6 +1222,16 @@ def _change(
                 raise BridgeError(
                     f"Issue #{issue} has no orphaned owner to take it from; "
                     "claim it without --take-orphaned."
+                )
+            elif record and (pending := record.get("offer")):
+                recipient = pending["to"]
+                raise BridgeError(
+                    f"Issue #{issue} is offered to you; accept it with "
+                    f"issue accept {issue} --offer-id {pending['id']}."
+                    if recipient == agent
+                    else f"Issue #{issue} is offered to {recipient}; "
+                    f"{recipient} answers the offer, or the operator "
+                    "withdraws it with issue assign --unassign, first."
                 )
             if not record or record["owner"] != agent:
                 _within_cap(state["issues"], agent, cap)
