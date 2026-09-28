@@ -71,6 +71,7 @@ DEFAULT_COLUMNS = (
     "TASK",
 )
 FLEX = ("STATE", "TASK")
+ONCE_HINT = "Live view: top without --once; ? explains each column."
 DROP_ORDER = (
     "PROVIDER",
     "EVENT",
@@ -757,14 +758,20 @@ def state_cell(row: dict) -> str:
 
     Returns:
         The session cell, cut to ``idle 3m`` or ``paused`` when it leads
-        with one of those. The liveness reading after a pause or an idle
-        age is one that state already outranks, and ``detail`` keeps the
-        whole cell. Any other cell, such as ``running; no hooks``, is one
-        state and is kept whole.
+        with one of those and the lane is still live. A live reading after
+        a pause or an idle age is one that state already outranks, and
+        ``detail`` keeps the whole cell. A stopped session or one whose
+        hooks cannot be read is kept, as in ``paused; stopped``, because
+        it changes what the operator should do. Any other cell, such as
+        ``running; no hooks``, is one state and is kept whole.
     """
     state = str(row["state"])
-    head = state.partition("; ")[0]
-    return head if head == "paused" or head.startswith("idle ") else state
+    head, _, tail = state.partition("; ")
+    live = not tail.startswith("stopped") and not any(
+        blind in tail for blind in ("no hooks", "checkpoints unavailable")
+    )
+    short = head == "paused" or head.startswith("idle ")
+    return head if short and live else state
 
 
 def notes(row: dict) -> list[str]:
@@ -774,20 +781,35 @@ def notes(row: dict) -> list[str]:
         row: Participant row produced by ``collect``.
 
     Returns:
-        The stall, operator edit, base advance, orphan, budget, fitness and
+        The branch drift, rejected call, stall, operator edit, base
+        advance, orphan, budget, fitness, work offer, failed review and
         escalated dispatch markers the lane holds, in that order. The note
         row already names the lane, so a fitness reason drops its own copy
-        of the name. A pending
-        work offer is left to the FIT column's ``+`` and the last prompt to
-        the TASK column, so a note is always something to act on.
+        of the name. Drift, rejected calls, offers and failed reviews are
+        noted because their columns can be dropped or left out of the
+        default set, so monochrome output still says why a row is
+        emphasised and what waits on the operator. A ``continue`` offer
+        only restates work the lane already holds, so it gets no note. The
+        last prompt is left to the TASK column, so a note is always
+        something to act on.
     """
     found = [
+        f"on branch {row['branch']}, not its assigned branch"
+        if row["drift"]
+        else "",
+        f"{row['errors']} rejected calls" if row["errors"] else "",
         row["stall"],
         row["operator_edit"],
         row.get("base_advance", ""),
         row.get("orphan", ""),
         row.get("budget_marker", ""),
-        str(row["unfit"]).replace(f"): {row['participant']} ", "): ", 1),
+        str(row["unfit"] or "").replace(f"): {row['participant']} ", "): ", 1),
+        " ".join(("work offered", row.get("offer_kind", ""))).strip()
+        if row["work_offer"] and row.get("offer_kind") != "continue"
+        else "",
+        f"review failed by {row.get('reviewer') or 'a peer'}"
+        if row.get("review") == "fail"
+        else "",
     ]
     if row["work_dispatch"].get("state") == "escalated":
         found.append(row["work_dispatch"]["last_result"])
@@ -1644,6 +1666,8 @@ def run(
         )
         for line in render(view, available, columns=shown):
             print(line)
+        if once:
+            print(ONCE_HINT)
         return
     curses.wrapper(
         _loop,

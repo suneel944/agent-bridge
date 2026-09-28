@@ -244,11 +244,15 @@ agent-parley top --all
 ```
 
 The screen reads like Linux `top`: three summary lines, one row per lane, and
-a short list of notes under the table.
+a short list of notes under the table. Each `!` note names a lane and says
+what waits on you: branch drift, rejected calls, an unfit reason, a pending
+split or pull offer, a failed review. Notes take the place of a NOTE column, so
+long reasons never truncate, and monochrome output says everything colour
+emphasises. `--once` ends with one line that points at the live view.
 
 ```text
 $ agent-parley top --once --columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
-agent-parley top - 04:19:38  server running  projects 1  read 0.02s
+agent-parley top - 04:37:10  server running  projects 1  read 0.02s
 Lanes: 3 total, 2 working, 1 idle   Issues: 3 held, 1 offered
 Mail: 1 unread, 1 unacked   Leases: 2 held   Hooks (all retained): 7 events, 2 denied (29%)   Context: 2.5kB
 Selection: columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
@@ -259,8 +263,10 @@ claude-1        working 5s              #42         0/0        1 5s       1/3   
 claude-2        working 5s              #58         0/0        1 5s       0/2        0s        Document the refund API for merchants
 codex-1         idle 5s                 #17+1       1/1        0          1/2        0s        Rename the shared money helper
 
+! codex-1  on branch refund-spike, not its assigned branch
 ! codex-1  idle; acknowledgement of message 1 for claude-1 waiting 5s
 ! codex-1  unfit (mail): it owes an acknowledgement 5s old
+Live view: top without --once; ? explains each column.
 ```
 
 This is the output behind the README screenshot, recorded by

@@ -4911,7 +4911,9 @@ def main() -> int:
                 for name in (args.columns or "").replace(",", " ").split()
             )
             unknown = [
-                name for name in names if name not in dict(dashboard.COLUMNS)
+                name
+                for name in names
+                if name != "ALL" and name not in dict(dashboard.COLUMNS)
             ]
             if unknown:
                 parser.error(

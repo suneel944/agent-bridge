@@ -275,6 +275,45 @@ def test_a_lane_is_one_row_with_its_task_and_one_note_per_warning():
     assert len(notes) == 4
 
 
+def test_every_emphasised_row_names_its_cause_in_a_note():
+    row = lane(
+        "codex",
+        branch="spike",
+        drift=True,
+        errors=2,
+        unfit=None,
+        work_offer=True,
+        offer_kind="split",
+        review="fail",
+        reviewer="claude",
+    )
+    assert dashboard.alert(row)
+    assert dashboard.notes(row) == [
+        "on branch spike, not its assigned branch",
+        "2 rejected calls",
+        "work offered split",
+        "review failed by claude",
+    ]
+    assert not dashboard.notes(
+        lane("claude", unfit=None, work_offer=True, offer_kind="continue")
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "cell"),
+    [
+        ("paused; running", "paused"),
+        ("idle 3m; running", "idle 3m"),
+        ("paused; stopped", "paused; stopped"),
+        ("idle 3m; checkpoints unavailable",) * 2,
+    ],
+)
+def test_the_state_cell_keeps_a_liveness_reading_that_changes_the_action(
+    state, cell
+):
+    assert dashboard.state_cell({"state": state}) == cell
+
+
 def test_ordering_puts_the_largest_counted_value_first():
     rows = [
         lane("quiet", idle_seconds=1),
@@ -387,6 +426,7 @@ def test_a_snapshot_to_a_terminal_fits_its_width(monkeypatch):
     dashboard.run(HOME, lambda: True, once=True)
     assert all(len(line) <= 70 for line in terminal.printed.splitlines())
     assert "Hidden columns:" in terminal.printed
+    assert terminal.printed.splitlines()[-1] == dashboard.ONCE_HINT
 
 
 def drive(

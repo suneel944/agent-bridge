@@ -7,9 +7,9 @@
 <text x="18.0" y="48.0" xml:space="preserve"><tspan fill="#7ee787">$ </tspan><tspan fill="#e6edf3">agent-parley issue list</tspan></text>
 <text x="18.0" y="66.0" xml:space="preserve" fill="#c9d1d9">#17: codex-1 (working; event 0s ago); last progress 0s ago; no deadline</text>
 <text x="18.0" y="84.0" xml:space="preserve" fill="#c9d1d9">#42: claude-1 (working; event 0s ago); last progress 0s ago; no deadline; waits on #17 (codex-1); handoff to codex-1 pending 0s; off</text>
-<text x="18.0" y="102.0" xml:space="preserve" fill="#c9d1d9">er ee5772ef064b4b76a119b055b2dd19df</text>
+<text x="18.0" y="102.0" xml:space="preserve" fill="#c9d1d9">er 4fb75a1dafff4e1db69ea9f400dcb34b</text>
 <text x="18.0" y="120.0" xml:space="preserve" fill="#c9d1d9">  Peer-provided summary: "Capture path committed; rounding table left to check."</text>
-<text x="18.0" y="138.0" xml:space="preserve" fill="#c9d1d9">  Commit: 3401f62ad9eaa2592cd57bfdf0df0295a9204578</text>
+<text x="18.0" y="138.0" xml:space="preserve" fill="#c9d1d9">  Commit: 3261da069d1dae92868591d6ec46de19ef1c022b</text>
 <text x="18.0" y="156.0" xml:space="preserve" fill="#c9d1d9">  Reservations: src/payments/refund.py</text>
 <text x="18.0" y="174.0" xml:space="preserve" fill="#c9d1d9">#58: claude-2 (working; event 0s ago); last progress 0s ago; no deadline</text>
 </svg>
