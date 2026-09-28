@@ -34,6 +34,13 @@ from agent_parley import (
     terminal,
 )
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
+from agent_parley.status import (
+    FORGE_ISSUES,
+    FORGE_LIMIT,
+    FORGE_RETRY,
+    FORGE_TIMEOUT,
+    FORGE_TTL,
+)
 
 DEFAULTS = {
     "interval": 30,
@@ -4172,6 +4179,56 @@ def branch_lane(manifest: dict, branch: str) -> str:
     return owners[0] if len(owners) == 1 else ""
 
 
+def refresh_forge_issues(directory: Path, manifest: dict) -> None:
+    """Keeps the cached reading of the forge's open issues current.
+
+    `status` hides claims on closed issues and shows titles from
+    `FORGE_ISSUES`, but stays read-only, so the poll owns the forge read.
+    One bounded call reads every open issue once the cached reading is
+    `FORGE_TTL` seconds old. A failed call is recorded and retried no sooner
+    than `FORGE_RETRY` seconds later, so a forge that is down costs one
+    timeout per retry window, and the last good reading is kept meanwhile.
+    A project without a GitHub forge is never read.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    path = directory / FORGE_ISSUES
+    try:
+        cached = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cached = {}
+    if not isinstance(cached, dict):
+        cached = {}
+    now = time.time()
+    if (
+        isinstance(cached.get("issues"), dict)
+        and now - float(cached.get("read_at") or 0) < FORGE_TTL
+    ):
+        return
+    root = Path(manifest["root"])
+    if forge.select(root, manifest) != "github":
+        return
+    if now - float(cached.get("failed_at") or 0) < FORGE_RETRY:
+        return
+    catalog = forge.open_issue_catalog(root, FORGE_LIMIT, FORGE_TIMEOUT)
+    if catalog is None:
+        write_json(path, {**cached, "failed_at": now})
+        return
+    write_json(
+        path,
+        {
+            "read_at": now,
+            "limit": FORGE_LIMIT,
+            "issues": {
+                number: {"title": str(item.get("title") or "")}
+                for number, item in catalog.items()
+            },
+        },
+    )
+
+
 PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
 
@@ -4752,6 +4809,7 @@ def _poll(home: Path, directory: Path) -> None:
         store.reclaim_expired(home, manifest["root"])
     stage("deliveries", deliveries, home, directory, manifest)
     stage("dependencies", lifecycle.settle_dependencies, directory)
+    stage("forge issues", refresh_forge_issues, directory, manifest)
     if config["prompts"]:
         stage(
             "completions",

@@ -118,12 +118,14 @@ and named on one line with `agent-parley issue resolve N`; `--all` lists those
 rows too.
 
 Titles and open state come from one bounded read of the project's open GitHub
-issues, the same list `issue list` reads, with a 5-second timeout. The reading
-is cached as `forge-issues.json` in the project's state directory for 300
-seconds, so repeated `status` calls reuse it. When the read fails, `status`
-answers from the last cached reading, prints one `Forge:` line with its age,
-and waits 60 seconds before trying again. With no reading at all, or no GitHub
-forge, the `Forge:` line says so and claims on closed issues are not hidden.
+issues, the same list `issue list` reads, with a 5-second timeout. The service's
+poll takes that reading, not `status`: it caches it as `forge-issues.json` in
+the project's state directory and reads again once the cache is 300 seconds
+old. When the read fails, the poll keeps the last reading and waits 60 seconds
+before trying again. `status` only reads the cache; a reading over 600 seconds
+old prints one `Forge:` line with its age and the cause, a failed read or a
+service that is not refreshing it. With no reading at all, or no GitHub forge,
+the `Forge:` line says so and claims on closed issues are not hidden.
 Last, `Needs action:` lists each orphaned or overdue claim with the
 command that resolves it, `agent-parley issue claim N --take-orphaned` run from
 a peer lane or `agent-parley issue assign N LANE --reason TEXT`.
