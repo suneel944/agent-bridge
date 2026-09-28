@@ -3,6 +3,7 @@
 import json
 import shlex
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,21 @@ def test_blocked_and_ready_work_are_not_dispatched_as_continuations(tmp_path):
     assert ledger["issues"]["10"]["execution"]["next_action"] == (
         "verify and integrate"
     )
+
+
+def test_a_held_claim_whose_issue_closed_is_not_a_continuation(tmp_path):
+    claim(tmp_path, "11")
+    ledger = issues.snapshot(tmp_path)
+    assert lifecycle.actionable(ledger, "codex") == ["11"]
+
+    for responded in (None, time.time()):
+        ledger["issues"]["11"]["handoff_prompt"] = {
+            "trigger": issues.ENDED,
+            "holder": "codex",
+            "created": time.time(),
+            "responded_at": responded,
+        }
+        assert lifecycle.actionable(ledger, "codex") == []
 
 
 def test_cli_issue_resume_condition_continues_after_verified_dependency(
