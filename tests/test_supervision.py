@@ -18,6 +18,7 @@ from agent_parley import (
     lanes,
     process,
     roster,
+    state,
     store,
     supervision,
     terminal,
@@ -821,6 +822,51 @@ def test_dead_manual_session_resumes_from_its_recorded_session(
     assert "--resume" in launched[0][0]
     record = json.loads((directory / "codex-wake.json").read_text())
     assert record["result"] == "resume requested (launcher 4321)"
+
+
+@pytest.mark.parametrize(
+    "answer,result,attempts",
+    [
+        ("accepted", "accepted", 1),
+        ("unavailable", supervision.SESSION_HELD, 0),
+    ],
+)
+def test_a_held_session_lock_is_asked_over_its_socket_never_resumed(
+    bridge, paired, monkeypatch, answer, result, attempts
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    write_json(
+        directory / "codex-activity.json",
+        {"activity": "stopped", "session_id": "live-session"},
+    )
+    send(bridge, actors["claude"], "codex")
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("resumed a held session"),
+    )
+    asked = []
+    monkeypatch.setattr(
+        terminal,
+        "request",
+        lambda directory, name: asked.append(name) or answer,
+    )
+    with state.lock(directory / "codex.session.lock"):
+        assert supervision.session_held(directory, "codex")
+        supervision.wake(
+            bridge.home,
+            directory,
+            paired,
+            "codex",
+            {"process_alive": False},
+            supervision.DEFAULTS,
+        )
+    assert not supervision.session_held(directory, "codex")
+    assert asked == ["codex"]
+    record = json.loads((directory / "codex-wake.json").read_text())
+    assert record["result"] == result
+    assert record["attempts"] == attempts
 
 
 def test_manual_session_without_process_identity_requires_attention(

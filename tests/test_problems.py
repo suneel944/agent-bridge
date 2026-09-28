@@ -439,6 +439,12 @@ def test_a_paused_lane_is_resumed_rather_than_spoken_to(
             "the coordination service wakes claude on its next poll; no "
             "operator action yet",
         ),
+        (
+            supervision.SESSION_HELD,
+            "holds the session lock",
+            "take the turn waiting in claude's own client; its launcher "
+            "still holds the session lock, so a resume would be refused",
+        ),
     ],
 )
 def test_a_wake_refusal_names_its_reason_and_an_actor_who_can_clear_it(

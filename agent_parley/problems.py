@@ -89,6 +89,10 @@ WAKE_DETAILS = {
         "wake refused because the client is waiting for a native approval"
     ),
     ATTENTION: "wake requires operator attention",
+    supervision.SESSION_HELD: (
+        "resume refused because a running launcher holds the session lock "
+        "and its wake socket did not answer"
+    ),
 }
 
 
@@ -192,7 +196,9 @@ def _remedy(
     A lane between turns and a lane whose launcher exited need opposite
     commands. Resuming a lane whose launcher is still running collides with
     the session lock that launcher holds, so only a stopped lane is resumed,
-    and a lane that cannot read mail is never handed a delivery command.
+    a lane whose last wake found that lock held is sent to its own client
+    even when its record reads stopped, and a lane that cannot read mail is
+    never handed a delivery command.
 
     Args:
         name: Participant that owns the lane.
@@ -207,6 +213,13 @@ def _remedy(
         the lane's recorded state.
     """
     blocked = _blocked(record)
+    wake = record.get("wake") or {}
+    if wake.get("result") == supervision.SESSION_HELD:
+        return (
+            f"take the turn waiting in {name}'s own client; its launcher "
+            "still holds the session lock, so a resume would be refused",
+            BY_OPERATOR,
+        )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
     if blocked == DIALOG:
