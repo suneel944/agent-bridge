@@ -5758,6 +5758,30 @@ def session_held(directory: Path, name: str) -> bool:
         return True
 
 
+def _fenced(directory: Path, name: str, state: dict) -> bool:
+    """Reports whether the session a resume would continue was fenced.
+
+    The launcher resumes the activity record's resumable session, falling
+    back to its session identifier. A published ownership takeover fences
+    that session generation, so resuming it could only be refused again.
+
+    Args:
+        directory: Private project state directory.
+        name: Lane participant name.
+        state: The lane's activity record.
+
+    Returns:
+        True when a published takeover fenced the session to be resumed.
+    """
+    from agent_parley import recovery
+
+    session = str(state.get("resumable_session", state.get("session_id")) or "")
+    return bool(
+        session
+        and recovery.stale_session(directory, name, {"session_id": session})
+    )
+
+
 def wake(
     home: Path,
     directory: Path,
@@ -5807,7 +5831,9 @@ def wake(
     the lock. When the socket does not answer either, the wake is recorded
     as `SESSION_HELD`, a busy refusal that spends no attempt and that
     `status` and `problems` report, rather than as a requested resume the
-    lock would refuse.
+    lock would refuse. A session whose ownership generation a published
+    takeover fenced is never resumed; the wake is recorded as needing
+    manual attention, because that session can only end its turn.
 
     The attempt bound counts wakes without progress. Each attempt records the
     lane's progress marker from `_lane_activity`: its `HEAD` moves, the state
@@ -6047,7 +6073,11 @@ def wake(
             result = terminal.request(directory, name)
             if result == "unavailable":
                 result = SESSION_HELD
-        elif (observed["process_alive"] is False or stopped) and session:
+        elif (
+            (observed["process_alive"] is False or stopped)
+            and session
+            and not _fenced(directory, name, state)
+        ):
             entry = roster.provider(home, participant["provider"])
             if entry["adapter"] in roster.ADAPTERS and not entry.get(
                 "require_env"
