@@ -1346,7 +1346,8 @@ def matching_lanes(
     reported outcome, whether its checkout sits on the branch it was assigned,
     whether supervision currently reads it as stalled and whether it is over
     an advisory budget. `--all` adds no filter of its own, so it selects
-    whatever the others leave.
+    whatever the others leave. A retired lane is never matched: it has no
+    session to act on and no worktree whose branch could be compared.
 
     Args:
         home: Private bridge state root.
@@ -1370,6 +1371,8 @@ def matching_lanes(
     names = []
     for name in sorted(data["participants"]):
         participant = data["participants"][name]
+        if roster.retired(participant):
+            continue
         if args.provider and participant["provider"] != args.provider:
             continue
         reported = activity(directory, name).get("outcome", "unknown")
