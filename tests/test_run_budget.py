@@ -658,6 +658,27 @@ def test_a_reset_after_a_lost_ledger_never_rereads_history(
     )
 
 
+def test_a_line_longer_than_one_read_is_skipped_not_stalled_on(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(records, "MAX_READ", 64)
+    path = tmp_path / "long.jsonl"
+    lines = [
+        {"usage": {"input_tokens": 1000}, "pad": "x" * 300},
+        {"usage": {"input_tokens": 3}},
+    ]
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    def fold(record, reading):
+        reading["tokens"] += record["usage"]["input_tokens"]
+
+    reading = {}
+    for _ in range(20):
+        reading = records._advance(path, fold, reading)
+    assert reading["offset"] == path.stat().st_size
+    assert reading["tokens"] == 3
+
+
 def test_a_hand_started_session_never_inherits_a_run_start(
     bridge, repo, paired
 ):
