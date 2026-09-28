@@ -521,6 +521,7 @@ reported.
                     cursor=0,
                     session_pid=os.getpid(),
                     session_ticks=process.start_ticks(os.getpid()),
+                    session_boot=process.boot_id(),
                     launcher_pid=os.getpid(),
                     launcher_ticks=process.start_ticks(os.getpid()),
                     session_started=time.time(),
