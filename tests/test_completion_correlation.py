@@ -350,6 +350,58 @@ def test_a_hand_closed_issue_finds_its_pull_request_on_the_timeline(
     assert reading["pull_request"] == 0
 
 
+def test_a_closing_reference_past_the_first_timeline_page_is_found(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    closing = {
+        "event": "cross-referenced",
+        "source": {
+            "issue": {
+                "number": 1328,
+                "body": "Closes #1216",
+                "pull_request": {"merged_at": "2026-09-19T00:00:00Z"},
+                "repository": {"full_name": "owner/name"},
+            }
+        },
+    }
+    full = [{"event": "labeled"}] * forge.TIMELINE_PAGE
+    pages = {"1": full, "2": [closing]}
+    requested = []
+
+    def run(args, timeout):
+        if args[1] == "issue":
+            return json.dumps(
+                {
+                    "state": "CLOSED",
+                    "closedAt": "2026-09-20T00:00:00Z",
+                    "closedByPullRequestsReferences": [],
+                }
+            )
+        if args[1] == "api":
+            page = args[2].rsplit("page=", 1)[1]
+            requested.append(page)
+            return json.dumps(pages.get(page, full))
+        return json.dumps(
+            {
+                "state": "MERGED",
+                "number": 1328,
+                "url": "https://example.invalid/pull/1328",
+                "headRefName": "fix/1216-replay",
+                "mergeCommit": {"oid": "abcdef1234567"},
+            }
+        )
+
+    monkeypatch.setattr(forge, "_run", run)
+    reading = forge.issue_completion(tmp_path, "1216")
+    assert requested == ["1", "2"]
+    assert reading["state"] == "MERGED"
+    pages["2"] = full
+    requested.clear()
+    forge.issue_completion(tmp_path, "1216")
+    assert len(requested) == forge.TIMELINE_PAGES
+
+
 def test_a_ready_report_on_an_observed_complete_claim_asks_for_completion(
     bridge, claimed, monkeypatch
 ):

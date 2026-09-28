@@ -26,6 +26,8 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+TIMELINE_PAGE = 100
+TIMELINE_PAGES = 10
 FAILED_CHECKS = frozenset(
     {
         "FAILURE",
@@ -325,24 +327,36 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
         number: Bare repository issue number.
         closed_at: Instant the issue closed, in Unix seconds.
 
+    An issue worked by several lanes collects labels, assignments and
+    progress comments, so its closing reference often lies past the first
+    page. The timeline is read one page of `TIMELINE_PAGE` events at a time
+    until a short page ends it, for at most `TIMELINE_PAGES` pages, so one
+    reading stays bounded however long the timeline grows.
+
     Returns:
         The matching pull request numbers, empty when none match or the
         timeline cannot be read.
     """
-    output = _run(
-        [
-            "gh",
-            "api",
-            f"repos/{project}/issues/{number}/timeline?per_page=100",
-        ],
-        5,
-    )
     keyword = re.compile(
         rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{number}\b",
         re.IGNORECASE,
     )
     try:
-        events = json.loads(output or "[]")
+        events = []
+        for page in range(1, TIMELINE_PAGES + 1):
+            output = _run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{project}/issues/{number}/timeline"
+                    f"?per_page={TIMELINE_PAGE}&page={page}",
+                ],
+                5,
+            )
+            batch = json.loads(output or "[]")
+            events.extend(batch)
+            if len(batch) < TIMELINE_PAGE:
+                break
         found = []
         for event in events:
             if event.get("event") != "cross-referenced":
