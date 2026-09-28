@@ -1,5 +1,6 @@
 """Checks durable, bounded recovery of an integration its gate never passed."""
 
+import fcntl
 import json
 import shlex
 import subprocess
@@ -443,6 +444,39 @@ def test_a_busy_issue_ledger_never_masks_the_failure(
     held = merges.integration_record(bridge.project(repo)[1])
     assert held["kind"] == merges.GATE_FAILED
     assert execution(bridge, repo, "42")["state"] == lifecycle.READY
+
+
+def test_a_busy_ledger_at_completion_keeps_the_record_for_a_retry(
+    bridge, repo, paired, gated, monkeypatch
+):
+    ready(bridge, paired, "claude", "42", {"work.txt": "good\n"})
+    directory = bridge.project(repo)[1]
+    real = lifecycle.complete
+
+    def contended(*args):
+        with (directory / "issues.lock").open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            return real(*args)
+
+    monkeypatch.setattr(lifecycle, "complete", contended)
+    with pytest.raises(BridgeError, match="could not be recorded complete"):
+        bridge.merge(repo, "claude")
+    monkeypatch.setattr(lifecycle, "complete", real)
+
+    merged = git(repo, "rev-parse", "HEAD")
+    held = merges.integration_record(directory)
+    assert held["result"] == merged
+    assert "not recorded complete" in held["detail"]
+    assert execution(bridge, repo, "42")["state"] == lifecycle.READY
+
+    report = bridge.merge(repo, "claude")
+
+    assert f"Recovery verified {merged[:12]}" in report
+    assert git(repo, "rev-parse", "HEAD") == merged
+    state = execution(bridge, repo, "42")
+    assert state["state"] == lifecycle.COMPLETE
+    assert state["integrated_commit"] == merged
+    assert merges.integration_record(directory) is None
 
 
 def test_a_merge_timeout_before_any_change_burns_no_attempt(
