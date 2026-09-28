@@ -26,7 +26,7 @@ from agent_parley.roster import OPERATOR
 from agent_parley.state import BridgeError, lock
 
 DATABASE = "bridge.sqlite3"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 SCHEMA_ABSENT = "absent"
 SCHEMA_BEHIND = "needs migration"
 SCHEMA_CURRENT = "ok"
@@ -353,6 +353,11 @@ def initialize(home: Path) -> None:
     stored message an empty topic and keeps it out of the feed, so routing
     and supersession apply only to mail sent after the upgrade.
 
+    Upgrading a store written before spilled bodies were indexed rebuilds
+    the full-text index once, so a message whose body spilled to an
+    attachment is found by the text of that attachment rather than only by
+    the slice its record keeps.
+
     A store already stamped with this build's schema still has every column
     this build owns verified and added where it is missing. The stamp says
     which upgrade ran, not that its columns are all present, and a store
@@ -389,7 +394,7 @@ def initialize(home: Path) -> None:
                 _add_reservation_ttl(db)
                 _add_supersession(db)
                 _add_topic(db)
-                _add_message_search(db)
+                _add_message_search(db, home)
                 _add_schedule_cancellation(db)
                 if version == SCHEMA_VERSION:
                     return
@@ -403,7 +408,7 @@ def initialize(home: Path) -> None:
                         "WHERE created_ts IS NULL"
                     )
                 _open_threads(db)
-                _rebuild_search(db)
+                _rebuild_search(db, home)
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -567,13 +572,17 @@ def _add_reservation_created(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE file_reservations ADD COLUMN created_ts TEXT")
 
 
-def _add_message_search(db: sqlite3.Connection) -> None:
+def _add_message_search(db: sqlite3.Connection, home: Path) -> None:
     """Creates the full-text index where the SQLite build provides FTS5.
 
     Startup reconciles triggers even at the current schema version. Without
     FTS5, old triggers must be removed so ordinary message writes still work.
     When FTS5 returns, missing triggers cause an index rebuild to include mail
     delivered by the interpreter that could not maintain it.
+
+    Args:
+        db: Open write transaction owned by the caller.
+        home: Private bridge state root the project directories live under.
     """
     if not _fts_available(db):
         db.execute("DROP TRIGGER IF EXISTS message_indexed")
@@ -590,7 +599,7 @@ def _add_message_search(db: sqlite3.Connection) -> None:
             db.execute(statement)
             statement = ""
     if triggers != 2:
-        _rebuild_search(db)
+        _rebuild_search(db, home)
 
 
 def _fts_available(db: sqlite3.Connection) -> bool:
@@ -616,11 +625,46 @@ def _open_threads(db: sqlite3.Connection) -> None:
     )
 
 
-def _rebuild_search(db: sqlite3.Connection) -> None:
-    """Indexes every stored message when this store carries an index."""
-    if _searchable(db):
+def _rebuild_search(db: sqlite3.Connection, home: Path) -> None:
+    """Indexes every stored message when this store carries an index.
+
+    A body that spilled to an attachment keeps only its opening slice in
+    ``body_md``, which is all a rebuild reads. Each spilled message is then
+    indexed again from its attachment, as it was when it was sent, so its
+    whole body stays searchable. An attachment that is missing or unreadable
+    leaves the slice indexed.
+
+    Args:
+        db: Open write transaction owned by the caller.
+        home: Private bridge state root the project directories live under.
+    """
+    if not _searchable(db):
+        return
+    db.execute("INSERT INTO message_search(message_search) VALUES ('rebuild')")
+    rows = db.execute(
+        "SELECT m.id,m.subject,m.body_md,a.name,p.human_key FROM messages m "
+        "JOIN agents a ON a.id=m.sender_id "
+        "JOIN projects p ON p.id=m.project_id "
+        "WHERE m.body_md LIKE '%[attachment message-%'"
+    ).fetchall()
+    for identifier, subject, stored, sender, project in rows:
+        ref = attachments.reference("message", identifier)
+        found = attachments.find(stored)
+        directory = roster.locate(home, project)
+        if not found or found[0] != ref or directory is None:
+            continue
+        try:
+            body = attachments.body(directory, ref, sender)
+        except BridgeError:
+            continue
         db.execute(
-            "INSERT INTO message_search(message_search) VALUES ('rebuild')"
+            "INSERT INTO message_search(message_search,rowid,subject,body_md)"
+            " VALUES ('delete',?,?,?)",
+            (identifier, subject, stored),
+        )
+        db.execute(
+            "INSERT INTO message_search(rowid,subject,body_md) VALUES (?,?,?)",
+            (identifier, subject, body),
         )
 
 
