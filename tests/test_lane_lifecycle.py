@@ -23,7 +23,7 @@ from agent_parley import (
     store,
     supervision,
 )
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 SLEEPER = "import time; time.sleep(120)"
 
@@ -105,6 +105,21 @@ def test_pause_retains_claims_and_never_releases_them(bridge, repo, paired):
     ledger = cli.snapshot(lane.parent)["issues"]["7"]
     assert ledger["owner"] == "claude"
     assert "already paused" in bridge.pause(repo, "claude")
+
+
+def test_retire_refuses_a_busy_lane_before_removing_anything(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    with lock(directory / "claude-checkpoint.lock"):
+        with pytest.raises(LockBusy):
+            bridge.retire(repo, "claude")
+    assert lane.is_dir()
+    participant = roster.read(directory)["participants"]["claude"]
+    assert cli.has_branch(repo, participant["branch"])
+    assert "Retired claude." in bridge.retire(repo, "claude")
+    assert not lane.exists()
 
 
 def test_top_reports_a_paused_lane(bridge, repo, paired, capsys):

@@ -655,6 +655,11 @@ class StatusMixin(BridgeCore):
                 state["dialog"] if isinstance(state.get("dialog"), dict) else {}
             ),
             "foreign_session": checkpoints.foreign_reading(state),
+            "wake_log": (
+                str(directory / f"{agent}-wake.log")
+                if state.get("attached") is False
+                else ""
+            ),
             "retired_at": views.timestamp(participant.get("retired")),
             "retired_age_seconds": (
                 int(time.time() - float(participant["retired"]))
