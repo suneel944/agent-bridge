@@ -22,6 +22,7 @@ directory.
 import contextlib
 import datetime
 import json
+import shlex
 import sqlite3
 import time
 from pathlib import Path
@@ -598,7 +599,7 @@ def _lane_rows(
         other remedy here would wake a lane that has given its work back.
     """
     name = record["participant"]
-    repo = f"--repo {root}"
+    repo = f"--repo {shlex.quote(str(root))}"
     rows: list[dict] = []
     if roster.retired(participant):
         if supervision.dirty_paths(participant["lane"]):
@@ -792,7 +793,7 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
         and counting the rest, so a lane ignoring five offers reads as one
         condition rather than five.
     """
-    repo = f"--repo {project['root']}"
+    repo = f"--repo {shlex.quote(str(project['root']))}"
     waiting: dict[str, list[tuple[int, int, dict]]] = {}
     for record in project["issues"]:
         offer = record["offer"]
@@ -808,7 +809,7 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
         age, number, offer = items[0]
         source = issues.offer_source(offer)
         command = (
-            f"agent-parley issue assign {number} {recipient} --unassign {repo}"
+            f"agent-parley issue assign {number} --unassign {repo}"
             if source == issues.OPERATOR
             else f"agent-parley issue cancel {number} {repo}"
         )
@@ -861,7 +862,7 @@ def _bounce_rows(
         name: record.get("availability") or {}
         for name, record in records.items()
     }
-    repo = f"--repo {project['root']}"
+    repo = f"--repo {shlex.quote(str(project['root']))}"
     rows = []
     for share in supervision.bounced_shares(
         home, directory, data, availability
@@ -1095,7 +1096,7 @@ def _plan_rows(directory: Path, root: str, now: float) -> list[dict]:
     except (OSError, ValueError):
         return []
     retained = list(filed.values())[-plan.MAX_PROPOSALS :]
-    where = f"--repo {root}"
+    where = f"--repo {shlex.quote(str(root))}"
     rows = [
         _row(
             ESCALATED,
@@ -1162,7 +1163,8 @@ def _run_rows(
         _row(
             RUN_BUDGET,
             f"{stopped['cause']}; no wake, dispatch, retry or launch starts",
-            f"agent-parley budget resume --repo {root} (add --reset to start "
+            f"agent-parley budget resume --repo {shlex.quote(str(root))} "
+            "(add --reset to start "
             "a new accounting period, or raise the limit with agent-parley "
             "budget enforce)",
             _age(stopped.get("at"), now),

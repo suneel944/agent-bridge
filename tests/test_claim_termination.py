@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 
@@ -208,7 +209,7 @@ def test_the_escalation_reaches_status_and_problems(
     assert len(listed) == 1
     assert listed[0]["participant"] == "claude"
     assert listed[0]["command"] == (
-        f"agent-parley issue resolve 1 --repo {paired['root']}"
+        f"agent-parley issue resolve 1 --repo {shlex.quote(paired['root'])}"
     )
 
 

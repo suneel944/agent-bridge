@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -288,7 +289,8 @@ def test_a_retired_lane_reports_only_the_worktree_it_kept(bridge, repo, paired):
 
     assert [row["condition"] for row in found] == [problems.DIRTY]
     assert found[0]["command"] == (
-        f"agent-parley participant add claude --repo {paired['root']}"
+        "agent-parley participant add claude --repo "
+        f"{shlex.quote(paired['root'])}"
     )
 
 
