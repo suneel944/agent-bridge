@@ -161,6 +161,61 @@ def test_read_attachment_pages_and_is_scoped_to_the_addressed(
         )
 
 
+def test_search_finds_text_only_in_a_spilled_body_after_a_rebuild(
+    bridge, repo, paired
+):
+    lanes = actors(bridge, paired)
+    tail = "line of evidence\n" * 400 + "rotate the signing key\n"
+    mail = sent(bridge, lanes["claude"], tail)
+    decision = store.call(
+        bridge.home,
+        lanes["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Agreed",
+            "body_md": tail,
+            "idempotency_key": "decided-1",
+            "decision": True,
+        },
+    )
+    assert mail["attachment"] and decision["attachment"]
+
+    def found():
+        hits = store.call(
+            bridge.home,
+            lanes["codex"],
+            "search_messages",
+            {"query": "signing key"},
+        )
+        decided = store.call(
+            bridge.home,
+            lanes["codex"],
+            "search_decisions",
+            {"query": "signing key"},
+        )
+        assert hits["index"] == decided["index"] == "fts5"
+        return (
+            [row["id"] for row in hits["messages"]],
+            [row["id"] for row in decided["messages"]],
+        )
+
+    expected = ([decision["id"], mail["id"]], [decision["id"]])
+    assert found() == expected
+    with store.connect(bridge.home, write=True) as db:
+        db.execute(
+            "INSERT INTO message_search(message_search) VALUES ('rebuild')"
+        )
+        db.execute(f"PRAGMA user_version={store.SCHEMA_VERSION - 1}")
+    assert found() == ([], [])
+    store.initialize(bridge.home)
+    assert found() == expected
+    with store.connect(bridge.home, write=True) as db:
+        db.execute("DROP TRIGGER message_indexed")
+    store.initialize(bridge.home)
+    assert found() == expected
+
+
 def test_attachment_and_lane_caps_are_enforced(
     bridge, repo, paired, monkeypatch
 ):

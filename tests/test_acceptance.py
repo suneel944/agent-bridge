@@ -225,7 +225,30 @@ def test_a_passing_run_writes_the_record_a_release_accepts(
     written = json.loads((tmp_path / "docs/acceptance/9.9.0.json").read_text())
     assert written["lanes"] == 2
     assert written["claims"] == written["claims_completed"] == 1
+    assert written["verdict"] == "passed"
     assert release_publish.acceptance_record_error(tmp_path, "9.9.0") == ""
+
+
+def test_a_failed_run_writes_a_record_a_release_refuses(tmp_path):
+    decided = {
+        "passed": False,
+        "measured": {
+            "lanes": 2,
+            "claims": 1,
+            "claims_completed": 1,
+            "idle_lane_minutes": 0.0,
+            "unaccountable_claim_minutes": 0.0,
+        },
+    }
+    written = acceptance.acceptance_record(
+        decided, "9.9.0", "https://example.invalid/report.md"
+    )
+    assert written["verdict"] == "failed"
+    path = tmp_path / "docs" / "acceptance" / "9.9.0.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(written))
+    error = release_publish.acceptance_record_error(tmp_path, "9.9.0")
+    assert error.endswith("carries verdict 'failed', not 'passed'")
 
 
 def test_a_claim_held_by_an_inactive_lane_is_unaccounted_time(tmp_path):

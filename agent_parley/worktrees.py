@@ -145,10 +145,17 @@ def verify_base(
             and is unverified. Nothing is ever reset or reverted either way.
 
     Raises:
-        BridgeError: If the command cannot run, or if it exits non-zero.
-        subprocess.TimeoutExpired: If verification exceeds its timeout.
+        BridgeError: If the command cannot run, if it exits non-zero, or if
+            it exceeds its timeout. A timeout is a failed gate like any
+            other, so every caller records it the same way.
     """
     quoted = shlex.join(command)
+    outcome = (
+        "The merge commits already recorded stand and are unverified; "
+        "nothing was reset or reverted."
+        if integrated
+        else "Nothing was merged."
+    )
     try:
         result = subprocess.run(
             command,
@@ -163,14 +170,15 @@ def verify_base(
             f"not run: {exc}. Correct it with `agent-parley verify set`, then "
             "rerun; merge never skips verification."
         ) from None
+    except subprocess.TimeoutExpired:
+        raise BridgeError(
+            f"Verification timed out in the base checkout at {root}: "
+            f"`{quoted}` ran past {VERIFY_TIMEOUT} seconds. Make it finish "
+            "within the limit and rerun; merge never skips verification. "
+            f"{outcome}"
+        ) from None
     if not result.returncode:
         return
-    outcome = (
-        "The merge commits already recorded stand and are unverified; "
-        "nothing was reset or reverted."
-        if integrated
-        else "Nothing was merged."
-    )
     raise BridgeError(
         f"Verification failed in the base checkout at {root}: `{quoted}` "
         f"exited {result.returncode}. Fix it and rerun; merge never skips "

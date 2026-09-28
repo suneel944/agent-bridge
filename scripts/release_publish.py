@@ -523,8 +523,11 @@ def run_acceptance_suite(root: Path) -> str:
 def acceptance_record_error(root: Path, version: str) -> str:
     """Validates the live acceptance record a minor or major release needs.
 
-    Every measurement must be a finite, non-negative number, and lane and
-    claim counts must be integers. JSON decoding admits NaN, infinity and
+    The run's own verdict must read ``passed``: the measured numbers alone
+    cannot show that every condition the run checks held, so a run that
+    failed its conditions never validates a release, however its numbers
+    read. Every measurement must be a finite, non-negative number, and lane
+    and claim counts must be integers. JSON decoding admits NaN, infinity and
     overflowed literals, so those are named as invalid rather than letting
     comparisons against them pass the record.
 
@@ -549,6 +552,11 @@ def acceptance_record_error(root: Path, version: str) -> str:
         return f"live acceptance record {path} names another version"
     if not str(record.get("run", "")).strip():
         return f"live acceptance record {path} names no run"
+    if record.get("verdict") != "passed":
+        return (
+            f"live acceptance record {path} carries verdict "
+            f"{record.get('verdict')!r}, not 'passed'"
+        )
     missing = [
         name
         for name in ACCEPTANCE_MEASURES

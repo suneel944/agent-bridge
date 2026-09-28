@@ -243,7 +243,8 @@ class ClaimsMixin(ReportsMixin):
                 takeover = recovery.prepare_takeover(
                     directory, data, agent, parse_issue(number)
                 )
-                recovery.preflight(directory, repo, takeover["checkpoint"])
+                if takeover["checkpoint"]:
+                    recovery.preflight(directory, repo, takeover["checkpoint"])
         try:
             record = change(
                 directory,
@@ -437,7 +438,9 @@ class ClaimsMixin(ReportsMixin):
         if previous not in data["participants"]:
             return record
         checkpoint = taken.get("checkpoint") or {}
-        source_claim = str(checkpoint.get("claim_id") or "")
+        source_claim = str(
+            checkpoint.get("claim_id") or taken.get("claim_id") or ""
+        )
         new_owner = str(record.get("owner") or "")
         if new_owner not in data["participants"]:
             return record

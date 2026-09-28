@@ -55,10 +55,11 @@ class IntegrationMixin(MailMixin):
             BridgeError: If the lane drifted, if the participant holds a
                 running session, if the project requires an operator approval
                 the lane's current ready report does not have, if the
-                repository's verification command fails, if the base carries
-                an unverified integration this lane may not repair or whose
-                attempts are used, or if the merge cannot complete unattended.
-            subprocess.TimeoutExpired: If verification exceeds its timeout.
+                repository's verification command fails or times out, if the
+                base carries an unverified integration this lane may not
+                repair or whose attempts are used, or if the merge cannot
+                complete unattended.
+            subprocess.TimeoutExpired: If a Git query exceeds its timeout.
         """
         from agent_parley.cli import lock, roster
 
@@ -128,9 +129,9 @@ class IntegrationMixin(MailMixin):
         Raises:
             BridgeError: If run from an assigned worktree, if the base holds
                 a merge in progress or uncommitted changes, if the gate
-                fails, or if the gate moves HEAD or changes the tree. The
-                record stands in every case.
-            subprocess.TimeoutExpired: If verification exceeds its timeout.
+                fails or times out, or if the gate moves HEAD or changes the
+                tree. The record stands in every case.
+            subprocess.TimeoutExpired: If a Git query exceeds its timeout.
         """
         from agent_parley.cli import git, lock, merges, roster, verify_base
 
@@ -322,9 +323,10 @@ class IntegrationMixin(MailMixin):
         command merges it on.
 
         An attempt is recorded before the merge starts and cleared only when
-        the exact resulting commit passes the post-merge gate, so a conflict,
-        a failed gate or a crash leaves a durable account of an unverified
-        base. While it stands no other lane is integrated, and a retry by the
+        the exact resulting commit passes the post-merge gate and the claim
+        is recorded complete, so a conflict, a failed gate, a crash or a busy
+        issue ledger leaves a durable account the lane's retry finishes.
+        While it stands no other lane is integrated, and a retry by the
         lane that may repair it skips the pre-merge gate, whose failure the
         record already names, and verifies the exact result instead.
 
@@ -499,20 +501,35 @@ class IntegrationMixin(MailMixin):
                             "complete."
                         ),
                     )
+            if claim["issue"] is not None and claim["claim_id"]:
+                try:
+                    lifecycle.complete(
+                        directory,
+                        str(claim["issue"]),
+                        claim["claim_id"],
+                        integrated,
+                        data["verify"],
+                        source_commit,
+                    )
+                except (BridgeError, OSError) as failure:
+                    detail = merges.diagnostic(
+                        f"verified but not recorded complete: {failure}"
+                    )
+                    merges.record_integration(
+                        directory, {**entry, "detail": detail}
+                    )
+                    raise BridgeError(
+                        f"{merged}\nThe merge at {integrated[:12]} passed "
+                        f"the gate, but issue #{claim['issue']} could not "
+                        f"be recorded complete: {failure}\nThe integration "
+                        f"record stands; run `agent-parley participant "
+                        f"merge {name}` again to record the completion."
+                    ) from None
             merges.clear_integration(directory, entry["attempt"], integrated)
             if held:
                 merged += (
                     f" Recovery verified {integrated[:12]} on attempt "
                     f"{entry['attempt']} of {entry['limit']}."
-                )
-            if claim["issue"] is not None and claim["claim_id"]:
-                lifecycle.complete(
-                    directory,
-                    str(claim["issue"]),
-                    claim["claim_id"],
-                    integrated,
-                    data["verify"],
-                    source_commit,
                 )
             metrics.record_report(
                 directory,
@@ -905,7 +922,7 @@ class IntegrationMixin(MailMixin):
                 continue
             try:
                 outcome = self._integrate_lane(root, directory, data, name)
-            except BridgeError as failure:
+            except (BridgeError, subprocess.TimeoutExpired) as failure:
                 stopped = name
                 report.append(f"- {name}: stopped. {failure}")
                 continue

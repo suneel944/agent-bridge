@@ -215,10 +215,14 @@ on its own after an eligible push to `main`, and what to inspect afterwards.
    also runs in `make check`, so a pull request that breaks it is red before
    any release. The live record is written from a real unattended run with
    native clients, the run #366 describes, and holds `version`, `run` (a link
-   to the run's report), and the measured `lanes`, `claims`,
-   `claims_completed`, `idle_lane_minutes` and `unaccountable_claim_minutes`;
-   every claim the run took must have completed. A missing suite pass or a
-   missing or incomplete record fails the run before the markers are raised,
+   to the run's report), `verdict`, and the measured `lanes`, `claims`,
+   `claims_completed`, `idle_lane_minutes` and `unaccountable_claim_minutes`.
+   `verdict` is the run's own overall result and must read `passed`: the
+   idle and unaccountable minutes are published as evidence, and the run's
+   conditions, not a second ceiling here, decide whether they failed it.
+   Every claim the run took must have completed. A missing suite pass, a
+   failed verdict, or a missing or incomplete record fails the run before
+   the markers are raised,
    with one line per missing piece of evidence, so a count of release units
    alone can never publish a minor version again.
 4. `python3 -m scripts.release_publish bump` raises every version marker the
