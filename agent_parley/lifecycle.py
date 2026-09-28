@@ -220,9 +220,13 @@ def actionable(ledger: dict, owner: str | None = None) -> list[str]:
 
     Returns:
         Issue numbers ordered numerically. Owner work is limited to its
-        current generation. Free work must be queued, unowned and not
-        released after its issue ended on the forge.
+        current generation and to issues that did not close on the forge
+        inside it, so a closed issue is never the lane's next action. Free
+        work must be queued, unowned and not released after its issue ended
+        on the forge.
     """
+    from agent_parley import issues
+
     found = []
     for number, record in ledger.get("issues", {}).items():
         execution = state(record)
@@ -242,6 +246,7 @@ def actionable(ledger: dict, owner: str | None = None) -> list[str]:
                 and not record.get("orphan")
                 and execution["claim_id"] == record.get("claim_id")
                 and execution["state"] in ACTIVE
+                and not issues.closed(record)
             )
         if eligible:
             found.append(number)
