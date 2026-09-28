@@ -387,3 +387,21 @@ def test_a_non_boolean_paused_setting_is_refused(bridge, repo, paired):
     write_json(directory / "project.json", manifest)
     with pytest.raises(BridgeError, match="paused setting must be a boolean"):
         roster.read(directory)
+
+
+def test_darwin_boot_id_ignores_the_timezone_of_its_local_time(monkeypatch):
+    printed = iter(
+        (
+            "{ sec = 1790578800, usec = 0 } Sun Sep 28 09:00:00 2026",
+            "{ sec = 1790578800, usec = 0 } Sun Sep 28 18:30:00 2026",
+        )
+    )
+    monkeypatch.setattr(
+        process.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=next(printed) + "\n"
+        ),
+    )
+    assert process.darwin_boot_id() == "1790578800"
+    assert process.darwin_boot_id() == "1790578800"
