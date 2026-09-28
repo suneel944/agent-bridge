@@ -1,4 +1,4 @@
-"""Native coding agents, separate workspaces, shared coordination."""
+"""Native coding agents, separate workspaces, shared coordination (probe)."""
 
 from __future__ import annotations
 
