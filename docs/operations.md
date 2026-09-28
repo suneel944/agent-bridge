@@ -1014,7 +1014,12 @@ attachment is readable by its own lane.
 
 One attachment is capped at 65,536 bytes and a lane holds at most 1 MiB of
 attachments in total; a body past either cap is refused with the cap named.
-A message attachment lives as long as its message; a report attachment is
+Messages are never pruned, so when a long message would pass the lane's
+allowance, the lane's oldest message attachments that every recipient has read
+are released first, only as far as the new body needs. A released attachment
+reads as released and its message keeps the first slice. A message with an
+unread recipient, or with no recipient such as a feed-only post, keeps its
+attachment. A report attachment is
 removed when the report log rotates past that record; an offer attachment is
 removed when the offer is declined, cancelled or replaced, and an accepted
 offer keeps it until the issue is released. `top` and `status` count as
