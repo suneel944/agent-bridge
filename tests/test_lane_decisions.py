@@ -161,6 +161,24 @@ def test_a_stopped_lane_ages_into_dead(tmp_path):
     assert later["state"] == lanes.DEAD
 
 
+def test_a_reading_older_than_a_launch_keeps_the_lane_starting(tmp_path):
+    home = tmp_path / "state"
+    home.mkdir()
+    store.initialize(home)
+    gone = {"process_alive": False, "age_seconds": 10, "evidence": "stopped"}
+    with store.connect(home, write=True) as db:
+        lanes.transition(db, "/r", "a", lanes.STARTING, evidence="launch")
+        since = float(lanes.read(db, "/r", "a")["since"])
+        early = lanes.sample(
+            db, "/r", "a", gone, dead_after=60, read_at=since - 1
+        )
+        fresh = lanes.sample(
+            db, "/r", "a", gone, dead_after=60, read_at=since + 1
+        )
+    assert early["state"] == lanes.STARTING
+    assert fresh["state"] == lanes.STOPPED
+
+
 @pytest.mark.parametrize(
     ("state", "result"),
     [
