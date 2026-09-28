@@ -55,7 +55,7 @@ from agent_parley.cli import (
     main,
     write_json,
 )
-from agent_parley.issues import MAX_BLOCKERS, describe
+from agent_parley.issues import MAX_BLOCKERS, describe, merge_claim
 from agent_parley.merges import launch_busy
 from agent_parley.process import start_ticks
 from agent_parley.server import TOOLS
@@ -1937,8 +1937,8 @@ def test_a_report_requires_one_claim_and_comments_on_that_issue(
     assert "claude" not in posted[0][1]
     assert "make check passed" in posted[0][1]
     assert "neither review nor independent verification" in posted[0][1]
-    with pytest.raises(BridgeError, match="owns multiple issues"):
-        bridge.merge(repo, "claude")
+    directory = bridge.project(repo)[1]
+    assert merge_claim(directory, "claude")["issue"] == 432
 
     bridge.report(
         claude,

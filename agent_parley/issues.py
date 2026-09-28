@@ -1730,3 +1730,52 @@ def exact_claim(directory: Path, name: str, issue: str = "") -> dict:
     else:
         number = next(iter(owned))
     return {"issue": int(number), "claim_id": owned[number].get("claim_id")}
+
+
+def merge_claim(directory: Path, name: str, issue: str = "") -> dict:
+    """Selects the one claim a lane merge integrates.
+
+    A lane may hold several claims when `max_claims_per_lane` allows it.
+    Without an explicit issue, the merge takes the only claim whose work is
+    reported ready or awaits integration recovery, and refuses only when
+    several are, so a lane holding one ready claim beside unfinished ones
+    stays mergeable.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant that owns the lane.
+        issue: Explicit issue selection, or empty to infer it.
+
+    Returns:
+        Issue number and claim identifier, or empty fields when no claim is
+        held and none was requested.
+
+    Raises:
+        BridgeError: If the selection is not currently owned, or if several
+            owned claims are ready and none was named.
+    """
+    owned = {
+        number: record
+        for number, record in snapshot(directory)["issues"].items()
+        if record["owner"] == name
+    }
+    if issue or len(owned) < 2:
+        return exact_claim(directory, name, issue)
+    ready = sorted(
+        (
+            number
+            for number, record in owned.items()
+            if lifecycle.state(record)["state"]
+            in (lifecycle.READY, lifecycle.RECOVERY)
+        ),
+        key=int,
+    )
+    if len(ready) != 1:
+        listed = ", ".join(f"#{number}" for number in ready)
+        raise BridgeError(
+            f"{name} owns multiple issues and "
+            + (f"{listed} are ready" if ready else "none is ready")
+            + "; name one with --issue."
+        )
+    number = ready[0]
+    return {"issue": int(number), "claim_id": owned[number].get("claim_id")}
