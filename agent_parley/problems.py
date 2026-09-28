@@ -55,6 +55,8 @@ ACK = "awaiting acknowledgement"
 BOUNCE = "bounced share"
 RETIRED = "shares to a retired lane"
 RETIRED_WINDOW = 86400
+STALE_AFTER = 86400
+STALE_HEADING = "Older than a day:"
 DRIFT = "branch drift"
 DIRTY = "dirty worktree"
 BUDGET = "over budget"
@@ -414,8 +416,10 @@ def _retire_rows(
     A lane whose session died keeps its claims, and the supervisor marks
     them orphaned so a peer can take them. A marker that has stood past the
     ceiling means nobody took them and the lane did not return, so the
-    lane is ready to retire. The row only names the command: the sweep
-    never releases held work on its own.
+    lane is ready to retire. A lane whose session process is alive is never
+    offered retirement, whatever its markers say, because `participant
+    retire` refuses a lane with a running session. The row only names the
+    command: the sweep never releases held work on its own.
 
     Args:
         record: One participant record from the status reading.
@@ -430,6 +434,8 @@ def _retire_rows(
         every marker is younger than the ceiling.
     """
     claims = record["claims"]
+    if record["availability"].get("process_alive") is True:
+        return []
     if not claims or not all(claim.get("orphaned") for claim in claims):
         return []
     oldest = max(
@@ -630,7 +636,10 @@ def _lane_rows(
         lane is inactive only while it owes work, meaning a claim it has not
         delivered, or while something recorded keeps it from its next turn.
         A lane that delivered everything it holds is at rest, and waking it
-        spends a turn on nothing. A lane that retired reports only the
+        spends a turn on nothing. Uncommitted work is reported only once
+        the session process is gone, because a running session owns its
+        worktree and a quiet reading does not make its edits abandoned. A
+        lane that retired reports only the
         worktree it kept,
         because its quiet is the state the operator asked for and every
         other remedy here would wake a lane that has given its work back.
@@ -798,7 +807,11 @@ def _lane_rows(
                 root,
             )
         )
-    elif quiet and (changed := supervision.dirty_paths(participant["lane"])):
+    elif (
+        quiet
+        and availability["process_alive"] is not True
+        and (changed := supervision.dirty_paths(participant["lane"]))
+    ):
         lane = participant["lane"]
         rows.append(
             _row(
@@ -1234,7 +1247,9 @@ def derive(
 
     Returns:
         One row per lane per cause, ordered by how long the oldest item behind
-        each has held, longest first. A store or service row carries no age and
+        each has held, longest first, with every row older than a day moved
+        after the rest so today's problems lead instead of rows a week old
+        from lanes long gone. A store or service row carries no age and
         leads the list, because no other row can be acted on until the store is
         usable and the service is up. Each row names its actor: the rows the
         coordination service already handles report what its wake loop has
@@ -1290,8 +1305,23 @@ def derive(
         aged.extend(_root_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
-    aged.sort(key=lambda row: -(row["seconds"] or 0))
+    aged.sort(
+        key=lambda row: (_stale(row), -(row["seconds"] or 0)),
+    )
     return rows + aged
+
+
+def _stale(row: dict) -> bool:
+    """Tells whether the oldest item behind a row has held past a day.
+
+    Args:
+        row: One row `derive` produced.
+
+    Returns:
+        True when the row's age exceeds `STALE_AFTER`; False for a younger
+        row or one whose age is unknown.
+    """
+    return (row["seconds"] or 0) > STALE_AFTER
 
 
 def lines(rows: list[dict]) -> list[str]:
@@ -1301,7 +1331,8 @@ def lines(rows: list[dict]) -> list[str]:
         rows: Rows `derive` produced.
 
     Returns:
-        One line per row, closed by a line counting what needs an operator
+        One line per row, with `STALE_HEADING` above the trailing rows
+        older than a day, closed by a line counting what needs an operator
         against what the coordination service is handling whenever any row
         belongs to the service, so a screen of rows still says how much of it
         is someone's work.
@@ -1316,6 +1347,11 @@ def lines(rows: list[dict]) -> list[str]:
         f"{row['condition'].ljust(width)}  {row['detail']}; {row['command']}"
         for row in rows
     ]
+    tail = len(rows)
+    while tail and _stale(rows[tail - 1]):
+        tail -= 1
+    if tail < len(rows):
+        listed.insert(tail, STALE_HEADING)
     handled = sum(row["actor"] == BY_SERVICE for row in rows)
     if handled:
         listed.append(
