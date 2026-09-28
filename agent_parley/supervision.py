@@ -3313,9 +3313,10 @@ def overdue_claims(
                 "wake",
                 (
                     f"Issue #{number} {cause}. Record progress with "
-                    f"agent-parley report partial --issue {number}, or offer "
-                    "or release it; otherwise the supervisor offers it to an "
-                    "idle peer, then releases it."
+                    f"agent-parley report --state partial --issue {number} "
+                    '--summary "..." --remaining "...", or offer or release '
+                    "it; otherwise the supervisor offers it to an idle peer, "
+                    "then releases it."
                 )
                 if idle
                 else "",

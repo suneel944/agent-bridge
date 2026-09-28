@@ -2,13 +2,21 @@
 
 import json
 import os
+import shlex
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from agent_parley import issues, lifecycle, process, store, supervision
+from agent_parley import (
+    cli,
+    issues,
+    lifecycle,
+    process,
+    store,
+    supervision,
+)
 from agent_parley.state import BridgeError, lock, write_json
 
 WINDOW = 300
@@ -105,6 +113,16 @@ def test_an_idle_claim_of_a_live_lane_is_offered_and_its_peer_kept(
     notice = woken["8"]["deadline_notice"]
     assert notice["holder"] == "claude"
     assert "has recorded no progress" in notice["text"]
+    taught = notice["text"].split("Record progress with ", 1)[1]
+    program, *arguments = shlex.split(taught.split(", or offer", 1)[0])
+    assert program == "agent-parley"
+    parser, _ = cli.root_parser(arguments[0])
+    parsed = parser.parse_args(arguments)
+    assert (parsed.command, parsed.state, parsed.issue) == (
+        "report",
+        "partial",
+        "8",
+    )
     assert "overdue_recovery" not in woken["7"]
 
     edit(
