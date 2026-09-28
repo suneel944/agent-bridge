@@ -595,6 +595,64 @@ def checkpoint(directory: Path, issue: str, claim_id: str) -> dict:
     return value
 
 
+CHECKPOINT_NAME = re.compile(r"issue-([1-9][0-9]{0,17})-([0-9a-f]{16})")
+TEMPORARY_MAX_AGE = 3600
+
+
+def prune(directory: Path, ledger: dict) -> list[str]:
+    """Removes recovery bundles no live claim can still read.
+
+    A capture keeps one checkpoint bundle reachable for every claim a lane
+    ever owned; nothing previously removed one. A checkpoint is safe to
+    remove once its exact ownership generation is no longer the issue's
+    current one: the claim was released, taken again under a new claim
+    identifier, or its issue closed on the forge. A capture also leaves a
+    same-sized temporary bundle behind when the process is killed between
+    `tempfile.mkstemp` and the rename that publishes it; one old enough that
+    no capture still in progress could have written it is removed too.
+
+    Args:
+        directory: Private project state directory.
+        ledger: Published issue ledger the current ownership is read from.
+
+    Returns:
+        Identifiers of the checkpoints removed.
+    """
+    folder = _folder(directory)
+    issue_records = ledger.get("issues", {})
+    removed = []
+    for record_path in sorted(folder.glob("issue-*.json")):
+        match = CHECKPOINT_NAME.fullmatch(record_path.stem)
+        if not match:
+            continue
+        issue, claim_id = match.group(1), match.group(2)
+        current = issue_records.get(issue) or {}
+        live = (
+            current.get("owner")
+            and current.get("claim_id") == claim_id
+            and not current.get("ended_on_forge")
+        )
+        if live:
+            continue
+        try:
+            saved = json.loads(record_path.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        reference = (saved.get("artifact") or {}).get("reference")
+        if isinstance(reference, str) and "/" not in reference:
+            (folder / reference).unlink(missing_ok=True)
+        record_path.unlink(missing_ok=True)
+        (folder / f"{record_path.stem}-approval.json").unlink(missing_ok=True)
+        (folder / f"{record_path.stem}-quiesce.json").unlink(missing_ok=True)
+        removed.append(record_path.stem)
+    threshold = time.time() - TEMPORARY_MAX_AGE
+    for stray in folder.glob("tmp*"):
+        with contextlib.suppress(OSError):
+            if stray.is_file() and stray.stat().st_mtime < threshold:
+                stray.unlink(missing_ok=True)
+    return removed
+
+
 def authorize(
     directory: Path,
     manifest: dict,
