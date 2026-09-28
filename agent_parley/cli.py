@@ -3556,7 +3556,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         metavar="LIST",
         help=(
             "Show only these columns, comma separated, such as "
-            "PARTICIPANT,STATE,IDLE. Every column is shown by default."
+            "PARTICIPANT,STATE,IDLE, or all for every column. The default "
+            "leaves out PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and "
+            "FIT."
         ),
     )
     watch.add_argument(
@@ -4909,7 +4911,9 @@ def main() -> int:
                 for name in (args.columns or "").replace(",", " ").split()
             )
             unknown = [
-                name for name in names if name not in dict(dashboard.COLUMNS)
+                name
+                for name in names
+                if name != "ALL" and name not in dict(dashboard.COLUMNS)
             ]
             if unknown:
                 parser.error(

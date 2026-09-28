@@ -52,7 +52,7 @@ def test_a_dirty_reserved_path_is_reported_for_the_reserving_lane_only(
     marker = rows["claude"]["operator_edit"]
     assert marker.startswith("operator edited reserved path shared.txt")
     assert "nothing was reverted" in marker
-    assert any(line == f"    {marker}" for line in dashboard.render(view))
+    assert f"! claude  {marker}" in dashboard.render(view)
     bridge.status(cli.Selection(participant="claude"))
     assert marker in capsys.readouterr().out
     bridge.status(cli.Selection(participant="codex"))

@@ -243,17 +243,62 @@ agent-parley top --columns PARTICIPANT,STATE,ISSUES,IDLE
 agent-parley top --all
 ```
 
+The screen reads like Linux `top`: three summary lines, one row per lane, and
+a short list of notes under the table. Each `!` note names a lane and says
+what waits on you: branch drift, rejected calls, an unfit reason, a pending
+split or pull offer, a failed review. Notes take the place of a NOTE column, so
+long reasons never truncate, and monochrome output says everything colour
+emphasises. `--once` ends with one line that points at the live view.
+
+```text
+$ agent-parley top --once --columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
+agent-parley top - 04:37:10  server running  projects 1  read 0.02s
+Lanes: 3 total, 2 working, 1 idle   Issues: 3 held, 1 offered
+Mail: 1 unread, 1 unacked   Leases: 2 held   Hooks (all retained): 7 events, 2 denied (29%)   Context: 2.5kB
+Selection: columns PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK
+
+project /home/dev/payments-api
+PARTICIPANT     STATE                   ISSUES      MAIL       LEASES     DENIALS    IDLE      TASK
+claude-1        working 5s              #42         0/0        1 5s       1/3        0s        Fix refund rounding for partial capt…
+claude-2        working 5s              #58         0/0        1 5s       0/2        0s        Document the refund API for merchants
+codex-1         idle 5s                 #17+1       1/1        0          1/2        0s        Rename the shared money helper
+
+! codex-1  on branch refund-spike, not its assigned branch
+! codex-1  idle; acknowledgement of message 1 for claude-1 waiting 5s
+! codex-1  unfit (mail): it owes an acknowledgement 5s old
+Live view: top without --once; ? explains each column.
+```
+
+This is the output behind the README screenshot, recorded by
+`scripts/record_demo.py --screenshots` against three lanes whose native
+clients are stubs.
+
+The first line names the server, the time, the project count and the idle
+total. The second counts lanes by state and the issues they hold, and says how
+many lanes are hidden. The third totals mail, leases, hook decisions and
+injected context. A count that is zero and says nothing is left out.
+
+Each lane is one row. The default columns are PARTICIPANT, STATE, BRANCH,
+ISSUES, MAIL, LEASES, DENIALS, TOKENS, IDLE and TASK, the lane's last prompt.
+`--columns all` adds PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and FIT.
+A lane that needs you also gets one line under the table, marked with `!`:
+a stall, an operator edit, a base advance, an orphan claim, a budget marker,
+a failed fit check or an escalated dispatch. On a bounded screen the notes
+take at most a third of the page, and a last note counts the rest; `P` lists
+every problem. `?` shows the column legend.
+
 With a dozen lanes open the whole table is rarely what you want. `--provider`
-narrows the view to the participants driven by one provider, and the header
+narrows the view to the participants driven by one provider, and the summary
 counts only the rows it shows.
 
 `top` fits the terminal it is given. Every column is as wide as the widest value
-in the frame, and a terminal too narrow for the whole set drops the
-lowest-priority columns in a fixed order and names them under the header instead
-of clipping every cell. Rows past the fold are paged, never dropped: the footer
-reads `rows 1-8 of 31`. `--once` prints at the width of the terminal and at the
-full width of the table when the output is a pipe, so a captured file keeps
-every column intact.
+in the frame. STATE and TASK, like top's COMMAND column, take the width the
+others leave, so one long cell ends in `…` instead of pushing columns out. A
+terminal too narrow for the whole set drops the lowest-priority columns in a
+fixed order and names them under the summary. Rows past the fold are paged,
+never dropped: the footer reads `rows 1-8 of 31`. `--once` prints at the width
+of the terminal and at the full width of the table when the output is a pipe,
+so a captured file keeps every chosen column intact.
 
 The same choices are reachable from the live view with single keys:
 
@@ -265,13 +310,13 @@ The same choices are reachable from the live view with single keys:
 | `r` | Reverse the order. |
 | `f` | Narrow to participants, comma separated; empty clears. |
 | `o` | Narrow to projects, comma separated; empty clears. |
-| `c` | Choose the columns shown; empty shows all. |
+| `c` | Choose the columns shown; empty is the default set, `all` every one. |
 | `a` | Show or hide stopped lanes and projects whose root is gone. |
 | `P` | Show the `problems` rows in place until any key returns. |
 | `?` | Show the key map and the column legend. |
 | `q` | Leave. The view never writes state. |
 
-The header also carries how long the frame took to read. Git reads dominate
+The first summary line also carries how long the frame took to read. Git reads dominate
 a frame, so the live view reads each lane's branch and each project's
 operator edits and base advances at most once every five seconds; the rest
 of the frame is read on every redraw, keeping a normal frame under a second.
@@ -279,7 +324,8 @@ of the frame is read on every redraw, keeping a normal frame under a second.
 A lane that drifted from its branch, holds a stale lease, had a call rejected,
 owns an overdue issue or lost its session process is drawn in colour where the
 terminal offers it and in bold where it does not. Each of those also prints its
-own marker in the table, so a monochrome pipe reads exactly the same.
+own marker in the table or a note under it, so a monochrome pipe reads exactly
+the same.
 
 `running; no hooks` means the session needs relaunching to obtain checkpoint
 reporting. `top --once` prints full detail.
@@ -293,7 +339,7 @@ blank when nothing could be read.
 
 `top` carries an `IDLE` column: how long each lane went without coordination
 activity inside the window, with the project total and the worst lane in the
-header. `status` prints the same figure and, under it, every pending item with
+first summary line. `status` prints the same figure and, under it, every pending item with
 the seconds it has already waited — a message before its first read, an
 `ack_required` message before acknowledgement, a handoff offer before an answer,
 a `ready` report before integration. Every figure comes from records the runtime

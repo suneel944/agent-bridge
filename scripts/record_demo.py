@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import textwrap
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -119,6 +120,8 @@ EMPHASIS = (
     "project ",
     "agent-parley top",
     "projects ",
+    "Lanes:",
+    "Mail:",
 )
 
 
@@ -273,7 +276,12 @@ def lower_stall_windows(directory: Path) -> None:
     generator that waited that long to show a genuine idle label would
     make ``make demo screenshots`` impractical, so this rewrites the
     project's own manifest, the legitimate place that setting lives,
-    rather than faking the label. ``inactive_after`` is left at its
+    rather than faking the label. ``interval`` drops to two seconds for
+    the same reason: lane records and published fitness move only on a
+    supervision poll, and a poll taken before the later lanes launched
+    would otherwise stand for the default thirty seconds. Call this before
+    the first launch, since the poll a launch triggers schedules the next
+    one from the interval it reads. ``inactive_after`` is left at its
     default: it also governs whether a launched session still reads as
     running, and lowering it would misreport every quiet lane as stopped.
 
@@ -286,6 +294,7 @@ def lower_stall_windows(directory: Path) -> None:
     manifest["supervision"] = {
         **manifest.get("supervision", {}),
         "stalled_after": 2,
+        "interval": 2,
     }
     path.write_text(json.dumps(manifest))
 
@@ -555,6 +564,23 @@ class Recorder:
                 "session_id": f"demo-{name}",
                 "source": "startup",
                 "cwd": str(self.lanes[name]),
+            },
+        )
+
+    def prompt(self, name: str, text: str) -> None:
+        """Serves the prompt event a client raises when it is given work.
+
+        Args:
+            name: Participant whose session received the prompt.
+            text: Prompt the operator typed, which ``top`` shows as TASK.
+        """
+        self.event(
+            name,
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": f"demo-{name}",
+                "cwd": str(self.lanes[name]),
+                "prompt": text,
             },
         )
 
@@ -882,6 +908,32 @@ def record(recorder: Recorder) -> None:
     )
 
 
+def verdict(step: Step) -> Step:
+    """Reads a recorded hook decision the way the agent receives it.
+
+    The hook writes a JSON document for the native client. A screenshot
+    shows the decision and the reason the agent is told, wrapped to the
+    frame, instead of the envelope around them.
+
+    Args:
+        step: Step recorded by ``Recorder.hook``.
+
+    Returns:
+        The same step with its output replaced by the decision and reason.
+    """
+    text = "".join(step.output).strip()
+    output = (json.loads(text) if text else {}).get("hookSpecificOutput", {})
+    decision = output.get("permissionDecision", "allow")
+    reason = output.get("permissionDecisionReason", "")
+    wrapped = textwrap.wrap(
+        reason,
+        COLUMNS - 12,
+        initial_indent=f"{decision:<7}",
+        subsequent_indent=" " * 7,
+    )
+    return dataclasses.replace(step, output=tuple(wrapped or [decision]))
+
+
 def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     """Drives the coordination features the static screenshots show.
 
@@ -912,22 +964,28 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     recorder.run("forge", "set", "null", "--repo", root)
     recorder.run("participant", "add", "claude-1", "--provider", "claude")
     recorder.run("participant", "add", "codex-1", "--provider", "codex")
-    recorder.run("participant", "add", "kimi-1", "--provider", "kimi")
+    recorder.run("participant", "add", "claude-2", "--provider", "claude")
+    manifest = next((recorder.home / "projects").glob("*/project.json"))
+    lower_stall_windows(manifest.parent)
     recorder.launch("claude-1")
     recorder.launch("codex-1")
+    recorder.launch("claude-2")
     recorder.session("claude-1")
+    recorder.session("claude-2")
     claude_lane = recorder.lanes["claude-1"]
     codex_lane = recorder.lanes["codex-1"]
-    lower_stall_windows(claude_lane.parent)
-    recorder.env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:0"
-    recorder.env["ANTHROPIC_AUTH_TOKEN"] = "screenshot-fixture"
-    recorder.launch("kimi-1")
-    recorder.session("kimi-1")
-    dormant_process = recorder.sessions[-1]
-    dormant_process.terminate()
-    dormant_process.wait(timeout=10.0)
+    docs_lane = recorder.lanes["claude-2"]
     recorder.run("issue", "claim", "17", cwd=codex_lane)
     recorder.run("issue", "claim", "42", cwd=claude_lane)
+    recorder.run("issue", "claim", "58", cwd=docs_lane)
+    recorder.prompt("claude-1", "Fix refund rounding for partial captures")
+    recorder.prompt("codex-1", "Rename the shared money helper")
+    recorder.prompt("claude-2", "Document the refund API for merchants")
+    recorder.tool(
+        "claude-2",
+        "file_reservation_paths",
+        {"paths": ["docs/refunds.md"], "reason": "refund API guide"},
+    )
     recorder.tool(
         "claude-1",
         "file_reservation_paths",
@@ -975,8 +1033,13 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
     drifted = recorder.latest()
     recorder.hook("claude-1", "git switch -c hotfix")
     blocked = recorder.latest()
-    time.sleep(3.0)
-    recorder.run("top", "--once")
+    time.sleep(5.0)
+    recorder.run(
+        "top",
+        "--once",
+        "--columns",
+        "PARTICIPANT,STATE,ISSUES,MAIL,LEASES,DENIALS,IDLE,TASK",
+    )
     top = recorder.latest()
     recorder.run("status")
     status = recorder.latest()
@@ -987,14 +1050,12 @@ def screenshot_scenario(recorder: Recorder) -> dict[str, list[Step]]:
         "screenshot-issues.svg": [issue_list],
         "screenshot-hooks.svg": [
             annotate("# a branch switch attempted inside an assigned lane"),
-            annotate(""),
-            blocked,
+            verdict(blocked),
             annotate(""),
             annotate(
-                "# the same lane after any bypass leaves it on another branch"
+                "# a lane left on another branch is stopped at its next call"
             ),
-            annotate(""),
-            drifted,
+            verdict(drifted),
         ],
         "screenshot-coordination.svg": [
             annotate("# the agent reserves the file it is about to change"),
@@ -1070,11 +1131,11 @@ def colour(text: str) -> str:
         header or table heading reads as a heading, everything else reads
         as body text.
     """
+    if any(text.lstrip().startswith(word) for word in EMPHASIS):
+        return HEADING
     lowered = text.lower()
     if any(word in lowered for word in REFUSED):
         return REFUSAL
-    if any(text.lstrip().startswith(word) for word in EMPHASIS):
-        return HEADING
     return BODY
 
 

@@ -180,7 +180,7 @@ def test_top_shows_the_accounting_of_each_lane(bridge, paired):
     view = dashboard.collect(bridge.home, False, {})
     rows = {row["participant"]: row for row in view["projects"][0]["rows"]}
     unaccountable = rows["claude"]["accounting"]["unaccountable_minutes"]
-    lines = dashboard.render(view)
+    lines = dashboard.render(view, columns=("ALL",))
     header = next(line for line in lines if "PARTICIPANT" in line)
     claude = next(line for line in lines if line.startswith("claude"))
     assert "UNUSED" in header

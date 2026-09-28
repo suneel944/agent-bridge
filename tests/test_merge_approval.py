@@ -214,7 +214,7 @@ def test_approval_state_is_visible_in_status_and_the_live_view(
     )
     view = dashboard.collect(bridge.home, False, {})
     assert view["totals"]["awaiting_approval"] == 1
-    assert any("awaiting approval 1" in line for line in dashboard.render(view))
+    assert any("1 awaiting approval" in line for line in dashboard.render(view))
 
     bridge.approve(repo, "codex")
     lanes = {
