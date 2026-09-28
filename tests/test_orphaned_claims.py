@@ -17,6 +17,7 @@ from agent_parley import (
     cli,
     dashboard,
     issues,
+    lanes,
     lifecycle,
     process,
     recovery,
@@ -24,6 +25,7 @@ from agent_parley import (
     store,
     supervision,
     tables,
+    terminal,
 )
 from agent_parley.cli import git
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
@@ -716,6 +718,109 @@ def test_a_fenced_session_still_takes_a_prompt_as_context(bridge, repo, paired):
     details = output["hookSpecificOutput"]
     assert "permissionDecision" not in details
     assert "cannot resume edits" in details["additionalContext"]
+
+
+def fenced(bridge, paired):
+    """Moves claude's claim to codex so claude's session is fenced."""
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    killed(directory, "claude", STALLED + 100)
+    running(directory, "codex")
+    supervision.poll(bridge.home, directory)
+    bridge.issue(peer, "claim", "42", take_orphaned=True)
+    return actors, lane, directory
+
+
+def test_a_fenced_session_is_allowed_to_end_its_turn(bridge, repo, paired):
+    _, lane, directory = fenced(bridge, paired)
+    for active in (False, True):
+        payload = {
+            "session_id": "claude-session",
+            "hook_event_name": "Stop",
+            "cwd": str(lane),
+            "stop_hook_active": active,
+        }
+        output = checkpoints.checkpoint(
+            bridge.home, directory, "claude", payload
+        )
+        assert output.get("decision") != "block"
+        assert "cannot resume edits" in output["systemMessage"]
+
+
+def test_wake_never_resumes_a_fenced_session(bridge, repo, paired, monkeypatch):
+    actors, _, directory = fenced(bridge, paired)
+    store.call(
+        bridge.home,
+        actors["codex"],
+        "send_message",
+        {
+            "to": ["claude"],
+            "subject": "Review",
+            "body_md": "Review the result",
+            "idempotency_key": "fenced",
+            "ack_required": True,
+        },
+    )
+    launched = []
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    observed = supervision.presence(directory, "claude", 300)
+    with store.connect(bridge.home, write=True) as db:
+        record = lanes.sample(
+            db,
+            paired["root"],
+            "claude",
+            observed,
+            dead_after=STALLED,
+        )
+        lanes.transition(
+            db,
+            paired["root"],
+            "claude",
+            record["state"],
+            session="claude-session",
+        )
+    assert observed["process_alive"] is False
+    supervision.wake(
+        bridge.home,
+        directory,
+        paired,
+        "claude",
+        observed,
+        supervision.DEFAULTS,
+    )
+    assert not launched
+    wake = json.loads((directory / "claude-wake.json").read_text())
+    assert wake["result"] == supervision.WAKE_ATTENTION
+
+
+def test_run_refuses_to_resume_a_fenced_session(
+    bridge, repo, paired, monkeypatch
+):
+    fenced(bridge, paired)
+    monkeypatch.setattr(bridge, "up", lambda: None)
+    original = cli.shutil.which
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name: "/bin/true" if name == "claude" else original(name),
+    )
+    captured = []
+    monkeypatch.setattr(
+        terminal,
+        "run",
+        lambda command, *args, **kwargs: captured.append(command) or 0,
+    )
+    with pytest.raises(BridgeError, match="takeover and cannot resume"):
+        bridge.launch("claude", repo, terminal.PROMPT, resume=True)
+    assert not captured
 
 
 def test_explicit_approval_quiesces_session_observation_after_reclaim(

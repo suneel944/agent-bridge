@@ -1307,7 +1307,22 @@ def quiesce_authorized(
 
 
 def stale_session(directory: Path, agent: str, payload: dict) -> dict | None:
-    """Returns a native refusal for a session fenced by a takeover."""
+    """Returns a native refusal for a session fenced by a takeover.
+
+    Tool use is denied and other events carry the transfer as context. A
+    `Stop` is never blocked: the fenced generation can do nothing, so its
+    turn is allowed to end with the transfer shown, rather than being
+    continued and refused again on every following `Stop`.
+
+    Args:
+        directory: Private project state directory.
+        agent: Lane whose activity record may carry a fence.
+        payload: Native hook payload naming the session and event.
+
+    Returns:
+        Native hook output for a session whose ownership generation was
+        transferred by a published takeover, or None otherwise.
+    """
     try:
         activity = json.loads(
             (directory / f"{agent}-activity.json").read_text()
@@ -1345,7 +1360,7 @@ def stale_session(directory: Path, agent: str, payload: dict) -> dict | None:
             }
         }
     if event == "Stop":
-        return {"decision": "block", "reason": detail}
+        return {"systemMessage": detail}
     return {
         "hookSpecificOutput": {
             "hookEventName": event,
