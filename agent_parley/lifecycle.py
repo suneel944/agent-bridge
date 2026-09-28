@@ -24,6 +24,51 @@ RECOVERY = "recovery"
 ACTIVE = (QUEUED, RUNNING, RECOVERY)
 STATES = (*ACTIVE, BLOCKED, READY, COMPLETE)
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
+MAX_HISTORY = 50
+_MARKER_ACTIONS = ("claim", "take", "complete")
+
+
+def append_history(record: dict, entry: dict, cap: int = MAX_HISTORY) -> None:
+    """Appends one transition and bounds how much history an issue keeps.
+
+    A lane that claims and releases the same issue hundreds of times would
+    otherwise grow this list without limit, and every idempotent retry then
+    copies the whole growing list again. Retention keeps the most recent
+    `cap` entries, plus the latest claim, take and complete marker when an
+    older one would otherwise fall outside that window, so a capped history
+    still answers when the current claim began and when the issue last
+    completed.
+
+    Args:
+        record: Issue record whose history is being extended.
+        entry: Transition entry to append.
+        cap: Number of most recent entries kept before markers are restored.
+    """
+    history = record.setdefault("history", [])
+    history.append(entry)
+    if len(history) <= cap:
+        return
+    recent = history[-cap:]
+    present = {item.get("action") for item in recent}
+    older = history[:-cap]
+    markers = [
+        marker
+        for action in _MARKER_ACTIONS
+        if action not in present
+        for marker in [
+            next(
+                (
+                    item
+                    for item in reversed(older)
+                    if item.get("action") == action
+                ),
+                None,
+            )
+        ]
+        if marker is not None
+    ]
+    markers.sort(key=lambda item: item.get("at", 0))
+    record["history"] = markers + recent
 
 
 def initial(*, authorized: bool = False) -> dict:
@@ -505,7 +550,8 @@ def complete(
             completed_by=owner,
             completed_at=now,
         )
-        record.setdefault("history", []).append(
+        append_history(
+            record,
             {
                 "action": "complete",
                 "actor": "operator",
@@ -516,7 +562,7 @@ def complete(
                 "offer_id": None,
                 "claim_id": claim_id,
                 "commit": commit,
-            }
+            },
         )
         _reconcile_dependents(ledger, issue, now)
         ledger["revision"] += 1
@@ -775,7 +821,8 @@ def resolve(
             },
         )
         record.pop("unresolved_completion", None)
-        record.setdefault("history", []).append(
+        append_history(
+            record,
             {
                 "action": "resolve",
                 "actor": actor,
@@ -788,7 +835,7 @@ def resolve(
                 "outcome": outcome,
                 "holder": holder,
                 "evidence": dict(evidence),
-            }
+            },
         )
         if outcome == "complete":
             _reconcile_dependents(ledger, issue, now)
