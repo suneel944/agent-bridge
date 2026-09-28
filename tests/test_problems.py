@@ -789,7 +789,7 @@ def test_rows_are_ordered_longest_held_first_behind_the_store_and_service(
     bridge, repo, paired, monkeypatch
 ):
     directory = bridge.project(repo)[1]
-    alive(directory, "claude")
+    alive(directory, "claude", updated=time.time() - 7200)
     alive(directory, "codex", updated=time.time() - 400)
     bridge.issue(paired["lanes"]["claude"], "claim", "42", within=60)
     bridge.issue(paired["lanes"]["codex"], "claim", "43")
@@ -847,7 +847,7 @@ def test_every_printed_row_names_the_lane_the_age_and_the_command(
     bridge, repo, paired, served, monkeypatch, capsys
 ):
     unwoken(bridge)
-    alive(bridge.project(repo)[1], "claude")
+    alive(bridge.project(repo)[1], "claude", updated=time.time() - 7200)
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
@@ -861,7 +861,7 @@ def test_every_printed_row_names_the_lane_the_age_and_the_command(
 def test_the_report_closes_by_counting_what_the_service_is_handling(
     bridge, repo, paired, served, monkeypatch, capsys
 ):
-    alive(bridge.project(repo)[1], "claude")
+    alive(bridge.project(repo)[1], "claude", updated=time.time() - 7200)
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
@@ -1216,3 +1216,76 @@ def test_plan_revisions_waiting_on_the_operator_are_rows(
     bridge.plan_revision(repo, "approve", looped["id"])
     assert not rows(bridge, problems.ESCALATED)
     assert not rows(bridge, problems.PROPOSED)
+
+
+ORPHANED = [
+    {
+        "issue": 42,
+        "overdue": False,
+        "overdue_seconds": 0,
+        "orphaned": True,
+        "orphan_recorded_seconds": 7200,
+    }
+]
+
+LIVE = {"state": supervision.IDLE, "process_alive": True, "age_seconds": 900}
+GONE = {
+    "state": supervision.STOPPED,
+    "process_alive": False,
+    "age_seconds": 900,
+}
+
+
+def orphaned_lane(availability, monkeypatch, condition, dirty=()):
+    """Derives one quiet lane's rows of one condition, all claims orphaned."""
+    monkeypatch.setattr(supervision, "dirty_paths", lambda lane: list(dirty))
+    return [
+        row
+        for row in problems._lane_rows(
+            lane_record(claims=ORPHANED, availability=availability),
+            {"lane": "/lane", "branch": "work"},
+            "/root",
+            {**supervision.DEFAULTS, "wake": False},
+            600,
+            time.time(),
+        )
+        if row["condition"] == condition
+    ]
+
+
+def test_a_live_lane_with_orphan_markers_is_never_offered_retirement(
+    monkeypatch,
+):
+    assert not orphaned_lane(LIVE, monkeypatch, problems.READY)
+    [row] = orphaned_lane(GONE, monkeypatch, problems.READY)
+    assert cited(row["command"]) == [["participant", "retire"]]
+    assert "retire" in declared()["participant"]
+
+
+def test_a_live_quiet_lane_with_edits_is_not_reported_as_abandoned(
+    monkeypatch,
+):
+    assert not orphaned_lane(LIVE, monkeypatch, problems.DIRTY, ["a.txt"])
+    [row] = orphaned_lane(GONE, monkeypatch, problems.DIRTY, ["a.txt"])
+    assert row["count"] == 1
+
+
+def test_a_lane_quiet_for_days_follows_a_lane_quiet_for_minutes(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude", updated=time.time() - 3 * 86400)
+    alive(directory, "codex", updated=time.time() - 400)
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    bridge.issue(paired["lanes"]["codex"], "claim", "43")
+    found = rows(bridge, problems.INACTIVE)
+    assert [row["participant"] for row in found] == ["codex", "claude"]
+
+
+def test_rows_older_than_a_day_follow_todays_under_a_heading():
+    fresh = problems._row(problems.OVERDUE, "late", "x y", 900, "claude")
+    old = problems._row(problems.BOUNCE, "bounced", "x y", 200000, "codex")
+    listed = problems.lines([fresh, old])
+    assert listed[1] == problems.STALE_HEADING
+    assert "claude" in listed[0] and "codex" in listed[2]
+    assert problems.STALE_HEADING not in problems.lines([fresh])

@@ -878,11 +878,14 @@ def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
     record = {
         "claims": [
             {"issue": 7, "orphaned": True, "orphan_recorded_seconds": 7200}
-        ]
+        ],
+        "availability": {"process_alive": False},
     }
+    live = {**record, "availability": {"process_alive": True}}
 
     rows = problems._retire_rows(record, "claude", "--repo /r", "/r", 3600)
     young = problems._retire_rows(record, "claude", "--repo /r", "/r", 9000)
+    assert problems._retire_rows(live, "claude", "--repo /r", "/r", 3600) == []
 
     assert [row["condition"] for row in rows] == [problems.READY]
     assert rows[0]["command"] == (
