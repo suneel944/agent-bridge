@@ -26,7 +26,7 @@ from agent_parley import (
     tables,
 )
 from agent_parley.cli import git
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 STALLED = supervision.DEFAULTS["stalled_after"]
 
@@ -403,6 +403,37 @@ def test_capture_does_not_reuse_gate_evidence_for_changed_content(
 
     assert saved["gate"] == {}
     assert saved["last_verified_step"] == "PostToolUse: Bash"
+
+
+def test_recovery_capture_leaves_the_checkpoint_lock_free(
+    bridge, repo, paired, monkeypatch
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    (lane / "draft.txt").write_text("unsaved\n")
+    activity = directory / "claude-activity.json"
+    write_json(activity, {"session_id": "s1"})
+    observed = []
+    original = recovery._publish_bundle
+
+    def probed(*args):
+        with lock(directory / "claude-checkpoint.lock"):
+            observed.append("checkpoint free")
+        with pytest.raises(LockBusy):
+            with lock(directory / "claude-capture.lock"):
+                pass
+        return original(*args)
+
+    monkeypatch.setattr(recovery, "_publish_bundle", probed)
+    event = {"hook_event_name": "Stop", "session_id": "s1"}
+
+    assert checkpoints.recover(directory, "claude", event) is True
+
+    assert observed == ["checkpoint free"]
+    state = json.loads(activity.read_text())
+    assert len(state["recovery_checkpoints"]) == 1
+    assert "recovery_error" not in state
 
 
 def test_an_unchanged_tree_is_captured_once(bridge, repo, paired, monkeypatch):

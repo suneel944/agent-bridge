@@ -37,6 +37,7 @@ from agent_parley import issues, lifecycle, roster
 from agent_parley.state import BridgeError, lock, write_json
 
 GIT_SECONDS = 30
+LOCK_SECONDS = 1.0
 KEPT = "kept"
 PRUNED = "pruned"
 GONE = "absent"
@@ -211,6 +212,14 @@ def withdraw(directory: Path, name: str) -> dict:
         directory: Private state directory for the common repository.
         name: Participant retiring itself.
 
+    The whole withdrawal holds the lane's checkpoint lock, the lock a launch
+    takes before it records a session start. A restart or launch racing the
+    retirement therefore either finishes recording its start first, or waits
+    and then finds the participant retired and refuses, rather than starting
+    a session in a worktree removed a moment later. The lane's session lock
+    is not the one taken, because the retiring lane calls this from inside
+    its own session, whose launcher holds that lock until the session ends.
+
     Returns:
         What the retirement did: the issues released and the handoffs
         declined, the lanes that had handed this one work, the state of the
@@ -219,24 +228,32 @@ def withdraw(directory: Path, name: str) -> dict:
 
     Raises:
         BridgeError: If the manifest does not hold that participant.
+        LockBusy: If another lane command holds the lane's checkpoint lock
+            past `LOCK_SECONDS`; nothing was released, removed or recorded.
     """
-    manifest = roster.read(directory)
-    participant = manifest["participants"].get(name)
-    if participant is None:
-        raise BridgeError(f"{name} is not a participant in this project.")
-    if roster.retired(participant):
-        return {
-            "participant": name,
-            "retired_at": float(participant["retired"]),
-            "released": [],
-            "declined": [],
-            "senders": {},
-            "worktree": KEPT,
-            "dirty": [],
-        }
-    work = _return_work(directory, manifest, name)
-    worktree = _prune(manifest["root"], Path(participant["lane"]))
-    at = time.time()
-    mark(directory, name, at)
-    (directory / f"{name}-identity.json").unlink(missing_ok=True)
-    return {"participant": name, "retired_at": at, **work, **worktree}
+    with lock(
+        directory / f"{name}-checkpoint.lock",
+        f"{name} is busy with another lane command; nothing was retired, "
+        "so retry the retirement.",
+        timeout=LOCK_SECONDS,
+    ):
+        manifest = roster.read(directory)
+        participant = manifest["participants"].get(name)
+        if participant is None:
+            raise BridgeError(f"{name} is not a participant in this project.")
+        if roster.retired(participant):
+            return {
+                "participant": name,
+                "retired_at": float(participant["retired"]),
+                "released": [],
+                "declined": [],
+                "senders": {},
+                "worktree": KEPT,
+                "dirty": [],
+            }
+        work = _return_work(directory, manifest, name)
+        worktree = _prune(manifest["root"], Path(participant["lane"]))
+        at = time.time()
+        mark(directory, name, at)
+        (directory / f"{name}-identity.json").unlink(missing_ok=True)
+        return {"participant": name, "retired_at": at, **work, **worktree}

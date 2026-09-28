@@ -351,6 +351,39 @@ def capture(
     agent: str,
     payload: dict | None = None,
 ) -> list[dict]:
+    """Captures every claim owned by one lane under the lane's capture lock.
+
+    The capture runs Git over the whole worktree and can take seconds, so
+    it holds ``<lane>-capture.lock`` rather than ``<lane>-checkpoint.lock``.
+    Hook decisions wait on the checkpoint lock for at most one second, and
+    a capture held under it answered them without coordination. The
+    capture lock serializes captures of one lane, which share the lane's
+    temporary Git refs, bundles and checkpoint records. A caller that
+    also holds the checkpoint lock takes it first, never the reverse.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        agent: Participant whose owned claims are captured.
+        payload: Optional native lifecycle event supplying step evidence.
+
+    Returns:
+        Checkpoint records published for the lane's current claims.
+
+    Raises:
+        LockBusy: If another capture of the lane holds the capture lock.
+        BridgeError: If the lane or Git state cannot be captured.
+    """
+    with lock(directory / f"{agent}-capture.lock", timeout=1):
+        return _capture(directory, manifest, agent, payload)
+
+
+def _capture(
+    directory: Path,
+    manifest: dict,
+    agent: str,
+    payload: dict | None = None,
+) -> list[dict]:
     """Captures every claim owned by one lane into private durable bundles.
 
     The lane index becomes one checkpoint commit. Its working tree, including

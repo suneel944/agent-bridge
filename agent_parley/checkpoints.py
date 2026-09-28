@@ -869,6 +869,24 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
     return False
 
 
+def _subcommand(words: list[str]) -> list[str]:
+    """Drops the root options that precede an agent-parley subcommand.
+
+    The launch protocol teaches lanes the ``agent-parley --home HOME``
+    form, so the root options and the ``--home`` value are skipped before
+    the subcommand is read.
+
+    Args:
+        words: Shell words that follow the agent-parley program name.
+
+    Returns:
+        The words from the subcommand onwards.
+    """
+    while words and words[0].startswith("-"):
+        words = words[2:] if words[0] == "--home" else words[1:]
+    return words
+
+
 def lifts_run_budget(payload: dict, depth: int = 2) -> bool:
     """Reports whether a native tool command changes the run budget.
 
@@ -892,11 +910,15 @@ def lifts_run_budget(payload: dict, depth: int = 2) -> bool:
     command = str(tool_input.get("command", tool_input.get("cmd", "")))
     for segment in shell_segments(command):
         for index, word in enumerate(segment):
-            if Path(word).name in {"agent-parley", "agent_parley"} and (
-                segment[index + 1 : index + 2] == ["budget"]
+            rest = _subcommand(segment[index + 1 :])
+            if Path(word).name in {
+                "agent-parley",
+                "agent_parley",
+                "agent_parley.cli",
+            } and (
+                rest[:1] == ["budget"]
                 and any(
-                    argument in {"enforce", "resume"}
-                    for argument in segment[index + 2 :]
+                    argument in {"enforce", "resume"} for argument in rest[1:]
                 )
             ):
                 return True
@@ -3030,10 +3052,16 @@ def recover(
 ) -> bool:
     """Writes the recovery checkpoint a decision left for after its reply.
 
-    It holds the lane's checkpoint lock, as the decision did, so it never
-    interleaves with another event's record. A session whose ownership
-    generation was transferred meanwhile writes nothing, because its
-    worktree no longer backs the claims. The activity file is rewritten
+    The capture itself runs outside the lane's checkpoint lock, under the
+    capture lock `recovery.capture` takes, because Git over a large
+    worktree outlasts the one-second wait every hook decision has for the
+    checkpoint lock. The checkpoint lock is held only to check the session
+    generation before the capture and to record its outcome after it, so
+    the record never interleaves with another event's. A session whose
+    ownership generation was transferred before either check writes
+    nothing, because its worktree no longer backs the claims. A capture
+    another caller is already running raises `LockBusy` rather than
+    recording an error. The activity file is rewritten
     only when the checkpoint ids or the error changed, and never created,
     so an unchanged tree adds no write after the reply.
 
@@ -3047,7 +3075,8 @@ def recover(
         Whether a checkpoint was attempted.
 
     Raises:
-        LockBusy: If the lane's checkpoint lock stays held.
+        LockBusy: If the lane's checkpoint lock stays held, or another
+            capture of the lane holds its capture lock.
         BridgeError: If the project manifest cannot be read.
         OSError: If the activity file cannot be read or written.
     """
@@ -3057,14 +3086,17 @@ def recover(
     with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
         if recovery.stale_session(directory, agent, payload):
             return False
-        manifest = roster.read(directory)
-        try:
-            saved = recovery.capture(directory, manifest, agent, payload)
-            outcome: dict = {
-                "recovery_checkpoints": [item["id"] for item in saved]
-            }
-        except (BridgeError, OSError, ValueError) as exc:
-            outcome = {"recovery_error": clip(str(exc), MAX_CAUSE_BYTES)}
+    manifest = roster.read(directory)
+    try:
+        saved = recovery.capture(directory, manifest, agent, payload)
+        outcome: dict = {"recovery_checkpoints": [item["id"] for item in saved]}
+    except LockBusy:
+        raise
+    except (BridgeError, OSError, ValueError) as exc:
+        outcome = {"recovery_error": clip(str(exc), MAX_CAUSE_BYTES)}
+    with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
+        if recovery.stale_session(directory, agent, payload):
+            return False
         if not path.exists():
             return True
         state = json.loads(path.read_text())

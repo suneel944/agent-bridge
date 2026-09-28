@@ -239,7 +239,9 @@ reported.
                 the participant already has a launcher, or the repository
                 lies on a mounted Windows drive under WSL, or the lane's
                 checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`, or the
-                project's enforced run budget is exhausted.
+                project's enforced run budget is exhausted, or the lane
+                retired while the launch waited for that lock, since a
+                retirement removes the worktree under the same lock.
         """
         from agent_parley.cli import (
             COPILOT_EVENTS,
@@ -485,6 +487,14 @@ reported.
                 lane.parent / f"{agent}-checkpoint.lock",
                 timeout=LAUNCH_LOCK_SECONDS,
             ):
+                if roster.retired(
+                    roster.read(lane.parent)["participants"].get(agent, {})
+                ):
+                    raise BridgeError(
+                        f"{agent} retired while this launch was starting; "
+                        f"re-admit it with agent-parley participant add "
+                        f"{agent} before launching it."
+                    )
                 previous = (
                     json.loads(activity_path.read_text())
                     if activity_path.exists()

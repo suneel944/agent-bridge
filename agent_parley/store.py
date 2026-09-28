@@ -1200,6 +1200,10 @@ def _send(
     its sender and its recipients alone. A decision addresses recipients
     like any other message, and may address none, which records the decision
     without putting it in an inbox.
+
+    A repeated send with a key that already names a delivered message
+    returns that message before any recipient's credential is judged, so a
+    retry succeeds even after a recipient has since been retired.
     """
     subject = _text(args.get("subject"), "subject", 160)
     body = _text(
@@ -1240,6 +1244,7 @@ def _send(
         )
     ids = []
     addressed: dict[int, str] = {}
+    inactive = []
     for recipient in recipients:
         name = _text(recipient, "recipient", 80)
         row = db.execute(
@@ -1249,10 +1254,7 @@ def _send(
         if not row:
             raise BridgeError("Recipient is not registered in your project.")
         if row["token_digest"] is None:
-            raise BridgeError(
-                f"Recipient {name!r} cannot receive mail: "
-                "operator or retired participant has no active credential."
-            )
+            inactive.append(name)
         ids.append(row[0])
         addressed[row[0]] = name
     existing = db.execute(
@@ -1289,6 +1291,11 @@ def _send(
             "thread_id": existing["thread_id"],
             "duplicate": True,
         }
+    if inactive:
+        raise BridgeError(
+            f"Recipient {inactive[0]!r} cannot receive mail: "
+            "operator or retired participant has no active credential."
+        )
     delivered = set(ids)
     if route and not ack and not decision:
         delivered = _routed(
