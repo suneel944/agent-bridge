@@ -2332,6 +2332,12 @@ class Bridge(
         finds no session to end, so the ledger shows every operator action
         rather than only the ones that changed something.
 
+        The activity record is marked `operator_stopped` in both cases, and
+        the service does not wake or resume the lane until its next launch
+        clears the mark. Without it the stopped label reads as a lane owed a
+        turn, the next sweep resumes it, and the operator's own `run` meets a
+        lock held by a session with no terminal attached.
+
         Args:
             repo: Any checkout of the target repository.
             name: Participant whose session is ended.
@@ -2353,6 +2359,10 @@ class Bridge(
             or not process.alive(pid, ticks)
             or supervision.rebooted(state)
         ):
+            with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+                state = json.loads(path.read_text()) if path.exists() else {}
+                state.update(operator_stopped=True)
+                write_json(path, state)
             self._record_operator(
                 directory,
                 name,
@@ -2373,7 +2383,9 @@ class Bridge(
             )
         with lock(directory / f"{name}-checkpoint.lock", timeout=1):
             state = json.loads(path.read_text()) if path.exists() else {}
-            state.update(activity="stopped", updated=time.time())
+            state.update(
+                activity="stopped", operator_stopped=True, updated=time.time()
+            )
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
             state.pop("session_boot", None)

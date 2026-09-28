@@ -2497,7 +2497,9 @@ When `run` finds the lane's session lock held by a live launcher, it names the
 launcher and client processes, when the session started and its last activity,
 and prints `agent-parley participant stop <lane>`. That session may have been
 resumed by the service with no terminal attached, so retrying cannot succeed
-until it ends.
+until it ends. After `participant stop`, the service does not wake or resume
+that lane, so the operator's own `run` takes the lock. The next launch of the
+lane, by any path, lifts that hold.
 
 `participant restore` returns one lane to its bridge branch. It refuses while
 that participant has a running session, refuses on an uncommitted change, and
