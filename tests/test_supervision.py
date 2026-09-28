@@ -909,6 +909,62 @@ def test_operator_stop_holds_until_the_next_launch(
     assert "operator_stopped" not in json.loads(path.read_text())
 
 
+def test_stopping_a_live_session_with_backlog_is_not_resumed_by_a_wake(
+    bridge, repo, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    path = directory / "codex-activity.json"
+    send(bridge, actors["claude"], "codex")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"]
+    )
+    try:
+        write_json(
+            path,
+            {
+                "activity": "idle",
+                "session_id": "12345678-abcd-1234-abcd-123456789abc",
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+                "updated": time.time(),
+            },
+        )
+        assert "ended from the base checkout" in bridge.stop(repo, "codex")
+        assert child.wait(10) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(10)
+    stopped = json.loads(path.read_text())
+    assert stopped["operator_stopped"] is True
+    assert stopped["session_id"]
+
+    class Child:
+        pid = 4321
+
+    launched = []
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    observed = sampled(
+        bridge, paired, directory, "codex", 300, stopped["session_id"]
+    )
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched == []
+    stopped.pop("operator_stopped")
+    write_json(path, stopped)
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched and "--resume" in launched[0]
+
+
 @pytest.mark.parametrize(
     "answer,result,attempts",
     [
