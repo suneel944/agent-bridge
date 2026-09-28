@@ -279,6 +279,7 @@ def test_withheld_completion_note_answers_the_release_reminder(bridge, paired):
     lane = Path(paired["lanes"]["claude"])
     bridge.issue(lane, "claim", "1")
     bridge.issue(lane, "release", "1")
+    supervision.reminders(lane.parent, roster.read(lane.parent), {"1"})
     prompt = issues.snapshot(lane.parent)["issues"]["1"]["handoff_prompt"]
     assert prompt["waiting"] == []
     sent = store.call(
