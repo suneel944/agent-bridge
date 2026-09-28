@@ -209,16 +209,23 @@ def _event(
     detail: str = "",
     now: float,
 ) -> None:
-    """Appends one lane event and bounds the project's retained history."""
+    """Appends one lane event and bounds the project's retained history.
+
+    `accounting` events and every other kind are bounded separately, each
+    to `MAX_EVENTS` per project, so accounting rows written on every poll
+    never evict the transitions an operator reads as lane history.
+    """
     db.execute(
         "INSERT INTO lane_events(project,lane,kind,source,target,cause,"
         "evidence,detail,ts) VALUES (?,?,?,?,?,?,?,?,?)",
         (root, lane, kind, source, target, cause, evidence, detail, now),
     )
+    metered = int(kind == "accounting")
     db.execute(
-        "DELETE FROM lane_events WHERE project=? AND id<=(SELECT id FROM "
-        "lane_events WHERE project=? ORDER BY id DESC LIMIT 1 OFFSET ?)",
-        (root, root, MAX_EVENTS),
+        "DELETE FROM lane_events WHERE project=? AND (kind='accounting')=? "
+        "AND id<=(SELECT id FROM lane_events WHERE project=? "
+        "AND (kind='accounting')=? ORDER BY id DESC LIMIT 1 OFFSET ?)",
+        (root, metered, root, metered, MAX_EVENTS),
     )
 
 
