@@ -2725,7 +2725,7 @@ def observed_complete(record: dict) -> bool:
 def completion_escalations(
     directory: Path,
     manifest: dict,
-    observed: dict,
+    observed: dict | None,
     threshold: int,
     window: float,
 ) -> None:
@@ -2748,12 +2748,18 @@ def completion_escalations(
     A holder that answers before the threshold clears its own escalation,
     because the reminder it answered is no longer unanswered.
 
+    The forge is read again on every poll, so a marker is retracted as soon
+    as the latest observation no longer reads its issue ended, as after a
+    reopen: advice to resolve the claim would otherwise end live work. A
+    poll whose forge reading failed observed nothing and keeps every marker.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
         observed: Forge observation per issue number whose lane branch ended
             inside the current ownership generation, carrying the branch, the
-            pull request state and the instant it was observed.
+            pull request state and the instant it was observed, or None when
+            this poll could not read the forge.
         threshold: Unanswered reminders this project escalates after.
         window: Seconds of silence after which a lane is asked again, the
             span one unanswered reminder is counted over.
@@ -2775,7 +2781,11 @@ def completion_escalations(
                 if record.pop("unresolved_completion", None):
                     changed = True
                 continue
-            seen = observed.get(number) or {}
+            seen = (observed or {}).get(number) or {}
+            if current and not seen and observed is not None:
+                record.pop("unresolved_completion")
+                changed = True
+                continue
             if current or not seen:
                 continue
             elapsed = max(0.0, time.time() - float(prompt.get("created", 0)))
@@ -5076,15 +5086,18 @@ def _remind(
 
     Completion reads the forge and each lane's reflog, so it runs as its own
     stage. A reading that raises is recorded and leaves no claim observed
-    ended for this poll, so reminders and every later stage still run.
+    ended for this poll, so reminders and every later stage still run, and
+    completion escalations keep their markers rather than read the failure
+    as a reopened issue.
     """
-    ended: dict[str, dict] = {}
+    read: list[dict[str, dict]] = []
     stage(
         "completion",
-        lambda: ended.update(
+        lambda: read.append(
             completed_claims(manifest, issues.snapshot(directory))
         ),
     )
+    ended = read[0] if read else {}
     closed = set(ended)
     stage(
         "reminders",
@@ -5118,7 +5131,7 @@ def _remind(
         completion_escalations,
         directory,
         manifest,
-        ended,
+        read[0] if read else None,
         int(
             config.get("completion_reminders", DEFAULTS["completion_reminders"])
         ),
