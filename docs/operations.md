@@ -235,7 +235,9 @@ page carries up to ten messages and a search up to five, each with a
 240-character body preview; `--after-id` continues a thread page and `--limit`
 narrows a search. Where SQLite was built without the full-text index a search
 matches the query as a literal case-insensitive substring rather than as
-indexed terms, and every result names which of the two answered it.
+indexed terms, and every result names which of the two answered it. The index
+covers the whole body of a message that spilled to an attachment, and so does
+decision search; the substring fallback reads only the slice the message keeps.
 
 `--as NAME` names the lane to read instead of taking it from the worktree, so
 `mail show`, `mail thread`, `mail search` and `mail list` answer from the main
@@ -286,6 +288,7 @@ the only compatible combination.
 <!-- compatibility:start -->
 | Launcher | Wire protocol | Store schema |
 | --- | --- | --- |
+| 0.14.0 | 1 | 12 |
 | 0.13.0 | 1 | 11 |
 | 0.12.0 | 1 | 10 |
 | 0.11.0 | 1 | 10 |
