@@ -12,12 +12,14 @@ from pathlib import Path
 import pytest
 
 from agent_parley import (
+    checkpoints,
     cli,
     dialogs,
     issues,
     lanes,
     process,
     roster,
+    server,
     state,
     store,
     supervision,
@@ -1410,3 +1412,48 @@ def test_bare_stops_escalate_and_a_commit_resets_the_budget(
     empty_commit(lane)
     record = woken()
     assert record["attempts"] == 1 and record["exhausted_at"] is None
+
+
+def test_a_recovery_burst_queues_one_capture_with_merged_evidence(
+    bridge, monkeypatch
+):
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def capture(directory, agent, payload, timeout, evidence=None):
+        calls.append((payload, evidence))
+        started.set()
+        release.wait(20)
+        return True
+
+    monkeypatch.setattr(checkpoints, "recover", capture)
+    lane = ("project", "codex")
+    passing = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "make check"},
+        "tool_response": {"exit_code": 0},
+    }
+
+    def owed(payload):
+        return {
+            "directory": str(bridge.home),
+            "participant": "codex",
+            "payload": payload,
+        }
+
+    with server.Server(bridge.home, bridge.config) as instance:
+        instance.recover(lane, owed({"step": 0}))
+        assert started.wait(20)
+        instance.recover(lane, owed(passing))
+        for step in range(1, 4):
+            instance.recover(lane, owed({"step": step}))
+        release.set()
+        deadline = time.monotonic() + 20
+        while lane in instance.recovering:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+    assert [payload for payload, _ in calls] == [{"step": 0}, {"step": 3}]
+    assert [evidence for _, evidence in calls] == [None, passing]

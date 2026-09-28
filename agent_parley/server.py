@@ -416,7 +416,7 @@ class Server(ThreadingHTTPServer):
         self.stopping = threading.Event()
         self.counting = threading.Lock()
         self.deciding: dict[tuple[str, str], int] = {}
-        self.recovering: dict[tuple[str, str], list[dict]] = {}
+        self.recovering: dict[tuple[str, str], dict | None] = {}
         self.repeats: dict[
             tuple[str, tuple[str, str]], tuple[float, int, str]
         ] = {}
@@ -582,31 +582,37 @@ class Server(ThreadingHTTPServer):
     def recover(self, lane: tuple[str, str], owed: dict) -> None:
         """Queues a recovery checkpoint to run after its hook was answered.
 
-        One thread per lane works its queue in arrival order, so the lane's
-        checkpoints stay ordered and a burst of events never starts more
-        than one Git capture for the same worktree at once. Every request is
-        kept, because a later one may carry no gate evidence and would lose
-        the passing command an earlier one recorded.
+        One thread per lane runs the lane's captures, so a burst of events
+        never starts more than one Git capture for the same worktree at
+        once. At most one request waits behind the running capture: a newer
+        request replaces it through `checkpoints.merge_recovery`, which
+        keeps the most recent gate evidence of the requests it replaces. A
+        burst therefore costs the running capture and one more, rather than
+        one capture per event holding the lane's locks for minutes.
 
         Args:
             lane: Project key and participant name the request is for.
             owed: The ``recovery`` request `checkpoints.serve` returned.
         """
         with self.counting:
-            queued = self.recovering.get(lane)
-            if queued is not None:
-                queued.append(owed)
+            if lane in self.recovering:
+                waiting = self.recovering[lane]
+                self.recovering[lane] = (
+                    owed
+                    if waiting is None
+                    else checkpoints.merge_recovery(waiting, owed)
+                )
                 return
-            self.recovering[lane] = []
+            self.recovering[lane] = None
         threading.Thread(
             target=self._recovering, args=(lane, owed), daemon=True
         ).start()
 
     def _recovering(self, lane: tuple[str, str], owed: dict) -> None:
-        """Runs one lane's queued recovery checkpoints until none are left.
+        """Runs one lane's recovery checkpoints until none is waiting.
 
         Args:
-            lane: Project key and participant name the queue belongs to.
+            lane: Project key and participant name the requests belong to.
             owed: First request to run.
         """
         while True:
@@ -616,6 +622,7 @@ class Server(ThreadingHTTPServer):
                     owed["participant"],
                     owed["payload"],
                     checkpoints.SETTLE_SECONDS,
+                    owed.get("evidence"),
                 )
             except Exception as exc:
                 self.coalesce(
@@ -625,11 +632,12 @@ class Server(ThreadingHTTPServer):
                     f"event captures again: {type(exc).__name__}",
                 )
             with self.counting:
-                queued = self.recovering.get(lane) or []
-                if not queued:
+                waiting = self.recovering.get(lane)
+                if waiting is None:
                     self.recovering.pop(lane, None)
                     return
-                owed = queued.pop(0)
+                self.recovering[lane] = None
+                owed = waiting
 
     def coalesce(self, event: str, lane: tuple[str, str], detail: str) -> None:
         """Records a per-lane repeat at most once per `REPEAT_SECONDS`.

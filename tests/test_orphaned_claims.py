@@ -519,6 +519,40 @@ def test_an_unchanged_tree_is_captured_once(bridge, repo, paired, monkeypatch):
     assert third["gate"] == {}
 
 
+def test_a_merged_recovery_records_the_gate_of_the_event_it_replaced(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    (lane / "draft.txt").write_text("gated\n")
+    passing = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "make check"},
+        "tool_response": {"exit_code": 0},
+    }
+    later = {"hook_event_name": "PostToolUse", "tool_name": "Read"}
+    request = {"directory": str(directory), "participant": "claude"}
+    owed = checkpoints.merge_recovery(
+        {**request, "payload": passing}, {**request, "payload": later}
+    )
+
+    assert owed["payload"] == later
+    assert owed["evidence"] == passing
+    saved = recovery.capture(
+        directory,
+        roster.read(directory),
+        "claude",
+        owed["payload"],
+        owed["evidence"],
+    )[0]
+
+    assert saved["last_verified_step"] == "PostToolUse: Read"
+    assert saved["gate"]["command"] == "make check"
+    assert saved["gate"]["exit_code"] == 0
+
+
 @pytest.mark.parametrize("boundary", ["head", "index", "worktree"])
 def test_takeover_restore_resumes_after_each_durable_phase(
     bridge, repo, paired, monkeypatch, boundary
