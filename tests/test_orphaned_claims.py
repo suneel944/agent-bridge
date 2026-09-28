@@ -444,7 +444,9 @@ def test_a_capture_reclaims_a_ref_orphaned_by_a_killed_capture(
     bridge.issue(lane, "claim", "42")
     manifest = roster.read(directory)
     head = git(lane, "rev-parse", "HEAD")
-    git(lane, "update-ref", "refs/agent-parley-recovery/leftover", head)
+    scope = recovery._lane_scope(lane)
+    stray = f"refs/agent-parley-recovery/{scope}/leftover"
+    git(lane, "update-ref", stray, head)
 
     saved = recovery.capture(directory, manifest, "claude")
 
@@ -453,9 +455,31 @@ def test_a_capture_reclaims_a_ref_orphaned_by_a_killed_capture(
         lane,
         "for-each-ref",
         "--format=%(refname)",
-        "refs/agent-parley-recovery/",
+        f"refs/agent-parley-recovery/{scope}/",
     )
     assert remaining == ""
+
+
+def test_a_capture_never_deletes_a_sibling_lanes_in_flight_ref(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    bridge.issue(peer, "claim", "43")
+    manifest = roster.read(directory)
+    peer_head = git(peer, "rev-parse", "HEAD")
+    peer_scope = recovery._lane_scope(peer)
+    in_flight = (
+        f"refs/agent-parley-recovery/{peer_scope}/issue-43-still-publishing"
+    )
+    git(peer, "update-ref", in_flight, peer_head)
+
+    saved = recovery.capture(directory, manifest, "claude")
+
+    assert len(saved) == 1
+    assert git(lane, "rev-parse", "--verify", in_flight) == peer_head
 
 
 def test_an_unchanged_tree_is_captured_once(bridge, repo, paired, monkeypatch):
