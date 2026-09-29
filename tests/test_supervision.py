@@ -326,6 +326,49 @@ def test_closed_pr_reminds_holder_and_preserves_claim(
     assert record["handoff_prompt"]["trigger"] == "pull request ended"
 
 
+def test_an_escalated_completion_reminder_stops_waking_the_holder(
+    bridge, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["codex"])
+    bridge.issue(lane, "claim", "1")
+    supervision.reminders(lane.parent, roster.read(lane.parent), {"1"})
+    write_json(
+        lane.parent / "codex-activity.json",
+        {
+            "activity": "idle",
+            "updated": time.time() - 500,
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        terminal, "request", lambda *args: calls.append(args) or "accepted"
+    )
+    config = {**supervision.DEFAULTS, "inactive_after": 1}
+    observed = sampled(bridge, paired, lane.parent, "codex")
+    rewake(bridge, paired, lane.parent, "codex", at=0, backlog=[])
+    supervision.wake(
+        bridge.home, lane.parent, paired, "codex", observed, config
+    )
+    assert len(calls) == 1
+    ledger = issues.snapshot(lane.parent)
+    record = ledger["issues"]["1"]
+    record["unresolved_completion"] = {
+        "claim_id": record["claim_id"],
+        "holder": "codex",
+        "prompt": record["handoff_prompt"]["id"],
+    }
+    ledger["revision"] += 1
+    write_json(lane.parent / "issues.json", ledger)
+    rewake(bridge, paired, lane.parent, "codex", at=0)
+    supervision.wake(
+        bridge.home, lane.parent, paired, "codex", observed, config
+    )
+    assert len(calls) == 1
+
+
 def test_live_idle_wakes_back_off_without_acknowledging(
     bridge, paired, monkeypatch
 ):

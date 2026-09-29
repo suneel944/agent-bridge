@@ -32,6 +32,7 @@ from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 MAX_CONTEXT_BYTES = 1536
 MAX_CAUSE_BYTES = 200
+MAX_NOTICE_REPEATS = 3
 FOREIGN_WINDOW = 600
 MAX_EVENT_LOG_BYTES = 262144
 MAX_EVENT_LOG_AGE = 1209600
@@ -1263,6 +1264,71 @@ def owed_notice(owed: list[str]) -> str:
         clip("Acknowledgements owed: " + ", ".join(owed), 300)
         + "\nAcknowledge each once reviewed."
     )
+
+
+def standing_notices(issues: dict, agent: str, shown: dict) -> tuple[str, dict]:
+    """Builds the issue notice a ledger revision injects into one lane.
+
+    Every ledger revision re-delivers what still stands, so an unanswered
+    completion reminder or deadline notice would otherwise be injected into
+    the lane on every change to any issue for as long as it stands. Each is
+    shown at most `MAX_NOTICE_REPEATS` times per identifier, and the
+    identifier names one claim generation, so the ceiling is per claim.
+    When none of the lane's own notices is left to show, the ledger summary
+    is shown instead, and the unanswered reminders it would quote are held
+    to the same ceiling. Past it a notice stays in the ledger, the issue
+    list and the operator's escalation, but is no longer injected.
+
+    Args:
+        issues: Published issue ledger.
+        agent: Participant name within the project.
+        shown: Times each notice identifier was already shown to the lane.
+
+    Returns:
+        The notice text to show now, and the updated count per identifier
+        still standing, so identifiers that stopped standing are dropped.
+    """
+    notices = [
+        prompt
+        for item in issues["issues"].values()
+        if (prompt := item.get("handoff_prompt") or {}).get("holder") == agent
+        and not prompt.get("responded_at")
+    ]
+    notices += [
+        notice
+        for item in issues["issues"].values()
+        if (notice := deadline_notice(item))
+        and (notice["holder"] == agent or agent in notice.get("waiting", []))
+    ]
+    texts = []
+    counts = {}
+    for notice in notices:
+        key = notice.get("id") or notice["text"]
+        seen = int(shown.get(key, 0) or 0)
+        if seen < MAX_NOTICE_REPEATS:
+            texts.append(notice["text"])
+            seen += 1
+        counts[key] = seen
+    if texts:
+        return "\n".join(texts), counts
+    view = {**issues, "issues": {}}
+    for number, record in issues["issues"].items():
+        view["issues"][number] = record
+        prompt = record.get("handoff_prompt") or {}
+        if not prompt or prompt.get("responded_at"):
+            continue
+        key = prompt.get("id") or prompt["text"]
+        seen = int(counts.get(key, shown.get(key, 0)) or 0)
+        if seen < MAX_NOTICE_REPEATS:
+            seen += 1
+        else:
+            view["issues"][number] = {
+                field: value
+                for field, value in record.items()
+                if field != "handoff_prompt"
+            }
+        counts[key] = seen
+    return describe(view), counts
 
 
 def digest(
@@ -3165,24 +3231,11 @@ def checkpoint(
                             "reported task, and last coordination time."
                         )
                     if issue_notice:
-                        reminders = [
-                            item["handoff_prompt"]["text"]
-                            for item in issues["issues"].values()
-                            if item.get("handoff_prompt", {}).get("holder")
-                            == agent
-                            and not item["handoff_prompt"].get("responded_at")
-                        ]
-                        reminders += [
-                            notice["text"]
-                            for item in issues["issues"].values()
-                            if (notice := deadline_notice(item))
-                            and (
-                                notice["holder"] == agent
-                                or agent in notice.get("waiting", [])
-                            )
-                        ]
+                        notice, repeats = standing_notices(
+                            issues, agent, state.get("notice_repeats") or {}
+                        )
                         parts.append(
-                            clip("\n".join(reminders) or describe(issues), 400)
+                            clip(notice, 400)
                             + "\nRun agent-parley issue list for full state. "
                             "Pause offered work until resolved. "
                             "Silence never transfers ownership."
@@ -3286,6 +3339,8 @@ def checkpoint(
                         if news["items"]:
                             markers["feed_cursor"] = news["items"][0]["id"]
                         markers["issue_revision"] = issues["revision"]
+                        if issue_notice:
+                            markers["notice_repeats"] = repeats
                         markers["roster"] = names
                         if offer:
                             markers["work_offer"] = offer["id"]

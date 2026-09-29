@@ -145,9 +145,13 @@ def test_an_idle_claim_of_a_live_lane_is_offered_and_its_peer_kept(
 def test_progress_on_the_idle_claim_drops_its_recovery(bridge, paired):
     directory = busy_with_one_idle_claim(bridge, paired)
     assert step(bridge, directory)["8"]["overdue_recovery"]["step"] == "wake"
+    assert issues.deadline_notice(issues.snapshot(directory)["issues"]["8"])
     lifecycle.record_report(
         directory, "claude", "partial", "", "still going", issue="8"
     )
+    reported = issues.snapshot(directory)["issues"]["8"]
+    assert "deadline_notice" in reported
+    assert issues.deadline_notice(reported) == {}
     kept = step(bridge, directory)["8"]
     assert kept["offer"] is None
     assert "overdue_recovery" not in kept

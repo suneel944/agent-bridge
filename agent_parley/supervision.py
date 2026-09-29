@@ -6620,7 +6620,10 @@ def wake(
 
     The backlog counts every reason this lane owes someone a turn: live
     unread or unacknowledged mail, an unanswered completion reminder it
-    holds, and a handoff offer naming it as recipient. Mail is counted as a
+    holds, and a handoff offer naming it as recipient. A reminder already
+    escalated to the operator as an unresolved completion leaves the
+    backlog, because asking the lane again changes nothing and the
+    operator's resolution is what ends the claim. Mail is counted as a
     bounded digest of one message per thread rather than every identifier,
     and mail superseded by a claim that closed or moved is not a reason to
     wake anybody; the record names how many superseded deliveries were
@@ -6807,6 +6810,7 @@ def wake(
         for record in ledger
         if record.get("handoff_prompt", {}).get("holder") == name
         and not record["handoff_prompt"].get("responded_at")
+        and not issues.unresolved_completion(record)["unresolved"]
     )
     backlog.extend(
         record["offer"]["id"]
