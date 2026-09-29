@@ -229,7 +229,10 @@ def deadline_notice(record: dict) -> dict:
     or the issue closes on the forge, replaying it would tell the lane to
     pause for work it no longer holds. Readers therefore see a notice only
     while its holder still owns an open claim, which also silences notices
-    older ledgers kept after ownership ended.
+    older ledgers kept after ownership ended. A no-progress notice is also
+    silenced once the claim records progress after it was written, rather
+    than at the supervisor's next poll, because its frozen idle age would
+    otherwise contradict the progress the holder just reported.
 
     Args:
         record: Published ledger record for one issue, or an empty mapping.
@@ -242,6 +245,10 @@ def deadline_notice(record: dict) -> dict:
         notice.get("holder")
         and notice["holder"] == record.get("owner")
         and not closed(record)
+        and not (
+            str(notice.get("id", "")).startswith("idle:")
+            and last_progress(record) > float(notice.get("created", 0) or 0)
+        )
     ):
         return notice
     return {}

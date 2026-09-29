@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import checkpoints, delivery, roster, store
+from agent_parley import checkpoints, delivery, issues, roster, store
 from agent_parley.state import lock, write_json
 
 SUBJECT = "Interface change"
@@ -116,6 +116,32 @@ def test_polled_delivery_names_owed_acknowledgements_once(bridge, polled):
     text = delivery.mail_file(directory, "helper").read_text()
     assert f"Acknowledgements owed: message {asked['id']} from" in text
     assert delivery.deliver(bridge.home, directory, "helper") == 0
+
+
+def test_a_standing_reminder_is_injected_at_most_the_ceiling(bridge, polled):
+    lane = Path(polled["lanes"]["helper"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "1")
+    reminder = "Issue #1: pull request ended. helper, send a completion note."
+    shown = 0
+    for _ in range(checkpoints.MAX_NOTICE_REPEATS + 3):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["1"]["handoff_prompt"] = {
+            "id": "1:0:pull request ended",
+            "holder": "helper",
+            "trigger": "pull request ended",
+            "created": time.time(),
+            "text": reminder,
+        }
+        ledger["revision"] += 1
+        write_json(directory / "issues.json", ledger)
+        assert delivery.deliver(bridge.home, directory, "helper") > 0
+        batch = checkpoints.activity(directory, "helper")["batches"][-1]
+        shown += reminder in batch["text"]
+    assert shown == checkpoints.MAX_NOTICE_REPEATS
+    assert checkpoints.activity(directory, "helper")["notice_repeats"] == {
+        "1:0:pull request ended": checkpoints.MAX_NOTICE_REPEATS
+    }
 
 
 @pytest.fixture

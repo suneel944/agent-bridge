@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from agent_parley import checkpoints, roster, store, supervision
-from agent_parley.issues import deadline_notice, describe, snapshot
+from agent_parley.issues import snapshot
 from agent_parley.state import BridgeError, lock, write_json, write_text
 
 DEFAULT_SECONDS = 20.0
@@ -127,22 +127,11 @@ def _notices(
     """Builds the non-mail notices undelivered since the last delivery."""
     parts = []
     if issues["revision"] != state.get("issue_revision", 0):
-        reminders = [
-            item["handoff_prompt"]["text"]
-            for item in issues["issues"].values()
-            if item.get("handoff_prompt", {}).get("holder") == agent
-            and not item["handoff_prompt"].get("responded_at")
-        ]
-        reminders += [
-            notice["text"]
-            for item in issues["issues"].values()
-            if (notice := deadline_notice(item))
-            and (
-                notice["holder"] == agent or agent in notice.get("waiting", [])
-            )
-        ]
+        notice = checkpoints.standing_notices(
+            issues, agent, state.get("notice_repeats") or {}
+        )[0]
         parts.append(
-            checkpoints.clip("\n".join(reminders) or describe(issues), 400)
+            checkpoints.clip(notice, 400)
             + "\nRun agent-parley issue list for full state. Pause offered "
             "work until resolved. Silence never transfers ownership."
             + checkpoints.offered_attachments(issues, agent)
@@ -344,6 +333,10 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
         if news["items"]:
             state["feed_cursor"] = news["items"][0]["id"]
         state["owed"] = owing
+        if issues["revision"] != read.get("issue_revision", 0):
+            state["notice_repeats"] = checkpoints.standing_notices(
+                issues, agent, read.get("notice_repeats") or {}
+            )[1]
         state["issue_revision"] = issues["revision"]
         state["pending_ack"] = mail["pending_ack"]
         if offer:
