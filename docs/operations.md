@@ -1999,6 +1999,22 @@ for the lane. Only the GitHub forge is read; `beads` and `null` read nothing,
 and a forge that is missing, offline or unreadable keeps the last reading and
 wakes nobody without stopping the poll.
 
+A pending run carries its age. Each reading keeps every unfinished check with
+its state (`queued`, `in_progress`, `pending` or `expected`) and start time,
+and records when the current head was first seen pending; a new head or a
+finished run restarts that clock. A head still pending past the ceiling,
+twice the longest literal `timeout-minutes` in `.github/workflows` or 60
+minutes when none is declared (`CHECKS_STALLED_FACTOR`,
+`CHECKS_STALLED_SECONDS`), gets one supervisor message naming each check,
+its state and its age. The message recommends one re-run, `gh run rerun
+--failed` for a run that ended without a conclusion or cancel and re-run for
+one still in progress past its job timeout, and leaves it to the lane; after
+one re-run it is an operator decision. `status` prints the pending age beside
+`CI pending` and marks the head `stalled`, and `problems` lists a `checks
+stalled` row until the head finishes or changes. Nothing is re-run, merged or
+bypassed automatically. A forge whose checks report no start time is never
+marked stalled.
+
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
 complete. The reminder is written once and a silent lane is asked

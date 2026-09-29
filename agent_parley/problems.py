@@ -73,6 +73,7 @@ ESCALATED = "escalated plan revision"
 PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
+CHECKS = "checks stalled"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -1233,6 +1234,49 @@ def _run_rows(
     ]
 
 
+def _checks_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each open pull request whose head supervision found stalled.
+
+    The lane was already told once; the row keeps the stall in front of the
+    operator until the head finishes or changes, which clears the mark.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the pending ages are measured against.
+
+    Returns:
+        One row per pull request whose pending head is marked stalled.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [
+        _row(
+            CHECKS,
+            f"pull request #{reading.get('number')} checks pending: "
+            + ", ".join(
+                f"{check.get('name')} {check.get('state')}"
+                for check in reading.get("pending") or []
+            ),
+            f"gh pr checks {reading.get('url')}, then re-run once with "
+            "gh run rerun RUN --failed, cancelling first a run still in "
+            "progress past its job timeout",
+            _age(reading.get("pending_since"), now),
+            str(reading.get("lane") or ""),
+            root,
+        )
+        for reading in readings
+        if isinstance(reading, dict)
+        and reading.get("checks") == "pending"
+        and reading.get("stalled_at")
+    ]
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1305,6 +1349,7 @@ def derive(
         aged.extend(_root_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
+        aged.extend(_checks_rows(directory, project["root"], stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )

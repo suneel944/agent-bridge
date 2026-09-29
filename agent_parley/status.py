@@ -161,9 +161,11 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
         branch: Branch assigned to the lane that owns the claim.
 
     Returns:
-        The number, URL, check verdict and merge state of the newest pull
-        request that names the issue as one it closes, else of the one whose
-        head is the lane's branch, or None when the cache holds neither.
+        The number, URL, check verdict, merge state, seconds since its head
+        was first seen pending and whether that head was reported stalled,
+        of the newest pull request that names the issue as one it closes,
+        else of the one whose head is the lane's branch, or None when the
+        cache holds neither.
     """
     ordered = sorted(
         readings, key=lambda item: int(item.get("number") or 0), reverse=True
@@ -182,6 +184,8 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
         "url": str(found.get("url") or ""),
         "checks": str(found.get("checks") or ""),
         "mergeable": str(found.get("mergeable") or ""),
+        "pending_seconds": since(float(found.get("pending_since") or 0)),
+        "stalled": bool(found.get("stalled_at")),
     }
 
 
