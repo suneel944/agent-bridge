@@ -262,7 +262,9 @@ class StatusMixin(BridgeCore):
             before a lane is started. The ``notify`` component says whether
             outbound and inbound notification are active; notification that
             is off is consistent, and one configured but unable to send is
-            not.
+            not. The `approvals` component names each lane
+            `supervision.opt_in_missing` reports as a setup gap; it is the
+            operator's choice, so it leaves the set consistent.
         """
         from agent_parley.cli import (
             inbound_status,
@@ -272,6 +274,7 @@ class StatusMixin(BridgeCore):
             process,
             protocol,
             store,
+            supervision,
         )
 
         components = [
@@ -364,6 +367,27 @@ class StatusMixin(BridgeCore):
                     (outbound["enabled"] and outbound["fault"])
                     or received["fault"]
                 ),
+            }
+        )
+        unapproved = sorted(
+            f"{manifest['root']} {name}"
+            for manifest in manifests
+            if manifest.get("root")
+            for name in manifest.get("participants") or {}
+            if supervision.opt_in_missing(self.home, manifest, name)
+        )
+        components.append(
+            {
+                "component": "approvals",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": protocol.SETUP_GAP if unapproved else protocol.OK,
+                "remedy": (
+                    supervision.OPT_IN_REMEDY + ": " + ", ".join(unapproved)
+                    if unapproved
+                    else ""
+                ),
+                "compatible": True,
             }
         )
         return {

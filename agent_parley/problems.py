@@ -97,6 +97,10 @@ WAKE_DETAILS = {
         "resume refused because a running launcher holds the session lock "
         "and its wake socket did not answer"
     ),
+    supervision.OPT_IN_MISSING: (
+        "setup gap: resume withheld because no bridge tool approval is "
+        "recorded, so the resumed session would stop at a prompt nobody sees"
+    ),
 }
 
 
@@ -233,8 +237,10 @@ def _remedy(
     commands. Resuming a lane whose launcher is still running collides with
     the session lock that launcher holds, so only a stopped lane is resumed,
     a lane whose last wake found that lock held is sent to its own client
-    even when its record reads stopped, and a lane that cannot read mail is
-    never handed a delivery command.
+    even when its record reads stopped, a lane whose resume was withheld for
+    a missing bridge tool approval is sent to that opt-in or to the
+    operator's own terminal, and a lane that cannot read mail is never
+    handed a delivery command.
 
     Args:
         name: Participant that owns the lane.
@@ -254,6 +260,12 @@ def _remedy(
         return (
             f"take the turn waiting in {name}'s own client; its launcher "
             "still holds the session lock, so a resume would be refused",
+            BY_OPERATOR,
+        )
+    if wake.get("result") == supervision.OPT_IN_MISSING:
+        return (
+            f"{supervision.OPT_IN_REMEDY}: agent-parley run {name} --resume "
+            f"{repo}",
             BY_OPERATOR,
         )
     if blocked == supervision.STOPPED:

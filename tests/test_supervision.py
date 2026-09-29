@@ -949,6 +949,67 @@ def test_dead_manual_session_resumes_from_its_recorded_session(
     assert record["result"] == "resume requested (launcher 4321)"
 
 
+@pytest.mark.parametrize("opted", [False, True])
+def test_a_claude_resume_without_the_approval_opt_in_is_withheld(
+    bridge, paired, monkeypatch, opted
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["claude"]).parent
+    native = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    native_ticks = process.start_ticks(native.pid)
+    native.kill()
+    native.wait(timeout=5)
+    write_json(
+        directory / "claude-activity.json",
+        {
+            "activity": "working",
+            "session_id": "manual-session",
+            "session_pid": native.pid,
+            "session_ticks": native_ticks,
+        },
+    )
+    send(bridge, actors["codex"], "claude")
+
+    class Child:
+        pid = 4321
+
+    launched = []
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    manifest = {
+        **paired,
+        "supervision": {**(paired.get("supervision") or {})},
+    }
+    if opted:
+        manifest["supervision"]["approve_bridge_tools"] = True
+    assert supervision.opt_in_missing(bridge.home, manifest, "claude") is (
+        not opted
+    )
+    supervision.wake(
+        bridge.home,
+        directory,
+        manifest,
+        "claude",
+        sampled(
+            bridge, paired, directory, "claude", 300, session="manual-session"
+        ),
+        supervision.DEFAULTS,
+    )
+    record = json.loads((directory / "claude-wake.json").read_text())
+    if opted:
+        assert launched and "--resume" in launched[0]
+    else:
+        assert not launched
+        assert record["result"] == supervision.OPT_IN_MISSING
+        assert record["attempts"] == 1
+
+
 def test_operator_stop_holds_until_the_next_launch(
     bridge, repo, paired, monkeypatch
 ):
@@ -1177,7 +1238,7 @@ def test_global_wake_opt_out_wins_over_project(bridge, paired, monkeypatch):
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
 def test_stopped_resume_keeps_native_interactive_permissions(
-    bridge, repo, tmp_path, monkeypatch, provider
+    bridge, repo, tmp_path, monkeypatch, capsys, provider
 ):
     manifest = bridge.add_participant(repo, provider, provider)
     directory = Path(manifest["lanes"][provider]).parent
@@ -1209,6 +1270,8 @@ def test_stopped_resume_keeps_native_interactive_permissions(
         lambda command, *args, **kwargs: captured.append(command) or 0,
     )
     assert bridge.launch(provider, repo, terminal.PROMPT, resume=True) == 0
+    warned = "no bridge tool approval is recorded" in capsys.readouterr().err
+    assert warned is (provider == "claude")
     assert "12345678-abcd-1234-abcd-123456789abc" in captured[0]
     assert "exec" not in captured[0] and "--print" not in captured[0]
     assert not any(

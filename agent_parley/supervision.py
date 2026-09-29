@@ -92,6 +92,18 @@ WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
 SESSION_HELD = "busy:session"
+OPT_IN_MISSING = "setup gap: bridge tool approval not recorded"
+OPT_IN_REMEDY = (
+    'record "approve_bridge_tools": true or "auto_mode": true under '
+    '"supervision" in the project manifest or on this lane, or resume the '
+    "lane in your own terminal"
+)
+OPT_IN_WARNING = (
+    "{name} is a claude lane the coordination service resumes unattended, "
+    "and no bridge tool approval is recorded for it, so a service resume "
+    "would stop at a permission prompt nobody sees; the service reports "
+    "that lane instead of resuming it. To opt in, " + OPT_IN_REMEDY + "."
+)
 WORKING = "working"
 WAITING = "waiting"
 TOOL_TIMEOUT = 600
@@ -2630,6 +2642,42 @@ def configuration(home: Path, manifest: dict) -> dict:
     config["prompts"] = config["prompts"] and global_config["prompts"]
     config["reclaim"] = config["reclaim"] and global_config["reclaim"]
     return config
+
+
+def opt_in_missing(home: Path, manifest: dict, name: str) -> bool:
+    """Reports whether a service resume of this lane would stop unseen.
+
+    A resumed `claude` session asks again for permission to use this
+    bridge's own MCP tools, and a resume the service starts has nobody at
+    the keyboard. Only `dialogs.pre_approved` or `dialogs.auto_mode` carries
+    an answer into that session, and both stay the operator's choice. A lane
+    the service would never resume, because its wake loop is off, it
+    retired, its provider needs environment the service cannot supply or
+    its provider is not defined, has no such gap.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Project manifest as the roster reports it.
+        name: Participant that owns the lane.
+
+    Returns:
+        True when the service may resume this `claude` lane and the operator
+        recorded neither opt-in for it.
+    """
+    participant = (manifest.get("participants") or {}).get(name) or {}
+    if (
+        not participant.get("wake", True)
+        or roster.retired(participant)
+        or dialogs.pre_approved(manifest, name)
+        or dialogs.auto_mode(manifest, name)
+        or not configuration(home, manifest)["wake"]
+    ):
+        return False
+    try:
+        entry = roster.provider(home, participant.get("provider", name))
+    except BridgeError:
+        return False
+    return entry["adapter"] == "claude" and not entry.get("require_env")
 
 
 def reminders(
@@ -6391,6 +6439,10 @@ def wake(
 
     The launcher still owns native authentication, trust and approval prompts.
     A resumed process uses a real terminal, not an unattended permission mode.
+    A lane `opt_in_missing` reports is not resumed at all, because its
+    session would stop at the bridge tool prompt with nobody to answer; the
+    attempt is recorded as `OPT_IN_MISSING` for the operator instead, and
+    counts toward the attempt bound, so a gap nobody closes is escalated.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
     lane; waking only asks the lane to take its own turn.
 
@@ -6599,8 +6651,11 @@ def wake(
             if entry["adapter"] in roster.ADAPTERS and not entry.get(
                 "require_env"
             ):
-                prompt = terminal.selected_prompt(directory, name, home)
-                if prompt is None:
+                if opt_in_missing(home, manifest, name):
+                    result = OPT_IN_MISSING
+                elif (
+                    prompt := terminal.selected_prompt(directory, name, home)
+                ) is None:
                     result = "busy:stale"
                 else:
                     with (directory / f"{name}-wake.log").open("ab") as output:

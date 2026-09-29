@@ -221,7 +221,9 @@ reported.
         and only where the operator recorded the opt-in for this project or
         this lane, the launch allows that one MCP server through those native
         settings. No other tool is named, no permission decision is weakened
-        and no bypass flag is ever passed.
+        and no bypass flag is ever passed. A lane without that opt-in that the
+        service could resume is named on standard error, because the service
+        withholds its resume rather than start a session nobody can answer.
 
         Args:
             agent: Participant name within the project.
@@ -280,6 +282,10 @@ reported.
                 f"lane is launched or resumed; {budgets.RESUME}."
             )
         data = self.add_participant(repo, agent, provider, credential)
+        if supervision.opt_in_missing(self.home, data, agent):
+            print(
+                supervision.OPT_IN_WARNING.format(name=agent), file=sys.stderr
+            )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
         account = roster.launch_environment(

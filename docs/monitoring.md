@@ -141,8 +141,13 @@ server there, and only when you record the opt-in:
 }
 ```
 
-The default is off and changes nothing about the client's configuration. With it
-on, the launch adds two native permission rules: `mcp__agent_parley`, which
+The default is off and changes nothing about the client's configuration. While
+a `claude` lane the service could resume has neither this opt-in nor
+`auto_mode`, `run` and `participant add` say so on standard error, `doctor`
+lists the lane under `approvals` as a setup gap, and the service withholds its
+resume: the wake is recorded as `setup gap: bridge tool approval not recorded`,
+which `problems` reports under `wake attention` with the opt-in and the
+`run --resume` command for your own terminal. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
 allows this bridge's own coordination tools, and
 `Bash(<interpreter> -m agent_parley.cli *)`, which allows the exact interpreter
 and module the protocol prompt orders every lane to run for `issue claim`,
