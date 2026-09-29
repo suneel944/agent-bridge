@@ -3102,6 +3102,54 @@ up to 16 minutes. A relaunch stamp dated in the future, as a backward clock
 step leaves, does not hold the next request off. A machine that has never started a service is left alone: the first start
 belongs to the launch or to the operator.
 
+### Decisions that apply their default on timeout
+
+A question nobody answers should not hold a lane when the choice is
+reversible and has an obvious answer. Every decision kind is declared once, in
+`agent_parley/timeouts.py`, with its class, its recommended option and the
+command that undoes that option:
+
+| Kind | Class | Default | Timeout | Undo |
+| --- | --- | --- | --- | --- |
+| `orphan_claim` | reversible | reassign a dead lane's orphaned claim | 30 minutes | `agent-parley issue assign ISSUE LANE` |
+| `closed_claim` | reversible | resolve a claim whose issue a merged pull request closed | 30 minutes | `agent-parley issue assign ISSUE LANE` |
+| `idle_key` | reversible | release a key its idle holder never uses | 30 minutes | `agent-parley say LANE KEY --subject 'Reserve this key again'` |
+| `failed_ci` | reversible | re-run a failed CI job once | 30 minutes | `gh run cancel RUN` |
+| `merge_default` | irreversible | wait for the operator | never | none |
+| `release_tag` | irreversible | wait for the operator | never | none |
+| `discard_work` | irreversible | wait for the operator | never | none |
+| `delete_branch` | irreversible | wait for the operator | never | none |
+| `native_permission` | irreversible | wait for the operator | never | none |
+
+A reversible decision left unanswered for its timeout settles to the default.
+The outcome is appended to the lane's report log as a record of kind `default`
+with outcome `applied by timeout`, the evidence it used and the filled undo
+command, and one line naming what was done and that command is sent on the
+configured notification transports. When the evidence is already conclusive,
+for example the issue was closed by a merged pull request from this claim in
+the current ownership generation, nothing is asked and the outcome is
+`applied on evidence`. An irreversible kind, and any kind the table does not
+know, always waits for an answer.
+
+A project can make a reversible kind always ask, or wait longer, from the base
+checkout:
+
+```bash
+agent-parley timeout show
+agent-parley timeout set failed_ci --after 2h
+agent-parley timeout set orphan_claim --ask
+agent-parley timeout set failed_ci          # back to the default
+```
+
+The policy is stored in `project.json` as `"timeouts": {"orphan_claim":
+{"ask": true}, "failed_ci": {"seconds": 7200}}`. It can only make a kind more
+cautious: a timeout under 30 minutes or over seven days, an unknown kind, or
+any timeout for an irreversible kind is refused, and a manifest holding one
+refuses every settlement until it is fixed. `set` refuses lane shells the way
+`unattended set` does. The table, the settlement and the record are the
+building blocks; the service applies them to the decision records the
+outbound and inbound notification work delivers.
+
 ### Keeping the service across reboots
 
 The service is a user process and does not survive a reboot. Where the machine

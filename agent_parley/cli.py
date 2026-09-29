@@ -3004,6 +3004,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "approval",
             "verify",
             "unattended",
+            "timeout",
             "init",
             "branch",
             "forge",
@@ -4594,6 +4595,35 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     standing_run.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_kind = commands.add_parser(
+        "timeout",
+        help=(
+            "Show or set how long a reversible decision waits before its "
+            "recommended default is applied."
+        ),
+    )
+    waiting_kinds = waiting_kind.add_subparsers(dest="action", required=True)
+    waiting_show = waiting_kinds.add_parser("show")
+    waiting_show.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_set = waiting_kinds.add_parser("set")
+    waiting_set.add_argument("kind", help="Decision kind the entry governs.")
+    waiting_choice = waiting_set.add_mutually_exclusive_group()
+    waiting_choice.add_argument(
+        "--ask",
+        action="store_true",
+        help="Always ask; never apply the default.",
+    )
+    waiting_choice.add_argument(
+        "--after",
+        type=duration,
+        default=None,
+        metavar="WINDOW",
+        help=(
+            "Longer wait than the default, such as 2h. Without --ask or "
+            "--after the kind returns to its default."
+        ),
+    )
+    waiting_set.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -5662,6 +5692,22 @@ def main() -> int:
                         args.steps if args.action == "set" else None,
                     )
                 )
+        elif args.command == "timeout":
+            from agent_parley import timeouts
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                print(
+                    timeouts.configure(
+                        bridge,
+                        repository,
+                        args.kind,
+                        ask=args.ask,
+                        seconds=args.after,
+                    )
+                )
+            else:
+                print(timeouts.show(bridge, repository))
         elif args.command == "unattended":
             from agent_parley import unattended
 
