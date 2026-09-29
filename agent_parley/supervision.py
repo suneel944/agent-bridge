@@ -73,6 +73,8 @@ READINGS_PUBLICATION = "git-readings.json"
 GIT_WORKERS = 8
 POLL_RECORD = "supervision-poll.json"
 COMPLETION_TTL = 60.0
+DEAD_MAIL_AFTER = 1800.0
+DEAD_MAIL_LISTED = 10
 
 ACTIVE = "active"
 IDLE = "idle"
@@ -3827,6 +3829,84 @@ def share_bounces(
             )
 
 
+def dead_mail(home: Path, directory: Path, manifest: dict) -> None:
+    """Returns mail a dead lane will not read to the lanes that sent it.
+
+    A lane recorded `dead` that no wake can resume keeps receiving mail,
+    and waking it only escalates once and then backs off hourly, so its
+    mailbox grew for days while senders waited. Once the lane has been
+    dead for `DEAD_MAIL_AFTER` seconds, long enough for a resumable session
+    to have been resumed, every delivery to it
+    that has waited as long and is still unread or unacknowledged is
+    superseded, which also drops it from the lane's wake backlog, and each
+    sender that is a lane receives one notice naming the returned messages,
+    so it can resend them to a live peer or hold the work itself. A lane
+    that a wake revived leaves `dead` and keeps its mail.
+
+    Mail the supervising operator sent is superseded without a notice,
+    because the operator holds no inbox and already reads the lane's wake
+    escalation. Nothing is read, acknowledged or deleted, and other
+    recipients of the same message keep their delivery.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    root = manifest["root"]
+    now = time.time()
+    named = {
+        entry["display"]: name
+        for name, entry in manifest["participants"].items()
+    }
+    for name, participant in manifest["participants"].items():
+        display = participant["display"]
+        record = condition(home, root, name)
+        if (
+            record is None
+            or record["state"] != lanes.DEAD
+            or now - float(record["since"]) < DEAD_MAIL_AFTER
+        ):
+            continue
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            rows = store.return_stale_deliveries(
+                home,
+                root,
+                display,
+                DEAD_MAIL_AFTER,
+                f"{name} dead past {int(DEAD_MAIL_AFTER)}s",
+            )
+            senders: dict[str, list[dict]] = {}
+            for row in rows:
+                if row["sender"] in named and row["sender"] != display:
+                    senders.setdefault(row["sender"], []).append(row)
+            for sender, returned in senders.items():
+                listed = "\n".join(
+                    f"- message {row['message_id']} ({row['subject']})"
+                    for row in returned[:DEAD_MAIL_LISTED]
+                )
+                more = len(returned) - DEAD_MAIL_LISTED
+                if more > 0:
+                    listed += f"\n- and {more} more"
+                body = (
+                    f"{name} has been dead for {int(now - record['since'])}s "
+                    "and no wake revived it, so it will not read these "
+                    f"messages:\n{listed}\n"
+                    "They are returned to you. Send what still needs an "
+                    "answer to a lane that reads as fit with agent-parley "
+                    "participant status, or hold the work yourself."
+                )
+                with contextlib.suppress(BridgeError):
+                    store.speak(
+                        home,
+                        root,
+                        sender,
+                        f"Mail returned: {name} is dead",
+                        body,
+                        f"dead-mail-{name}-{returned[-1]['message_id']}",
+                    )
+
+
 def orphan_reason(name: str, record: dict) -> str:
     """States why a lane's claims read as orphaned, in one clause."""
     seen = f": {record['evidence']}" if record.get("evidence") else ""
@@ -5546,6 +5626,7 @@ def _remind(
     stage(
         "share bounces", share_bounces, home, directory, manifest, observations
     )
+    stage("dead mail", dead_mail, home, directory, manifest)
     stage("orphans", orphans, home, directory, manifest, config)
     stage("responses", observe_responses, home, directory, manifest)
     stage(
