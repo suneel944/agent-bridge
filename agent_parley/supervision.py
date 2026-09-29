@@ -4421,6 +4421,24 @@ def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
 
 PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
+CHECKS_STALLED_SECONDS = 3600.0
+CHECKS_STALLED_FACTOR = 2
+
+
+def checks_ceiling(root: Path) -> float:
+    """Names how long a pull request's head may stay pending unremarked.
+
+    Args:
+        root: Repository checkout whose workflows declare job timeouts.
+
+    Returns:
+        `CHECKS_STALLED_FACTOR` times the longest job timeout its workflows
+        declare, else `CHECKS_STALLED_SECONDS`.
+    """
+    timeout = forge.checks_timeout(root)
+    if not timeout:
+        return CHECKS_STALLED_SECONDS
+    return CHECKS_STALLED_FACTOR * timeout
 
 
 def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
@@ -4438,6 +4456,14 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     reason, so the ordinary wake path gives the lane its turn. A pull request
     seen for the first time with finished checks or reviews is announced
     once as well.
+
+    Each reading keeps when its current head was first seen pending, and a
+    new head or a finished run restarts that clock. A head still pending
+    past `checks_ceiling` is announced once, naming each unfinished check
+    with its state and age, the reading is marked stalled for `status` and
+    `problems`, and the message recommends one re-run while leaving it to
+    the lane. A forge that reports no check start times is never announced
+    as stalled, so it behaves as before.
 
     A pull request belongs to the lane whose branch is its head, else to the
     one lane owning every claimed issue it closes, else to the lane
@@ -4465,11 +4491,20 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
         return
     before = seen.get("pull_requests") or {}
     ledger = issues.snapshot(directory)["issues"]
+    ceiling = checks_ceiling(Path(manifest["root"]))
+    kept: dict[str, dict] = {}
     for reading in readings:
-        changes = _pull_request_changes(
-            before.get(str(reading["number"])) or {}, reading
-        )
+        previous = before.get(str(reading["number"])) or {}
+        record = _pending_clock(previous, reading, now)
+        kept[str(reading["number"])] = record
+        changes = _pull_request_changes(previous, reading)
+        stalled = _stalled_checks(record, now, ceiling)
+        if stalled:
+            changes.append(stalled)
         name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        if stalled:
+            record["stalled_at"] = now
+            record["lane"] = name
         if not name:
             continue
         body = (
@@ -4492,12 +4527,72 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
             )
     write_json(
         path,
-        {
-            "read_at": now,
-            "pull_requests": {
-                str(reading["number"]): reading for reading in readings
-            },
-        },
+        {"read_at": now, "pull_requests": kept},
+    )
+
+
+def _pending_clock(before: dict, after: dict, now: float) -> dict:
+    """Carries a pending head's clock and stall mark into a new reading.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading from `forge.open_pull_requests`.
+        now: Unix time of this poll.
+
+    Returns:
+        A copy of `after` that, while its checks are pending, records when
+        this head was first seen pending and keeps any stall mark already
+        set on the same head.
+    """
+    record = dict(after)
+    if after["checks"] != "pending":
+        return record
+    if (before.get("checks"), before.get("sha")) != ("pending", after["sha"]):
+        record["pending_since"] = now
+        return record
+    record["pending_since"] = float(before.get("pending_since") or now)
+    if before.get("stalled_at"):
+        record["stalled_at"] = before["stalled_at"]
+        record["lane"] = str(before.get("lane") or "")
+    return record
+
+
+def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
+    """Describes a head pending past the ceiling, once.
+
+    Args:
+        record: This poll's reading with its pending clock.
+        now: Unix time of this poll.
+        ceiling: Seconds a head may stay pending unremarked.
+
+    Returns:
+        One phrase naming each unfinished check, its state and its age, with
+        the recommended re-run, or an empty string when the head is not
+        pending past the ceiling, was already announced, or no unfinished
+        check reports a start time.
+    """
+    pending = record.get("pending") or []
+    if (
+        record["checks"] != "pending"
+        or record.get("stalled_at")
+        or not any(check.get("started") for check in pending)
+        or now - float(record.get("pending_since") or now) < ceiling
+    ):
+        return ""
+    listed = ", ".join(
+        f"{check['name']} {check['state']} "
+        + (
+            f"{int((now - float(check['started'])) // 60)} min"
+            if check.get("started")
+            else "age unknown"
+        )
+        for check in pending
+    )
+    return (
+        f"checks pending over {int(ceiling // 60)} min: {listed}. "
+        "Re-run once: `gh run rerun --failed` for a run that ended without "
+        "a conclusion, or cancel and re-run one still in progress past its "
+        "job timeout; after one re-run it is an operator decision"
     )
 
 
