@@ -764,6 +764,17 @@ reading as a `bounced share` row on the sender's lane while it holds. A request
 the operator sent is not returned this way: that operator is at a terminal and
 already reads it as awaiting acknowledgement.
 
+Mail to a dead lane is returned the same way, whether or not it asked for an
+acknowledgement. Once a lane's state record has read `dead` for 30 minutes
+(`DEAD_MAIL_AFTER`, long enough for a resumable session to have been resumed),
+each delivery to it that has waited 30 minutes and is still unread or
+unacknowledged is superseded with the reason `<lane> dead past 1800s`, which
+also drops it from that lane's wake backlog. Each sender that is a lane gets one
+`Mail returned: <lane> is dead` notice listing the messages, so it can resend
+them to a live peer or hold the work. Mail the operator sent is superseded
+without a notice. Nothing is read, acknowledged or deleted, and other
+recipients keep their delivery.
+
 Deadlines are evaluated when a checkpoint, a `status`, a `top` refresh or a
 served call reads the record, from the stored timestamps. The service gains no
 background scheduler, and a stopped service produces no phantom transitions. The
