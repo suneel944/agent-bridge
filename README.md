@@ -295,8 +295,18 @@ Sending never blocks a hook or tool call. A failed send is logged as a lane
 event, and it and a send cut short by a hook exiting are sent again the next
 time the situation is observed.
 
-Configuration is environment variables only; no token is written into
-coordination state.
+Store the Telegram settings once, and the service, hooks and lanes all read
+them. The token is read from a hidden prompt, or from standard input when
+piped, and is written owner-only to `notify.json` in the state directory;
+add `--inbound` to also store the status passcode. Environment variables
+still work and override a stored value for one process. `agent-parley
+status`, `doctor` and `up` say whether outbound and inbound are on, and why
+not.
+
+```bash
+agent-parley notify setup --chat 123456789
+agent-parley notify test
+```
 
 | Variable | Meaning |
 | --- | --- |
@@ -317,7 +327,8 @@ agent-parley notify test
 ```
 
 `notify test` sends one message per transport, prints each answer and exits 1
-when any transport refuses.
+when any transport refuses. With inbound configured it also says whether the
+running service is long polling Telegram.
 
 ## Asking for status from the chat
 

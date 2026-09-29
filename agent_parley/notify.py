@@ -4,8 +4,11 @@ The notifier reads the decision a checkpoint already recorded and the idle
 stretch the supervisor already measured; it observes no new state of its own
 and decides no outcome. Only a change that moves ownership or blocks a lane is
 forwarded, so the signal stays as small as the event log's own selection.
-Configuration and every secret arrive through environment variables and are
-never written into coordination state. Delivery is outbound only: no transport
+Configuration and every secret come from `notify setup`, stored owner-only in
+the state root as `STORED_NAME`, or from environment variables, which override
+the stored value for one process. Neither is written into coordination state,
+and the stored file is read by the process that sends, never exported into a
+lane's environment. Delivery is outbound only: no transport
 answers a native permission prompt or opens a port. The Telegram calls this
 module makes are shared with the read-only reader in `inbound`, which can ask
 for a status reading and can carry no other command back.
@@ -31,6 +34,18 @@ TELEGRAM_API = "https://api.telegram.org"
 TLS_MODES = ("starttls", "implicit", "none")
 IMPLICIT_PORT = 465
 SUBMISSION_PORT = 587
+STORED_NAME = "notify.json"
+STORED_KEYS = (
+    "AGENT_PARLEY_NOTIFY",
+    "AGENT_PARLEY_TELEGRAM_CHAT",
+    "AGENT_PARLEY_TELEGRAM_TOKEN",
+    "AGENT_PARLEY_INBOUND",
+    "AGENT_PARLEY_INBOUND_PASSCODE",
+)
+UNCONFIGURED = (
+    "No notification transport is configured; run `agent-parley notify "
+    "setup`, or set AGENT_PARLEY_NOTIFY."
+)
 
 
 class Event(StrEnum):
@@ -95,17 +110,125 @@ _THREADS_LOCK = threading.Lock()
 _SENDING: set[tuple[str, str, str, str]] = set()
 
 
-def enabled() -> bool:
-    """Reports whether any transport is named in the environment.
+def stored(home: Path) -> dict[str, str]:
+    """Reads the settings `notify setup` stored in the state root.
 
-    The reading costs one environment lookup and no validation, so a caller
-    on the hook or supervision path can skip the notifier's work entirely
-    without paying for a configuration parse.
+    Args:
+        home: Private state root holding `STORED_NAME`.
+
+    Returns:
+        The stored values keyed by their environment variable names, or an
+        empty mapping when nothing is stored or the file cannot be read.
+    """
+    try:
+        data = json.loads((home / STORED_NAME).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        key: value
+        for key, value in data.items()
+        if key in STORED_KEYS and isinstance(value, str)
+    }
+
+
+def environment(home: Path | None = None) -> dict[str, str]:
+    """Merges the stored settings under the process environment.
+
+    A variable set in the environment wins over the stored value, so an
+    environment-only configuration keeps working unchanged and one process
+    can override the stored settings without editing them.
+
+    Args:
+        home: Private state root whose stored settings apply, or None to read
+            the process environment alone.
+
+    Returns:
+        The settings every notification reader resolves its values from.
+    """
+    base = stored(home) if home is not None else {}
+    return {**base, **os.environ}
+
+
+def store(home: Path, values: Mapping[str, str]) -> Path:
+    """Records notification settings in the state root, owner-only.
+
+    Values not named are kept, so recording the inbound passcode does not
+    erase the bot token. An empty value removes its key. The file is created
+    by `write_json` through a private temporary file, so it is never readable
+    by the group or others, even for a moment.
+
+    Args:
+        home: Private state root to write `STORED_NAME` in.
+        values: Settings keyed by environment variable name.
+
+    Returns:
+        The path of the stored settings.
+
+    Raises:
+        BridgeError: If a key is not a notification setting.
+    """
+    unknown = sorted(set(values) - set(STORED_KEYS))
+    if unknown:
+        raise BridgeError("Not a notification setting: " + ", ".join(unknown))
+    path = home / STORED_NAME
+    with lock(home / "notify.lock", timeout=5):
+        merged = {**stored(home), **values}
+        write_json(path, {key: value for key, value in merged.items() if value})
+    path.chmod(0o600)
+    return path
+
+
+def reported(values: Mapping[str, str]) -> dict:
+    """Describes outbound notification for one status reading.
+
+    Args:
+        values: Settings resolved by `environment`.
+
+    Returns:
+        The configured transports, whether any is named, and the sentence
+        naming why outbound notification is off or cannot send, empty when
+        it is active.
+    """
+    if not values.get("AGENT_PARLEY_NOTIFY", "").strip():
+        return {"enabled": False, "transports": [], "fault": UNCONFIGURED}
+    try:
+        config = settings(values)
+    except BridgeError as exc:
+        return {"enabled": True, "transports": [], "fault": str(exc)}
+    telegram = config["telegram"]
+    fault = ""
+    if "telegram" in config["transports"] and not (
+        telegram["token"] and telegram["chat"]
+    ):
+        fault = (
+            "Telegram needs AGENT_PARLEY_TELEGRAM_TOKEN and "
+            "AGENT_PARLEY_TELEGRAM_CHAT; run `agent-parley notify setup`."
+        )
+    return {
+        "enabled": True,
+        "transports": config["transports"],
+        "fault": fault,
+    }
+
+
+def enabled(home: Path | None = None) -> bool:
+    """Reports whether any transport is named in the settings.
+
+    The reading costs one environment lookup, and one small file read when a
+    state root is given, and no validation, so a caller on the hook or
+    supervision path can skip the notifier's work entirely without paying for
+    a configuration parse.
+
+    Args:
+        home: Private state root whose stored settings apply, or None to read
+            the process environment alone.
 
     Returns:
         True when ``AGENT_PARLEY_NOTIFY`` names at least one transport.
     """
-    return bool(os.environ.get("AGENT_PARLEY_NOTIFY", "").strip())
+    return bool(environment(home).get("AGENT_PARLEY_NOTIFY", "").strip())
 
 
 def _port(values: Mapping[str, str], mode: str) -> int:
@@ -540,9 +663,10 @@ def deliver(
         BridgeError: If the configured transports or SMTP settings are
             invalid.
     """
-    if not enabled():
+    values = environment(directory.parent.parent)
+    if not values.get("AGENT_PARLEY_NOTIFY", "").strip():
         return ""
-    config = settings()
+    config = settings(values)
     if not config["transports"]:
         return ""
     digest = _pending(directory, agent, event, fields)
@@ -615,7 +739,7 @@ def drain(timeout: float = JOIN_SECONDS) -> int:
     return sum(1 for thread in pending if thread.is_alive())
 
 
-def probe(root: str) -> dict:
+def probe(root: str, home: Path | None = None) -> dict:
     """Sends one test message on each configured transport.
 
     The message is sent in the foreground and its per-transport result is
@@ -624,6 +748,8 @@ def probe(root: str) -> dict:
 
     Args:
         root: Project root the test message names.
+        home: Private state root whose stored settings apply, or None to read
+            the process environment alone.
 
     Returns:
         The project root and one result per configured transport.
@@ -632,12 +758,9 @@ def probe(root: str) -> dict:
         BridgeError: If no transport is configured, or the configuration is
             invalid.
     """
-    config = settings()
+    config = settings(environment(home))
     if not config["transports"]:
-        raise BridgeError(
-            "No notification transport is configured. Set "
-            "AGENT_PARLEY_NOTIFY to telegram, email, or both."
-        )
+        raise BridgeError(UNCONFIGURED)
     subject, body = compose(
         "test",
         {
