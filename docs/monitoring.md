@@ -410,7 +410,8 @@ sent without a deadline.
 Two readings wake a lane before they could ever reach this list. A lane
 waiting on its own pull request is sent one supervisor message, and so a wake,
 when that pull request's checks finish, a review lands or its merge state
-changes. A claim whose verification keeps failing with no verified improvement
+changes, and once more when its head stays pending past the checks ceiling,
+which also lists it here as `checks stalled`. A claim whose verification keeps failing with no verified improvement
 is asked once to change approach, and only a repeat is escalated to you as
 `not converging`. Both are described under
 [waking](operations.md#availability-reminders-and-waking) in Operations. The

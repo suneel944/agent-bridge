@@ -217,7 +217,8 @@ class ReportsMixin(BridgeCore):
             f"Issue #{number} is observed complete: its pull request ended "
             "during this claim. Complete it now: send the completion message "
             f"to {waiting} with the commit, verification and remaining work. "
-            f"The operator then ends the claim with `issue resolve {number}`."
+            "The service ends the claim once the forge shows a merged pull "
+            f"request; otherwise the operator runs `issue resolve {number}`."
         )
 
     def show_report(self, repo: Path, identifier: str, full: bool) -> dict:

@@ -73,6 +73,8 @@ READINGS_PUBLICATION = "git-readings.json"
 GIT_WORKERS = 8
 POLL_RECORD = "supervision-poll.json"
 COMPLETION_TTL = 60.0
+DEAD_MAIL_AFTER = 1800.0
+DEAD_MAIL_LISTED = 10
 
 ACTIVE = "active"
 IDLE = "idle"
@@ -80,6 +82,7 @@ STOPPED = "stopped"
 STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
+BLOCKED_ESCALATE_AFTER = 1800.0
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
 UNREADABLE = "unknown; activity record unreadable"
@@ -2586,7 +2589,7 @@ def announce_idle(
     Returns:
         The lanes a notification was started for.
     """
-    if not idle or not notify.enabled():
+    if not idle or not notify.enabled(directory.parent.parent):
         return []
     started = []
     try:
@@ -2830,7 +2833,8 @@ def completion_escalations(
     marker is an observation the operator acts on. Nothing moves here: the
     issue keeps its owner, its offer and its reservations, no peer gains any
     power over another lane's claim, and only an explicit operator resolution
-    ends the claim.
+    ends the claim, unless `end_merged_claims` already ended it on the
+    forge's evidence of a merged pull request.
 
     A holder that answers before the threshold clears its own escalation,
     because the reminder it answered is no longer unanswered.
@@ -2895,6 +2899,56 @@ def completion_escalations(
         if changed:
             ledger["revision"] += 1
             write_json(directory / "issues.json", ledger)
+
+
+def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
+    """Ends each claim a merged pull request closed on the forge.
+
+    A holder that stops before filing its completion would otherwise keep
+    the claim until the operator runs `issue resolve`, while every capacity
+    and load decision reads the stale row. The forge's own reading settles
+    it: when the issue closed inside the current ownership generation
+    through a merged pull request naming its merge commit, and no other lane
+    landed that pull request, the claim is ended as complete through
+    `lifecycle.resolve`. The transition is the service's own, recorded with
+    actor `supervisor` and the forge evidence, never as the lane's. A
+    closed, unmerged pull request, a lane branch reading without the
+    issue's closing pull request, or work another lane landed still goes
+    through reminders and the operator.
+
+    Args:
+        directory: Private project state directory.
+        ended: This poll's forge observations from `completed_claims`.
+
+    Returns:
+        Issue numbers whose claims were ended.
+    """
+    resolved = []
+    for number, seen in ended.items():
+        commit = str(seen.get("commit") or "")
+        if (
+            seen.get("state") != "MERGED"
+            or not seen.get("claim_id")
+            or seen.get("landed_by")
+            or not lifecycle.COMMIT.fullmatch(commit)
+        ):
+            continue
+        with contextlib.suppress(BridgeError):
+            lifecycle.resolve(
+                directory,
+                number,
+                evidence={
+                    key: value
+                    for key, value in seen.items()
+                    if key != "claim_id"
+                },
+                outcome="complete",
+                actor="supervisor",
+                reason="merged pull request closed the issue on the forge",
+                claim_id=str(seen["claim_id"]),
+            )
+            resolved.append(number)
+    return resolved
 
 
 def deadline_notices(directory: Path, manifest: dict) -> None:
@@ -3823,6 +3877,84 @@ def share_bounces(
             )
 
 
+def dead_mail(home: Path, directory: Path, manifest: dict) -> None:
+    """Returns mail a dead lane will not read to the lanes that sent it.
+
+    A lane recorded `dead` that no wake can resume keeps receiving mail,
+    and waking it only escalates once and then backs off hourly, so its
+    mailbox grew for days while senders waited. Once the lane has been
+    dead for `DEAD_MAIL_AFTER` seconds, long enough for a resumable session
+    to have been resumed, every delivery to it
+    that has waited as long and is still unread or unacknowledged is
+    superseded, which also drops it from the lane's wake backlog, and each
+    sender that is a lane receives one notice naming the returned messages,
+    so it can resend them to a live peer or hold the work itself. A lane
+    that a wake revived leaves `dead` and keeps its mail.
+
+    Mail the supervising operator sent is superseded without a notice,
+    because the operator holds no inbox and already reads the lane's wake
+    escalation. Nothing is read, acknowledged or deleted, and other
+    recipients of the same message keep their delivery.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    root = manifest["root"]
+    now = time.time()
+    named = {
+        entry["display"]: name
+        for name, entry in manifest["participants"].items()
+    }
+    for name, participant in manifest["participants"].items():
+        display = participant["display"]
+        record = condition(home, root, name)
+        if (
+            record is None
+            or record["state"] != lanes.DEAD
+            or now - float(record["since"]) < DEAD_MAIL_AFTER
+        ):
+            continue
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            rows = store.return_stale_deliveries(
+                home,
+                root,
+                display,
+                DEAD_MAIL_AFTER,
+                f"{name} dead past {int(DEAD_MAIL_AFTER)}s",
+            )
+            senders: dict[str, list[dict]] = {}
+            for row in rows:
+                if row["sender"] in named and row["sender"] != display:
+                    senders.setdefault(row["sender"], []).append(row)
+            for sender, returned in senders.items():
+                listed = "\n".join(
+                    f"- message {row['message_id']} ({row['subject']})"
+                    for row in returned[:DEAD_MAIL_LISTED]
+                )
+                more = len(returned) - DEAD_MAIL_LISTED
+                if more > 0:
+                    listed += f"\n- and {more} more"
+                body = (
+                    f"{name} has been dead for {int(now - record['since'])}s "
+                    "and no wake revived it, so it will not read these "
+                    f"messages:\n{listed}\n"
+                    "They are returned to you. Send what still needs an "
+                    "answer to a lane that reads as fit with agent-parley "
+                    "participant status, or hold the work yourself."
+                )
+                with contextlib.suppress(BridgeError):
+                    store.speak(
+                        home,
+                        root,
+                        sender,
+                        f"Mail returned: {name} is dead",
+                        body,
+                        f"dead-mail-{name}-{returned[-1]['message_id']}",
+                    )
+
+
 def orphan_reason(name: str, record: dict) -> str:
     """States why a lane's claims read as orphaned, in one clause."""
     seen = f": {record['evidence']}" if record.get("evidence") else ""
@@ -3839,6 +3971,71 @@ def orphan_marker(numbers: list[str], keys: list[str]) -> str:
         f"orphaned claims {listed}{held}; still owned until a peer runs "
         "issue claim --take-orphaned"
     )
+
+
+def orphan_decision(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    config: dict,
+    name: str,
+    since: float,
+) -> None:
+    """Asks the operator where a dead lane's claims go once wakes are spent.
+
+    A spent wake budget used to leave the orphaned claims with the dead lane
+    and the remedy with whichever peer chose to take them, so a claim could
+    stay orphaned indefinitely. Moving a claim after the budget is spent is
+    the operator's call, so nothing moves here: the operator is sent one
+    decision per exhaustion that names the claims, the live peer that fits
+    them or the absence of one, and the commands for each choice.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+        name: Participant whose wake budget is spent.
+        since: Unix time the budget was recorded as spent.
+    """
+    numbers = sorted(
+        (
+            number
+            for number, record in issues.snapshot(directory)["issues"].items()
+            if record.get("owner") == name
+            and (record.get("orphan") or {}).get("owner") == name
+        ),
+        key=int,
+    )
+    if not numbers:
+        return
+    root = manifest["root"]
+    listed = ", ".join(f"#{number}" for number in numbers)
+    take = "agent-parley issue claim NUMBER --take-orphaned"
+    peer = _overdue_peer(home, directory, manifest, config, {}, name)
+    choice = (
+        f"{peer} is live and fits: agent-parley say {peer} "
+        f'"take {listed} with {take}" --repo {root}'
+        if peer
+        else "no live peer fits: start a fresh lane with agent-parley run "
+        f"NAME --repo {root} and have it take them with {take}"
+    )
+    with contextlib.suppress(BridgeError, OSError):
+        notify.deliver(
+            directory,
+            name,
+            notify.Event.ORPHAN_DECISION,
+            {
+                "repo": root,
+                "since": int(since),
+                "issue": listed,
+                "detail": (
+                    f"{name} stayed dead after {WORK_WAKE_ATTEMPTS} wakes; "
+                    f"{choice}; or retry agent-parley run {name} --resume "
+                    f"--repo {root}. Nothing moves until you act."
+                ),
+            },
+        )
 
 
 def _dead(observed: dict, after: float) -> bool:
@@ -4212,8 +4409,9 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
         One observation per ended issue number: the branch the work landed
         from, the pull request state, the instant it was observed and, when
         the forge named one, the closing pull request's number, URL and merge
-        commit. `landed_by` names another lane whose lane branch carried the
-        closing pull request, or whose worktree alone checked out the
+        commit with the claim it was read for. `landed_by` names another
+        lane whose lane branch carried the closing pull request, or whose
+        worktree alone checked out the
         per-issue branch it came from.
     """
     root = Path(manifest["root"])
@@ -4257,6 +4455,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "pull_request": reading["pull_request"],
                 "url": reading["url"],
                 "commit": reading["commit"],
+                "claim_id": record.get("claim_id"),
             }
             landed = lanes.get(reading["branch"])
             if not landed and reading["branch"]:
@@ -4415,6 +4614,24 @@ def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
 
 PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
+CHECKS_STALLED_SECONDS = 3600.0
+CHECKS_STALLED_FACTOR = 2
+
+
+def checks_ceiling(root: Path) -> float:
+    """Names how long a pull request's head may stay pending unremarked.
+
+    Args:
+        root: Repository checkout whose workflows declare job timeouts.
+
+    Returns:
+        `CHECKS_STALLED_FACTOR` times the longest job timeout its workflows
+        declare, else `CHECKS_STALLED_SECONDS`.
+    """
+    timeout = forge.checks_timeout(root)
+    if not timeout:
+        return CHECKS_STALLED_SECONDS
+    return CHECKS_STALLED_FACTOR * timeout
 
 
 def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
@@ -4432,6 +4649,14 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     reason, so the ordinary wake path gives the lane its turn. A pull request
     seen for the first time with finished checks or reviews is announced
     once as well.
+
+    Each reading keeps when its current head was first seen pending, and a
+    new head or a finished run restarts that clock. A head still pending
+    past `checks_ceiling` is announced once, naming each unfinished check
+    with its state and age, the reading is marked stalled for `status` and
+    `problems`, and the message recommends one re-run while leaving it to
+    the lane. A forge that reports no check start times is never announced
+    as stalled, so it behaves as before.
 
     A pull request belongs to the lane whose branch is its head, else to the
     one lane owning every claimed issue it closes, else to the lane
@@ -4459,11 +4684,20 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
         return
     before = seen.get("pull_requests") or {}
     ledger = issues.snapshot(directory)["issues"]
+    ceiling = checks_ceiling(Path(manifest["root"]))
+    kept: dict[str, dict] = {}
     for reading in readings:
-        changes = _pull_request_changes(
-            before.get(str(reading["number"])) or {}, reading
-        )
+        previous = before.get(str(reading["number"])) or {}
+        record = _pending_clock(previous, reading, now)
+        kept[str(reading["number"])] = record
+        changes = _pull_request_changes(previous, reading)
+        stalled = _stalled_checks(record, now, ceiling)
+        if stalled:
+            changes.append(stalled)
         name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        if stalled:
+            record["stalled_at"] = now
+            record["lane"] = name
         if not name:
             continue
         body = (
@@ -4486,12 +4720,72 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
             )
     write_json(
         path,
-        {
-            "read_at": now,
-            "pull_requests": {
-                str(reading["number"]): reading for reading in readings
-            },
-        },
+        {"read_at": now, "pull_requests": kept},
+    )
+
+
+def _pending_clock(before: dict, after: dict, now: float) -> dict:
+    """Carries a pending head's clock and stall mark into a new reading.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading from `forge.open_pull_requests`.
+        now: Unix time of this poll.
+
+    Returns:
+        A copy of `after` that, while its checks are pending, records when
+        this head was first seen pending and keeps any stall mark already
+        set on the same head.
+    """
+    record = dict(after)
+    if after["checks"] != "pending":
+        return record
+    if (before.get("checks"), before.get("sha")) != ("pending", after["sha"]):
+        record["pending_since"] = now
+        return record
+    record["pending_since"] = float(before.get("pending_since") or now)
+    if before.get("stalled_at"):
+        record["stalled_at"] = before["stalled_at"]
+        record["lane"] = str(before.get("lane") or "")
+    return record
+
+
+def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
+    """Describes a head pending past the ceiling, once.
+
+    Args:
+        record: This poll's reading with its pending clock.
+        now: Unix time of this poll.
+        ceiling: Seconds a head may stay pending unremarked.
+
+    Returns:
+        One phrase naming each unfinished check, its state and its age, with
+        the recommended re-run, or an empty string when the head is not
+        pending past the ceiling, was already announced, or no unfinished
+        check reports a start time.
+    """
+    pending = record.get("pending") or []
+    if (
+        record["checks"] != "pending"
+        or record.get("stalled_at")
+        or not any(check.get("started") for check in pending)
+        or now - float(record.get("pending_since") or now) < ceiling
+    ):
+        return ""
+    listed = ", ".join(
+        f"{check['name']} {check['state']} "
+        + (
+            f"{int((now - float(check['started'])) // 60)} min"
+            if check.get("started")
+            else "age unknown"
+        )
+        for check in pending
+    )
+    return (
+        f"checks pending over {int(ceiling // 60)} min: {listed}. "
+        "Re-run once: `gh run rerun --failed` for a run that ended without "
+        "a conclusion, or cancel and re-run one still in progress past its "
+        "job timeout; after one re-run it is an operator decision"
     )
 
 
@@ -5353,6 +5647,7 @@ def _remind(
         ),
     )
     ended = read[0] if read else {}
+    stage("forge completions", end_merged_claims, directory, ended)
     closed = set(ended)
     stage(
         "reminders",
@@ -5379,6 +5674,7 @@ def _remind(
     stage(
         "share bounces", share_bounces, home, directory, manifest, observations
     )
+    stage("dead mail", dead_mail, home, directory, manifest)
     stage("orphans", orphans, home, directory, manifest, config)
     stage("responses", observe_responses, home, directory, manifest)
     stage(
@@ -5906,6 +6202,68 @@ def _defer_wake(
         )
 
 
+def _escalate_blocked(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    recorded: dict | None,
+    cause: str,
+) -> None:
+    """Escalates a lane recorded blocked for longer than the bound, once.
+
+    A blocked lane is deferred without spending a wake attempt, so the
+    attempt bound never escalates it. The time the lane has been recorded
+    blocked is the bound instead: past `BLOCKED_ESCALATE_AFTER` the lane's
+    wake record gains `escalated_at`, when it has one, and the owner is
+    notified. The notification is keyed on when the block began, so a lane
+    that stays blocked is reported once and a later block is reported again.
+    A misconfigured transport is recorded as a supervision error rather
+    than ending the sweep.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant that owns the lane.
+        recorded: The lane's state record, None when it has none yet.
+        cause: The blocking cause the wake was deferred under.
+    """
+    recorded = recorded or {}
+    since = recorded.get("since")
+    if (
+        recorded.get("state") != lanes.BLOCKED
+        or not _instant(since)
+        or time.time() - float(since) < BLOCKED_ESCALATE_AFTER
+    ):
+        return
+    root = manifest["root"]
+    with lock(directory / f"{name}-wake.lock"):
+        record = wake_record(home, root, name, directory)
+        if record.get("result") and not record.get("escalated_at"):
+            record.update(escalated_at=time.time())
+            store_wake(home, directory, root, name, record)
+    try:
+        notify.deliver(
+            directory,
+            name,
+            notify.Event.LANE_BLOCKED,
+            {
+                "repo": root,
+                "provider": str(
+                    manifest["participants"][name].get("provider", "")
+                ),
+                "since": str(since),
+                "detail": (
+                    f"{cause} for {int(time.time() - float(since))}s, past "
+                    f"the {int(BLOCKED_ESCALATE_AFTER)}s escalation bound"
+                ),
+            },
+        )
+    except (BridgeError, OSError) as exc:
+        issues.note_supervision_error(directory, f"Notification: {exc}")
+
+
 def _mail_digest(rows: list) -> list[str]:
     """Reduces outstanding mail to the latest message of each live thread.
 
@@ -6050,14 +6408,18 @@ def wake(
     lane state record. A cause that is
     still in force parks the lane with that cause and the time its next attempt
     is due, and spends nothing, so the budget is not consumed while nothing
-    could have answered. When the cause clears, the next attempt is due one
+    could have answered. A lane recorded blocked past
+    `BLOCKED_ESCALATE_AFTER` is escalated once by `_escalate_blocked`
+    instead, because its deferred wakes never reach the attempt bound. When
+    the cause clears, the next attempt is due one
     doubling window after the last one, or at the provider reset the capacity
     observation named, whichever is later. A lane that has actually spent its
     whole budget is recorded as exhausted and escalated once, and waking then
     backs off rather than stopping: the doubling continues to one hour and
     stays hourly, so a lane is never parked forever and never re-prompted
     every window either. An exhausted lane's claims are also eligible for the
-    overdue-claim transition in `overdue_claims`.
+    overdue-claim transition in `overdue_claims`, and its orphaned claims
+    become one operator decision through `orphan_decision`.
 
     A durable retryable capacity observation is itself a backlog reason, so a
     lane whose client stopped on a transient provider error resumes on this
@@ -6143,6 +6505,7 @@ def wake(
     blocked, ready_at = _wake_block(directory, name, observed, parked, window)
     if blocked:
         _defer_wake(home, directory, root, name, blocked, ready_at, window)
+        _escalate_blocked(home, directory, manifest, name, recorded, blocked)
         return
     if observed["process_alive"] and (
         observed["age_seconds"] is None
@@ -6237,6 +6600,9 @@ def wake(
             if not record.get("exhausted_at"):
                 record.update(exhausted_at=time.time())
                 store_wake(home, directory, root, name, record)
+            orphan_decision(
+                home, directory, manifest, config, name, record["exhausted_at"]
+            )
             if work_offer and dispatch.get("state") != "escalated":
                 result = _work_escalation(
                     work_offer, attempts, str(record.get("result", ""))

@@ -3475,6 +3475,68 @@ def supersede_recipient(home: Path, root: str, name: str, reason: str) -> int:
         return cursor.rowcount
 
 
+def return_stale_deliveries(
+    home: Path, root: str, name: str, older_than: float, reason: str
+) -> list[dict]:
+    """Retires a lane's outstanding deliveries older than a bound.
+
+    Only deliveries still unread, or still owing an acknowledgement, and
+    sent at least ``older_than`` seconds ago are marked superseded with the
+    reason, in the same transaction that reads them, so a delivery is
+    returned once. Other recipients of the same message keep their
+    delivery, and nothing is read, acknowledged or deleted.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        name: Registered identity of the lane the mail was addressed to.
+        older_than: Seconds a delivery must have waited to be returned.
+        reason: Why the deliveries stopped being actionable.
+
+    Returns:
+        One entry per returned delivery, oldest first, naming the message,
+        its subject, its sender's identity and whether it asked for an
+        acknowledgement.
+    """
+    if not (home / DATABASE).exists():
+        return []
+    with connect(home, write=True) as db:
+        rows = db.execute(
+            "SELECT r.message_id,r.agent_id,m.subject,s.name AS sender,"
+            "m.ack_required FROM message_recipients r "
+            "JOIN messages m ON m.id=r.message_id "
+            "JOIN agents s ON s.id=m.sender_id "
+            "JOIN agents a ON a.id=r.agent_id "
+            "JOIN projects p ON p.id=a.project_id "
+            "WHERE p.human_key=? AND a.name=? AND r.superseded_ts IS NULL "
+            "AND (r.read_ts IS NULL OR "
+            "(m.ack_required=1 AND r.ack_ts IS NULL)) "
+            "AND m.created_ts<=datetime('now',?) ORDER BY m.id",
+            (root, name, f"-{int(older_than)} seconds"),
+        ).fetchall()
+        db.executemany(
+            "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
+            "superseded_reason=? WHERE message_id=? AND agent_id=?",
+            [
+                (
+                    reason[:MAX_SUPERSEDE_REASON],
+                    row["message_id"],
+                    row["agent_id"],
+                )
+                for row in rows
+            ],
+        )
+    return [
+        {
+            "message_id": row["message_id"],
+            "subject": row["subject"],
+            "sender": row["sender"],
+            "ack_required": bool(row["ack_required"]),
+        }
+        for row in rows
+    ]
+
+
 def supersede_project_claim(directory: Path, claim: str, reason: str) -> int:
     """Retires the mail of a claim that a project transition just ended.
 

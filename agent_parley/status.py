@@ -161,9 +161,11 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
         branch: Branch assigned to the lane that owns the claim.
 
     Returns:
-        The number, URL, check verdict and merge state of the newest pull
-        request that names the issue as one it closes, else of the one whose
-        head is the lane's branch, or None when the cache holds neither.
+        The number, URL, check verdict, merge state, seconds since its head
+        was first seen pending and whether that head was reported stalled,
+        of the newest pull request that names the issue as one it closes,
+        else of the one whose head is the lane's branch, or None when the
+        cache holds neither.
     """
     ordered = sorted(
         readings, key=lambda item: int(item.get("number") or 0), reverse=True
@@ -182,6 +184,8 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
         "url": str(found.get("url") or ""),
         "checks": str(found.get("checks") or ""),
         "mergeable": str(found.get("mergeable") or ""),
+        "pending_seconds": since(float(found.get("pending_since") or 0)),
+        "stalled": bool(found.get("stalled_at")),
     }
 
 
@@ -255,12 +259,18 @@ class StatusMixin(BridgeCore):
             also names
             the kernel release, the WSL generation or ``none``, and whether
             ``pidfd_open`` is available, so a platform gap is read here
-            before a lane is started. The `approvals` component names each
-            lane `supervision.opt_in_missing` reports as a setup gap; it is
-            the operator's choice, so it leaves the set consistent.
+            before a lane is started. The ``notify`` component says whether
+            outbound and inbound notification are active; notification that
+            is off is consistent, and one configured but unable to send is
+            not. The `approvals` component names each lane
+            `supervision.opt_in_missing` reports as a setup gap; it is the
+            operator's choice, so it leaves the set consistent.
         """
         from agent_parley.cli import (
+            inbound_status,
             json,
+            notification_line,
+            notify,
             process,
             protocol,
             store,
@@ -340,6 +350,23 @@ class StatusMixin(BridgeCore):
                     protocol.RESTORE_ROOT + ", ".join(gone) if gone else ""
                 ),
                 "compatible": not gone,
+            }
+        )
+        outbound = notify.reported(notify.environment(self.home))
+        received = inbound_status(self.home)
+        components.append(
+            {
+                "component": "notify",
+                "version": ", ".join(outbound["transports"]),
+                "protocol": protocol.PROTOCOL,
+                "state": notification_line(outbound, received).removeprefix(
+                    "Notify: "
+                ),
+                "remedy": outbound["fault"] or received["fault"],
+                "compatible": not (
+                    (outbound["enabled"] and outbound["fault"])
+                    or received["fault"]
+                ),
             }
         )
         unapproved = sorted(
@@ -866,7 +893,8 @@ class StatusMixin(BridgeCore):
         Returns:
             Server readiness and the state the service reports itself in, the
             private state directory, whether inbound status queries were asked
-            for and the configuration fault that stops them, and one record
+            for and the configuration fault that stops them, the outbound
+            transports and the fault that stops them, and one record
             per registered project holding its issue ledger and its lanes. A
             service that reports itself stale is not ready, and the state
             names why. A project the supervisor retired because its root is
@@ -877,6 +905,7 @@ class StatusMixin(BridgeCore):
             inbound_status,
             issues,
             json,
+            notify,
             plan,
             reported_ready,
             roster,
@@ -937,17 +966,18 @@ class StatusMixin(BridgeCore):
         return {
             "server": {"ready": healthy, "state": state},
             "state_directory": str(self.home),
-            "inbound": inbound_status(),
+            "inbound": inbound_status(self.home),
+            "outbound": notify.reported(notify.environment(self.home)),
             "projects": projects,
         }
 
     def _health(self, report: dict) -> None:
-        """Prints the server, code, store, inbound and state directory lines.
+        """Prints the server, code, store, notify and state directory lines.
 
         Args:
             report: Reading produced by `status_snapshot`.
         """
-        from agent_parley.cli import protocol, store
+        from agent_parley.cli import notification_line, protocol, store
 
         ready = "ready" if report["server"]["ready"] else "not ready"
         print(f"Server: {ready}")
@@ -956,8 +986,8 @@ class StatusMixin(BridgeCore):
         schema = store.schema_state(store.schema_version(self.home))
         if repair := store.remedy(schema):
             print(f"Store: {schema}; {repair}")
-        if refusal := (report.get("inbound") or {}).get("fault"):
-            print(f"Inbound: {refusal}")
+        if "outbound" in report:
+            print(notification_line(report["outbound"], report["inbound"]))
         print(f"State: {report['state_directory']}")
 
     def project_at(self, path: Path) -> str:

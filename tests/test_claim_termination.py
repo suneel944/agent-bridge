@@ -326,9 +326,8 @@ def test_the_operator_resolves_a_merged_claim_with_its_evidence(
     assert lifecycle.state(after)["commit"] == "abcdef1234567"
 
 
-def test_a_claim_closed_by_a_per_issue_pull_request_is_resolved(
-    bridge, repo, claimed, monkeypatch
-):
+def merged_issue(monkeypatch):
+    """Reports the claimed issue closed by a merged per-issue pull request."""
     reading = {
         "state": "MERGED",
         "closed_at": time.time() + 1,
@@ -340,16 +339,55 @@ def test_a_claim_closed_by_a_per_issue_pull_request_is_resolved(
     monkeypatch.setattr(forge, "issue_completion", lambda *args: reading)
     completion(monkeypatch, None, 0.0)
     evidence(monkeypatch, None, 0.0)
+
+
+def test_the_service_ends_a_claim_its_merged_pull_request_closed(
+    bridge, claimed, monkeypatch
+):
+    merged_issue(monkeypatch)
     supervision.poll(bridge.home, claimed.parent)
-    unanswered(claimed, 2)
-    supervision.poll(bridge.home, claimed.parent)
-    marker = record(claimed)["unresolved_completion"]
-    assert marker["branch"] == "refactor/1-replay-package"
-    result = bridge.issue_resolve(repo, "1", reason="landed per issue")
-    assert result["outcome"] == "complete"
-    resolution = record(claimed)["resolution"]
+    ended = record(claimed)
+    assert ended["owner"] is None
+    assert lifecycle.state(ended)["state"] == lifecycle.COMPLETE
+    assert lifecycle.state(ended)["integrated_commit"] == "abcdef1234567"
+    resolution = ended["resolution"]
+    assert resolution["actor"] == "supervisor"
+    assert resolution["holder"] == "claude"
+    assert resolution["outcome"] == "complete"
     assert resolution["evidence"]["pull_request"] == 1328
     assert resolution["evidence"]["branch"] == "refactor/1-replay-package"
+    actions = [entry["action"] for entry in ended["history"]]
+    assert "complete" not in actions
+    assert actions[-1] == "resolve"
+
+
+def test_a_claim_taken_again_after_the_reading_is_not_ended(
+    bridge, claimed, monkeypatch
+):
+    merged_issue(monkeypatch)
+    ended = supervision.completed_claims(
+        supervision.roster.read(claimed.parent),
+        issues.snapshot(claimed.parent),
+    )
+    path = claimed.parent / "issues.json"
+    ledger = json.loads(path.read_text())
+    ledger["issues"]["1"]["claim_id"] = "newer-claim"
+    path.write_text(json.dumps(ledger))
+    assert supervision.end_merged_claims(claimed.parent, ended) == []
+    assert record(claimed)["owner"] == "claude"
+
+
+def test_a_pull_request_another_lane_landed_is_left_to_the_operator(
+    bridge, claimed, monkeypatch
+):
+    merged_issue(monkeypatch)
+    ended = supervision.completed_claims(
+        supervision.roster.read(claimed.parent),
+        issues.snapshot(claimed.parent),
+    )
+    ended["1"]["landed_by"] = "codex"
+    assert supervision.end_merged_claims(claimed.parent, ended) == []
+    assert record(claimed)["owner"] == "claude"
 
 
 def test_a_resolution_is_not_an_owner_filed_completion(

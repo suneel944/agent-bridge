@@ -7,12 +7,13 @@ prompt, or puts text into a session. The filters are declared once by the
 command line and reused here, so the two readings cannot drift apart.
 
 Admission is two independent checks. The update must come from the configured
-chat, and its first word must be the passcode read from the environment at
-service start. Only a salted digest of that passcode is held, it is compared in
-constant time, and a message that fails either check is dropped in silence
-rather than answered with a hint. Five failures inside ten minutes lock the
-path for an hour and send one outbound notification saying so; the counter and
-the lock live only in memory and are forgotten with the process.
+chat, and its first word must be the passcode read at service start from the
+environment or the settings `notify setup` stored. Only a salted digest of
+that passcode is held, it is compared in constant time, and a message that
+fails either check is dropped in silence rather than answered with a hint.
+Five failures inside ten minutes lock the path for an hour and send one
+outbound notification saying so; the counter and the lock live only in memory
+and are forgotten with the process.
 
 Updates arrive by long polling the Bot API from this process, so no port is
 opened, no webhook is registered, and nothing is exposed on the network.
@@ -59,6 +60,7 @@ USAGE = (
     "[--over-budget] [--since WINDOW] [--issue N]"
 )
 UNREADABLE = "The status reading could not be taken."
+POLLING = "reading status queries from Telegram"
 LOCKED_DETAIL = (
     f"Inbound status queries are refused for {int(LOCK_SECONDS // 60)} "
     f"minutes after {FAILURE_LIMIT} wrong passcodes."
@@ -348,6 +350,39 @@ def reported(environ: Mapping[str, str] | None = None) -> dict:
     return {"enabled": enabled(environ), "fault": fault(environ)}
 
 
+def polling(home: Path) -> bool:
+    """Reports whether the running service started the inbound reader.
+
+    The reader announces itself in the service log once it passes every
+    configuration check, and the service announces each start with a
+    ``bound`` entry, so the reader is running when its announcement follows
+    the latest start.
+
+    Args:
+        home: Private state root holding the service log.
+
+    Returns:
+        True when the latest service start was followed by the reader's
+        announcement.
+    """
+    from agent_parley import server
+
+    try:
+        lines = (home / server.LOG_NAME).read_text(errors="replace")
+    except OSError:
+        return False
+    running = False
+    for line in lines.splitlines():
+        words = line.split(" ", 2)
+        if len(words) < 2:
+            continue
+        if words[1] == "bound":
+            running = False
+        elif words[1] == "inbound" and line.endswith(POLLING):
+            running = True
+    return running
+
+
 def announce(config: dict) -> None:
     """Sends the one outbound notification a fresh lock deserves.
 
@@ -472,14 +507,15 @@ def run(home: Path, stopped: threading.Event) -> None:
     """
     from agent_parley import server
 
-    if not enabled():
+    values = notify.environment(home)
+    if not enabled(values):
         return
-    if refusal := fault():
+    if refusal := fault(values):
         server.log(home, "inbound", refusal)
         return
-    config = notify.settings()
-    gate = Gate(Passcode(os.environ["AGENT_PARLEY_INBOUND_PASSCODE"]))
-    server.log(home, "inbound", "reading status queries from Telegram")
+    config = notify.settings(values)
+    gate = Gate(Passcode(values["AGENT_PARLEY_INBOUND_PASSCODE"]))
+    server.log(home, "inbound", POLLING)
     offset = 0
     while not stopped.is_set():
         try:

@@ -261,7 +261,8 @@ def test_status_reports_the_inbound_configuration_fault(
     monkeypatch.delenv("AGENT_PARLEY_INBOUND_PASSCODE", raising=False)
     bridge.status()
     printed = capsys.readouterr().out
-    assert "Inbound: AGENT_PARLEY_INBOUND_PASSCODE must be set" in printed
+    assert "inbound off: AGENT_PARLEY_INBOUND_PASSCODE must be set" in printed
     monkeypatch.delenv("AGENT_PARLEY_INBOUND")
     bridge.status()
-    assert "Inbound:" not in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "inbound off: AGENT_PARLEY_INBOUND is not set" in printed
