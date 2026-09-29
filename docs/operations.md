@@ -2253,6 +2253,7 @@ These events notify, and nothing else:
 | `handoff_offered` | A handoff is offered to a lane. |
 | `permission_prompt` | A lane is blocked on a native permission prompt. |
 | `native_dialog` | A lane is held by a native dialog the launcher escalated. |
+| `lane_blocked` | A lane has stayed blocked (approval, prompt, dialog) for 30 minutes; sent once per block. |
 | `lane_idle` | A lane is idle with no claim past the project's `stalled_after`. |
 | `idle_blocker` | Other issues wait on a claim held by an idle lane. |
 | `non_convergence` | An issue is escalated as not converging. |
