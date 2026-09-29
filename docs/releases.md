@@ -206,25 +206,18 @@ on its own after an eligible push to `main`, and what to inspect afterwards.
 3. A minor or major release needs acceptance evidence; a patch release does
    not. `uv run --locked python -m scripts.release_publish evidence` runs the
    fault-injection acceptance suite, `tests/test_fault_acceptance.py`, on the
-   release commit and reads the live acceptance record
-   `docs/acceptance/X.Y.Z.json` for the proposed version. The suite drives
-   stub clients through a lane killed mid-claim, a service restart, a usage
-   limit dialog, a permission prompt on resume, a full disk under the logs
-   and a dropped `Stop` event, and fails unless every claim completes with
-   idle lane-minutes and unaccountable claim-minutes under its limits. It
-   also runs in `make check`, so a pull request that breaks it is red before
-   any release. The live record is written from a real unattended run with
-   native clients, the run #366 describes, and holds `version`, `run` (a link
-   to the run's report), `verdict`, and the measured `lanes`, `claims`,
-   `claims_completed`, `idle_lane_minutes` and `unaccountable_claim_minutes`.
-   `verdict` is the run's own overall result and must read `passed`: the
-   idle and unaccountable minutes are published as evidence, and the run's
-   conditions, not a second ceiling here, decide whether they failed it.
-   Every claim the run took must have completed. A missing suite pass, a
-   failed verdict, or a missing or incomplete record fails the run before
-   the markers are raised,
-   with one line per missing piece of evidence, so a count of release units
-   alone can never publish a minor version again.
+   release commit. The suite drives stub clients through a lane killed
+   mid-claim, a service restart, a usage limit dialog, a permission prompt
+   on resume, a full disk under the logs and a dropped `Stop` event, and
+   fails unless every claim completes with idle lane-minutes and
+   unaccountable claim-minutes under its limits. It also runs in
+   `make check`, so a pull request that breaks it is red before any
+   release. A suite failure stops the run before the markers are raised,
+   so a count of release units alone can never publish a minor version.
+   A live unattended run with native clients is not required; it took at
+   least a day per minor release, so the maintainer runs it by hand when
+   wanted (see [acceptance.md](acceptance.md)). Records under
+   `docs/acceptance/` from earlier releases stay as history.
 4. `python3 -m scripts.release_publish bump` raises every version marker the
    policy gate compares and prepends a changelog entry built from the same
    commits the measurement counted, so the published notes and the decision to
