@@ -20,6 +20,7 @@ from agent_parley import (
     lanes,
     problems,
     protocol,
+    roster,
     store,
     supervision,
 )
@@ -318,6 +319,105 @@ def test_an_idle_lane_holding_a_refused_key_names_the_refused_lane(
     assert row["seconds"] is not None
     store.call(bridge.home, lanes["claude"], "release_file_reservations", {})
     assert not rows(bridge, problems.HOLDING)
+
+
+def test_a_refused_key_held_past_its_deadline_is_an_operator_decision(
+    bridge, repo, paired, served, monkeypatch
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude")
+    store.initialize(bridge.home)
+    lanes = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    store.call(
+        bridge.home,
+        lanes["claude"],
+        "file_reservation_paths",
+        {"paths": ["shared.txt"]},
+    )
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "file_reservation_paths",
+        {"paths": ["shared.txt"]},
+    )
+    manifest = roster.read(directory)
+    idle = {"claude": {"state": supervision.IDLE}}
+
+    def subjects(name):
+        inbox = store.call(
+            bridge.home,
+            lanes[name],
+            "fetch_inbox",
+            {"include_bodies": True},
+        )
+        return [item["subject"] for item in inbox["messages"]]
+
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    hold = supervision.key_hold(directory, "claude")
+    assert hold["refused"] == ["codex"]
+    assert hold["deadline"] == hold["since"] + supervision.KEY_HOLD_DEADLINE
+    [told] = [s for s in subjects("claude") if "refused to codex" in s]
+    assert told.startswith("Release by ")
+    [row] = rows(bridge, problems.HOLDING)
+    assert row["actor"] == problems.BY_SERVICE
+    assert "asked to release it within" in row["detail"]
+    assert not [s for s in subjects("codex") if "past its deadline" in s]
+
+    supervision.refused_keys(
+        bridge.home, directory, manifest, {"claude": {"state": "active"}}
+    )
+    assert supervision.key_hold(directory, "claude")["since"] == hold["since"]
+
+    monkeypatch.setattr(supervision, "KEY_HOLD_DEADLINE", 0.0)
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    [row] = rows(bridge, problems.HOLDING)
+    assert row["actor"] == problems.BY_OPERATOR
+    assert "deadline passed" in row["detail"]
+    assert row["command"].startswith("decide: agent-parley say claude")
+    assert len([s for s in subjects("codex") if "past its deadline" in s]) == 1
+    assert len([s for s in subjects("claude") if "Release by" in s]) == 1
+
+    store.call(bridge.home, lanes["claude"], "release_file_reservations", {})
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    assert supervision.key_hold(directory, "claude") == {}
+    assert not rows(bridge, problems.HOLDING)
+
+
+def test_an_active_holder_is_given_no_deadline(bridge, repo, paired, served):
+    directory = bridge.project(repo)[1]
+    store.initialize(bridge.home)
+    lanes = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    for name in ("claude", "codex"):
+        store.call(
+            bridge.home,
+            lanes[name],
+            "file_reservation_paths",
+            {"paths": ["shared.txt"]},
+        )
+    supervision.refused_keys(
+        bridge.home,
+        directory,
+        roster.read(directory),
+        {"claude": {"state": supervision.ACTIVE}},
+    )
+    assert supervision.key_hold(directory, "claude") == {}
 
 
 def test_a_hook_refusal_on_a_held_key_names_the_refused_lane(

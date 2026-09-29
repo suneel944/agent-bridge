@@ -256,6 +256,14 @@ Every refusal, queued or not, is also recorded against its holder for a day.
 active, with how long it has been quiet. A refusal drops out of both once
 the holder releases or loses the overlapping lease.
 
+A holder seen quiet while a refusal stands is given a deadline, 900 seconds
+(`KEY_HOLD_DEADLINE`), and told once by mail to release the key, hand the
+work over, or tell the refused lanes why it keeps it. Activity does not move
+the deadline. Once it passes, the `problems` row belongs to the operator as a
+decision, the `key_hold` notification is sent, and each refused lane is told
+once that the operator decides. Nothing is released for the holder; the
+reservation stays advisory.
+
 An operator editing the base checkout is otherwise invisible to a lane until the
 merge conflicts. Every `top` and `status` frame reads `git status` of the base
 checkout once per project and matches the dirty paths against each lane's active

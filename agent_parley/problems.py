@@ -634,6 +634,7 @@ def _lane_rows(
     config: dict,
     ack_after: float,
     now: float,
+    directory: Path | None = None,
 ) -> list[dict]:
     """Derives the rows one lane record carries, one per cause.
 
@@ -644,6 +645,8 @@ def _lane_rows(
         config: Resolved supervision settings for the project.
         ack_after: Seconds after which an unacknowledged message is a row.
         now: Unix time the observation ages are measured against.
+        directory: Private project state directory holding the lane's
+            key-hold deadline, or None to read no deadline.
 
     Returns:
         Zero or more rows, one per cause the record shows, each carrying how
@@ -662,7 +665,9 @@ def _lane_rows(
         lane's client lacks, because no hook confirmed it. A quiet lane
         that refused a peer a key it still holds is reported with the lanes
         it refused and how long it has been quiet, because the refused lane
-        saw the refusal and nobody else did. A
+        saw the refusal and nobody else did. Once the release deadline the
+        service gave that lane passes, the row belongs to the operator as a
+        decision. A
         second client sending hooks under the lane's identity is named with
         its process while it lasts, because its events are ignored. A quiet
         lane is inactive only while it owes work, meaning a claim it has not
@@ -818,10 +823,28 @@ def _lane_rows(
     refused = (record.get("mail") or {}).get("refused") or []
     if quiet and refused:
         command, actor = _remedy(name, repo, record, waking)
+        detail = f"idle while holding a key refused to {_listed(refused)}"
+        deadline = (
+            supervision.key_hold(directory, name).get("deadline")
+            if directory
+            else None
+        )
+        if isinstance(deadline, (int, float)):
+            late = int(now - deadline)
+            if late >= 0:
+                detail += f"; its release deadline passed {late}s ago"
+                command, actor = (
+                    f'decide: agent-parley say {name} "release the key '
+                    f'refused to {", ".join(refused)}" {repo}, or let the '
+                    "refused lanes wait",
+                    BY_OPERATOR,
+                )
+            else:
+                detail += f"; asked to release it within {-late}s"
         rows.append(
             _row(
                 HOLDING,
-                f"idle while holding a key refused to {_listed(refused)}",
+                detail,
                 command,
                 availability["age_seconds"],
                 name,
@@ -1372,6 +1395,7 @@ def derive(
                     config,
                     after,
                     stamp,
+                    directory,
                 )
             )
         aged.extend(_offer_rows(project, stamp))

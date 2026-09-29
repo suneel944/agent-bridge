@@ -4906,6 +4906,21 @@ def _refused_by(db: sqlite3.Connection, root: str) -> dict[str, list[str]]:
     return {holder: sorted(names) for holder, names in refused.items()}
 
 
+def refused_holders(home: Path, root: str) -> dict[str, list[str]]:
+    """Maps each lane holding a key it refused a peer to the refused lanes.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+
+    Returns:
+        Mapping of holding identity to the sorted identities it refused,
+        counting only refusals whose key the holder still holds.
+    """
+    with connect(home) as db:
+        return _refused_by(db, root)
+
+
 def usage(
     home: Path, root: str, *, db: sqlite3.Connection | None = None
 ) -> dict[str, dict]:
