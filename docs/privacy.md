@@ -53,7 +53,9 @@ with a status reading. It also records answers to decisions, given by a
 button tap in the configured chat or by a passcoded `decide` message; the
 decision record keeps the option, the Telegram user identifier that chose
 it, the time and any note, capped at 1,024 bytes, and the lane receives the
-answer as mail. No other command is accepted.
+answer as mail. An answer to a native dialog is instead pressed as that
+option's key on the lane's terminal, and a note is never typed there. No
+other command is accepted.
 These settings and secrets are read from the environment, or from
 `notify.json` in the state directory when `agent-parley notify setup` stored
 them. That command reads the bot token and passcode from a hidden prompt or

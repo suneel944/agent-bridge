@@ -40,6 +40,7 @@ OPEN = "open"
 ANSWERED = "answered"
 CLOSED = "closed"
 EXPIRED = "expired"
+STALE = "stale"
 DEFAULT_TTL = 86400.0
 BACKOFF_FIRST = 30.0
 BACKOFF_CEILING = 3600.0
@@ -138,6 +139,7 @@ def open_or_refresh(
     issue: str = "",
     reversibility: str = REVERSIBLE,
     detail: str = "",
+    confirm: Sequence[str] = (),
     ttl: float = DEFAULT_TTL,
     now: float = 0.0,
 ) -> dict:
@@ -160,6 +162,8 @@ def open_or_refresh(
         issue: Issue number the situation concerns, if any.
         reversibility: `REVERSIBLE` or `IRREVERSIBLE`.
         detail: Further lines describing the situation, without any secret.
+        confirm: Options that take a confirming answer even when the
+            decision is reversible, such as one that widens a permission.
         ttl: Seconds the decision stays open unless observed again.
         now: Unix time; the clock when zero.
 
@@ -199,6 +203,7 @@ def open_or_refresh(
                 "options": choices,
                 "recommended": chosen,
                 "reversibility": reversibility,
+                "confirm": [option for option in choices if option in confirm],
                 "state": OPEN,
                 "created": stamp,
                 "refreshed": stamp,
@@ -394,6 +399,79 @@ def close(directory: Path, name: str, now: float = 0.0) -> bool:
         if not record or record.get("state") != OPEN:
             return False
         record.update(state=CLOSED, settled=stamp)
+        _write(directory, records)
+    return True
+
+
+def confirming(record: Mapping[str, object], option: str) -> bool:
+    """Reports whether an answer takes a second, confirming answer.
+
+    Args:
+        record: The open decision.
+        option: The option chosen.
+
+    Returns:
+        True when the decision is irreversible or the option is one the
+        decision names as needing confirmation.
+    """
+    named = record.get("confirm")
+    return record.get("reversibility") == IRREVERSIBLE or (
+        isinstance(named, list) and option in named
+    )
+
+
+def applied(directory: Path, name: str, now: float = 0.0) -> bool:
+    """Claims an answered decision for the one step that carries it out.
+
+    The claim is taken under the decision lock, so of two passes that read
+    the same answer only one acts on it.
+
+    Args:
+        directory: Private project state directory.
+        name: Decision identifier.
+        now: Unix time; the clock when zero.
+
+    Returns:
+        True when this call claimed the answer, False when the decision is
+        unknown, not answered, or already carried out.
+    """
+    with lock(directory / LOCK_NAME, timeout=5):
+        records = _read(directory)
+        record = records.get(name)
+        if (
+            not record
+            or record.get("state") != ANSWERED
+            or record.get("applied")
+        ):
+            return False
+        record["applied"] = now or time.time()
+        _write(directory, records)
+    return True
+
+
+def stale(directory: Path, name: str, now: float = 0.0) -> bool:
+    """Retires a decision whose situation changed before it was carried out.
+
+    An open decision, or an answered one not yet carried out, becomes
+    `STALE`: a later answer is refused, and an answer already given is
+    never acted on. The situation now showing is asked about afresh.
+
+    Args:
+        directory: Private project state directory.
+        name: Decision identifier.
+        now: Unix time; the clock when zero.
+
+    Returns:
+        True when the decision was retired, False otherwise.
+    """
+    with lock(directory / LOCK_NAME, timeout=5):
+        records = _read(directory)
+        record = records.get(name)
+        if not record or record.get("applied"):
+            return False
+        if record.get("state") not in (OPEN, ANSWERED):
+            return False
+        record.update(state=STALE, settled=now or time.time())
         _write(directory, records)
     return True
 
