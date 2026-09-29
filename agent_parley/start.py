@@ -53,6 +53,10 @@ class Found(NamedTuple):
 def checkout(directory: Path) -> tuple[bool, bool | None]:
     """Says whether a directory is in a Git checkout and whether it is dirty.
 
+    Membership is read from a ``.git`` entry in the directory or a parent,
+    so a slow or missing Git never makes a plain directory read as a
+    checkout; Git runs only to learn whether a found checkout is dirty.
+
     Args:
         directory: Directory to inspect.
 
@@ -60,6 +64,11 @@ def checkout(directory: Path) -> tuple[bool, bool | None]:
         Whether it is a checkout, and whether it has uncommitted changes,
         None when Git did not answer within `GIT_SECONDS`.
     """
+    resolved = directory.resolve()
+    if not any(
+        (place / ".git").exists() for place in (resolved, *resolved.parents)
+    ):
+        return False, False
     try:
         finished = subprocess.run(
             ["git", "status", "--porcelain"],

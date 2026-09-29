@@ -73,6 +73,15 @@ def test_outside_a_repository_says_so_and_writes_nothing(
     assert not home.exists()
 
 
+def test_a_plain_directory_is_not_a_checkout_whatever_git_answers(
+    path, tmp_path
+):
+    path("git")
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert start.checkout(outside) == (False, False)
+
+
 def test_dirty_repository_points_at_its_uncommitted_work(
     path, repo, tmp_path, capsys
 ):
