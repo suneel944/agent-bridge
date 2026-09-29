@@ -3366,6 +3366,10 @@ CI builds artifacts; it does not submit review forms.
 can be run in this repository before submitting, and the steps that are bound to
 the owner's accounts and cannot be delegated.
 
+`docs/mcp-directories.md` does the same for the MCP directories: the
+`server.json` and `glama.json` manifests, the check that validates them, and
+the owner-only submission steps and open decisions.
+
 ## Releases
 
 A release measures itself, then ships itself. Every push to `main` runs

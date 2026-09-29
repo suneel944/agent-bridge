@@ -39,6 +39,8 @@ FULL_PATHS = (
     ".claude-plugin/",
     ".agents/",
     ".release-manifest.json",
+    "server.json",
+    "glama.json",
     ".gitignore",
     "LICENSE",
 )
