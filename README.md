@@ -291,9 +291,12 @@ with no claim past `stalled_after`, issues waiting on an idle claim, an issue
 that is not converging, the enforced run budget running out, a lane run that
 finished, a hook refusal, and the inbound status path locking after repeated
 wrong passcodes. An unchanged situation sends nothing further.
-Sending never blocks a hook or tool call. A failed send is logged as a lane
-event, and it and a send cut short by a hook exiting are sent again the next
-time the situation is observed.
+Sending never blocks a hook or tool call. Each of these situations, and each
+operator problem `agent-parley problems` reports, is kept as a decision with
+a stable identifier, its options and a recommended one. A decision is retried
+with backoff on the next supervision poll until every transport accepts it, so
+a send cut short by a hook exiting still arrives. Decisions due together go
+out as one digest with one row of Telegram buttons each.
 
 Store the Telegram settings once, and the service, hooks and lanes all read
 them. The token is read from a hidden prompt, or from standard input when

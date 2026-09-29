@@ -5354,6 +5354,14 @@ def _poll(home: Path, directory: Path) -> None:
                 )
     if config["reclaim"]:
         stage("reclaim lanes", reclaim_lanes, home, directory, manifest)
+    stage(
+        "problem decisions",
+        notify.problem_decisions,
+        home,
+        directory,
+        manifest["root"],
+    )
+    stage("decisions", notify.flush_decisions, directory)
     if failures:
         issues.note_supervision_error(directory, "; ".join(failures))
     else:
