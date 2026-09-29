@@ -218,9 +218,9 @@ def released(record: dict, closed: bool = False) -> dict:
 
     A claim whose issue closed on the forge inside its generation has no
     integration left to wait on, so even ready work may be released. It is
-    marked `ended_on_forge` rather than offered again as free work; the
-    next claim builds a fresh record without the mark, so a reopened issue
-    can still be taken.
+    marked through `end_on_forge` rather than offered again as free work;
+    the next claim builds a fresh record without the mark, so a reopened
+    issue can still be taken.
 
     Args:
         record: Mutable issue ledger record.
@@ -239,11 +239,6 @@ def released(record: dict, closed: bool = False) -> dict:
             "Ready work must remain claimed until verified integration "
             "completes."
         )
-    if closed:
-        record["ended_on_forge"] = {
-            "at": time.time(),
-            "claim_id": record.get("claim_id"),
-        }
     if execution["state"] != COMPLETE:
         execution.update(
             state=QUEUED,
@@ -254,6 +249,40 @@ def released(record: dict, closed: bool = False) -> dict:
             resume_when="",
             commit="",
             gate=None,
+        )
+    record["execution"] = execution
+    if closed:
+        end_on_forge(record)
+    return record["execution"]
+
+
+def end_on_forge(record: dict) -> dict:
+    """Marks an unowned issue as work that ended on the forge.
+
+    The mark keeps the issue out of free work and satisfies the issues that
+    wait on it. Its queued execution stops reading as claimable: it loses
+    the automatic-claim authorization and its next action becomes `none`,
+    so neither `issue next` nor a work offer, nor an operator reading the
+    record, is told to claim a closed issue. Verified complete work keeps
+    its execution unchanged. A later claim starts a fresh authorized
+    generation and drops the mark, so a reopened issue can still be taken.
+
+    Args:
+        record: Mutable issue ledger record without an owner.
+
+    Returns:
+        The execution mapping stored on the record.
+    """
+    execution = state(record)
+    record["ended_on_forge"] = {
+        "at": time.time(),
+        "claim_id": record.get("claim_id"),
+    }
+    if execution["state"] != COMPLETE:
+        execution.update(
+            authorized=False,
+            next_action="none",
+            updated_at=time.time(),
         )
     record["execution"] = execution
     return execution

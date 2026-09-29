@@ -329,6 +329,33 @@ def test_ready_work_on_a_closed_issue_releases_without_requeueing(
     assert "ended_on_forge" not in reclaimed
 
 
+def test_a_release_after_the_forge_closed_the_issue_is_not_claimable(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["7"]["handoff_prompt"] = {
+            "trigger": issues.ENDED,
+            "holder": "claude",
+            "created": time.time(),
+            "responded_at": time.time(),
+        }
+        write_json(directory / "issues.json", ledger)
+    released = bridge.issue(lane, "release", "7")
+    execution = lifecycle.state(released)
+    assert released["ended_on_forge"]
+    assert execution["next_action"] == "none"
+    assert execution["authorized"] is False
+    assert "7" not in issues.unclaimed(issues.snapshot(directory))
+    reclaimed = bridge.issue(lane, "claim", "7")
+    assert lifecycle.state(reclaimed)["authorized"] is True
+    assert lifecycle.state(reclaimed)["next_action"] == "resume"
+
+
 def test_a_blocker_that_ended_on_the_forge_frees_its_dependents(bridge, paired):
     registered(bridge, paired)
     lane = Path(paired["lanes"]["claude"])
