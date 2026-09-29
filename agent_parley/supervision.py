@@ -4276,7 +4276,9 @@ def refresh_forge_issues(directory: Path, manifest: dict) -> None:
     `FORGE_TTL` seconds old. A failed call is recorded and retried no sooner
     than `FORGE_RETRY` seconds later, so a forge that is down costs one
     timeout per retry window, and the last good reading is kept meanwhile.
-    A project without a GitHub forge is never read.
+    A project without a GitHub forge is never read. A reading that holds
+    every open issue also retires the unowned issues it leaves out, through
+    `end_closed_issues`.
 
     Args:
         directory: Private project state directory.
@@ -4304,6 +4306,8 @@ def refresh_forge_issues(directory: Path, manifest: dict) -> None:
     if catalog is None:
         write_json(path, {**cached, "failed_at": now})
         return
+    if len(catalog) < FORGE_LIMIT:
+        end_closed_issues(directory, catalog, now)
     write_json(
         path,
         {
@@ -4315,6 +4319,50 @@ def refresh_forge_issues(directory: Path, manifest: dict) -> None:
             },
         },
     )
+
+
+def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
+    """Marks unowned ledger issues the forge no longer lists as open.
+
+    A release marks `ended_on_forge` only when supervision saw the issue
+    close inside the claim's generation. An issue released first and closed
+    later, closed before the observation, or released by an older version
+    stays queued, and every work offer and `issue next` would name it as
+    free work for good. A complete reading of the forge's open issues says
+    otherwise, so each unowned issue without a pending offer that it leaves
+    out is retired through `lifecycle.end_on_forge`. An issue the ledger
+    touched after the reading began is skipped, because the reading may
+    predate it. Owned claims keep their own completion path.
+
+    Args:
+        directory: Private project state directory.
+        opened: Every open issue the forge reported, by bare number.
+        since: Instant the forge reading began, in Unix seconds.
+    """
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        changed = False
+        for number, record in ledger["issues"].items():
+            history = record.get("history") or [{}]
+            touched = max(
+                float(history[-1].get("at") or 0),
+                float(lifecycle.state(record).get("updated_at") or 0),
+            )
+            if (
+                number in opened
+                or not number.isdigit()
+                or record.get("owner")
+                or record.get("offer")
+                or record.get("ended_on_forge")
+                or touched >= since
+                or lifecycle.state(record)["state"] == lifecycle.COMPLETE
+            ):
+                continue
+            lifecycle.end_on_forge(record)
+            changed = True
+        if changed:
+            ledger["revision"] += 1
+            write_json(directory / "issues.json", ledger)
 
 
 PULL_REQUEST_SECONDS = 60.0

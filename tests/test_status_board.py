@@ -14,6 +14,7 @@ from agent_parley import (
     cli,
     forge,
     issues,
+    lifecycle,
     roster,
     store,
     supervision,
@@ -395,6 +396,27 @@ def test_a_fresh_forge_reading_hides_closed_issues_and_titles_the_rest(
     lines = board(monkeypatch, bridge, capsys, "--all")
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#42", "#43"]
+
+
+def test_a_released_issue_closed_on_the_forge_leaves_free_work(
+    bridge, repo, paired, monkeypatch, offline
+):
+    claimed(bridge, repo, paired, monkeypatch)
+    bridge.issue(paired["lanes"]["codex"], "release", "43")
+    directory = bridge.project(repo)[1]
+    assert "43" in lifecycle.actionable(issues.snapshot(directory))
+    offline["answer"] = {"42": {"title": "Wire the forge", "labels": []}}
+    poll_forge(bridge, repo)
+    ledger = issues.snapshot(directory)
+    ended = ledger["issues"]["43"]
+    assert ended["ended_on_forge"]
+    assert lifecycle.state(ended)["next_action"] == "none"
+    assert not lifecycle.state(ended)["authorized"]
+    assert "43" not in lifecycle.actionable(ledger)
+    assert "43" not in issues.unclaimed(ledger)
+    assert "ended_on_forge" not in ledger["issues"]["42"]
+    reclaimed = bridge.issue(paired["lanes"]["codex"], "claim", "43")
+    assert "ended_on_forge" not in reclaimed
 
 
 def test_a_failed_refresh_falls_back_to_the_stale_reading_once(
