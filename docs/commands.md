@@ -184,6 +184,42 @@ the line is clipped with `…` and a closing hint names `--json` for the full
 values; a pipe or a file receives every value in full. Credential values stay
 redacted in both modes.
 
+## Refusals
+
+A command that refuses prints one shape on standard error: what was refused
+and why, then, when one command resolves it, a `next:` line naming that
+command exactly:
+
+```text
+agent-parley: Unknown credential profile 'work'. Define it with `agent-parley credentials add`.
+next: agent-parley credentials add work
+```
+
+The `next:` line is the command to run, with the refusal's own values filled
+in; an uppercase word such as `CHAT_ID` marks a value only the operator knows.
+A refusal with no single resolving command, such as a missing native CLI,
+prints the message alone. Exit codes do not change: a refusal still exits 1.
+Under `--json` the `error` document keeps its `type` and `message` fields
+unchanged and carries no `next:` text. An MCP tool refusal a lane receives
+ends on the same `next:` line.
+
+Refusals that name a command include a dirty lane
+(`git -C LANE add -A && git -C LANE commit -m wip`), a dirty base checkout
+before integration (`git -C ROOT stash push --include-untracked`), an
+unregistered repository (`agent-parley setup .`), a command run from the main
+checkout instead of a lane or a participant that is not in the project
+(`agent-parley participant list`), an issue owned by a peer
+(`agent-parley issue request N`, or `issue claim N --take-orphaned` for an
+orphaned owner), an issue offered to the caller (`agent-parley issue accept N
+--offer-id ID`), a service that is running but unhealthy, including one
+answering from code the checkout no longer holds (`agent-parley down`), a
+missing store (`agent-parley up`), an unknown credential profile or provider,
+a lane off its branch (`agent-parley participant restore NAME`), an exhausted
+run budget (`agent-parley budget resume`) and a plugin on another protocol
+(`agent-parley setup PATH`). New refusals follow the same shape by raising
+`BridgeError(message, next_command=...)`; a test parses every suggested
+`agent-parley` command against the real command tree.
+
 ## MCP tools
 
 Authentication supplies the lane identity; tool arguments cannot select another

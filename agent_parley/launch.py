@@ -261,6 +261,7 @@ reported.
             process,
             protocol,
             roster,
+            shlex,
             shutil,
             store,
             subprocess,
@@ -279,7 +280,8 @@ reported.
         if stopped:
             raise BridgeError(
                 f"The run budget is exhausted ({stopped['cause']}), so no "
-                f"lane is launched or resumed; {budgets.RESUME}."
+                f"lane is launched or resumed; {budgets.RESUME}.",
+                next_command="agent-parley budget resume",
             )
         data = self.add_participant(repo, agent, provider, credential)
         if supervision.opt_in_missing(self.home, data, agent):
@@ -304,7 +306,8 @@ reported.
             declared = protocol.installed(manifest)
             if not protocol.compatible(declared):
                 raise BridgeError(
-                    protocol.mismatch("installed plugin", declared)
+                    protocol.mismatch("installed plugin", declared),
+                    next_command=f"agent-parley setup {shlex.quote(str(repo))}",
                 )
         missing = [
             event
