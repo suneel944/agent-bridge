@@ -1,8 +1,23 @@
 # Commands
 
-Use `agent-parley COMMAND --help` for arguments, and `agent-parley` with no
-arguments for the command list, grouped as coordination, policy,
-observability and lifecycle. `--home DIR` selects private state globally;
+`agent-parley` with no arguments prints a short start-here screen: whether
+the working directory is a Git repository and whether it is clean, whether
+it belongs to a registered project, which supported native CLIs (`claude`,
+`codex`) are on PATH and whether each one's plugin record lists the Agent
+Parley plugin, and whether the service is running, followed by the next one
+to three commands for that state. It only reads: it never starts the
+service, registers a repository, creates the state directory or runs a
+native CLI, and it prints plain text with no color. The plugin reading comes
+from each CLI's own record (`installed_plugins.json` under
+`CLAUDE_CONFIG_DIR`, the `plugins` table of `config.toml` under
+`CODEX_HOME`) to stay fast; `plugins status` asks the CLIs themselves and is
+the authoritative reading.
+
+Use `agent-parley --help` for the full command list, led by a start-here
+group (`run`, `status`, `top`, `problems`, `demo`, `doctor`) and then grouped
+as coordination, policy, observability and lifecycle, and
+`agent-parley COMMAND --help` for arguments. `--home DIR` selects private
+state globally;
 repository commands accept `--repo PATH` unless noted below. `problems`,
 `doctor` and `metrics` take no `--repo`, and `state export` and
 `state import` select one project with `--project ROOT`. Issue mutations,

@@ -224,6 +224,43 @@ def since(instant: float) -> int | None:
     return max(int(time.time() - instant), 0) if instant else None
 
 
+def registered_root(home: Path, path: Path) -> str:
+    """Names the registered project a directory belongs to, reading only.
+
+    The directory matches a project when it sits inside the project's root
+    or inside one of its lane worktrees. Only the manifests under ``home``
+    are read, so the answer never runs git and never creates state. It
+    imports what it reads directly rather than through `cli`, so the bare
+    start screen can call it without loading the command surface.
+
+    Args:
+        home: Private state directory.
+        path: Directory to place, usually the working directory.
+
+    Returns:
+        The recorded root of the first matching project, or an empty string
+        when the directory belongs to none.
+    """
+    import json
+
+    from agent_parley import roster
+
+    here = path.resolve()
+    for manifest in sorted((home / "projects").glob("*/project.json")):
+        data = roster.normalize(json.loads(manifest.read_text()))
+        places = [
+            data["root"],
+            *(item["lane"] for item in data["participants"].values()),
+        ]
+        if any(
+            here.is_relative_to(Path(place).resolve())
+            for place in places
+            if place
+        ):
+            return data["root"]
+    return ""
+
+
 class StatusMixin(BridgeCore):
     """Health check, problem list and per-lane status reporting."""
 
@@ -1011,22 +1048,7 @@ class StatusMixin(BridgeCore):
             The recorded root of the first matching project, or an empty
             string when the directory belongs to none.
         """
-        from agent_parley.cli import json, roster
-
-        here = path.resolve()
-        for manifest in sorted((self.home / "projects").glob("*/project.json")):
-            data = roster.normalize(json.loads(manifest.read_text()))
-            places = [
-                data["root"],
-                *(item["lane"] for item in data["participants"].values()),
-            ]
-            if any(
-                here.is_relative_to(Path(place).resolve())
-                for place in places
-                if place
-            ):
-                return data["root"]
-        return ""
+        return registered_root(self.home, path)
 
     def board(
         self,

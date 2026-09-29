@@ -18,9 +18,13 @@ edits a CLI's configuration file, or passes a flag that loosens a permission.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
+import tomllib
 from collections.abc import Sequence
+from pathlib import Path
 from typing import NamedTuple
 
 MARKETPLACE = "agent-parley"
@@ -165,6 +169,43 @@ def detected() -> list[tuple[Client, str]]:
         if executable:
             found.append((client, executable))
     return found
+
+
+def recorded(name: str) -> bool:
+    """Says whether a CLI's own plugin record lists the plugin, cheaply.
+
+    Running a native CLI's plugin listing costs a few hundred milliseconds,
+    too slow for a screen printed on every bare invocation. This reads the
+    record each CLI keeps of its installed plugins instead: Claude Code's
+    ``plugins/installed_plugins.json`` under ``CLAUDE_CONFIG_DIR`` (default
+    ``~/.claude``) and the ``plugins`` table of Codex's ``config.toml``
+    under ``CODEX_HOME`` (default ``~/.codex``). Those files belong to the
+    CLIs and may change shape, so `status` stays the authoritative reading;
+    this one only chooses the next command to suggest. Nothing is written.
+
+    Args:
+        name: Supported CLI's executable name, ``claude`` or ``codex``.
+
+    Returns:
+        True when the record lists the plugin and does not mark it disabled;
+        False when it does not, or the record is missing or unreadable.
+    """
+    try:
+        if name == "claude":
+            base = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+            path = Path(base).expanduser() / "plugins"
+            entries = json.loads(
+                (path / "installed_plugins.json").read_text()
+            ).get("plugins", {})
+            return isinstance(entries, dict) and PLUGIN in entries
+        if name == "codex":
+            base = os.environ.get("CODEX_HOME") or "~/.codex"
+            with (Path(base).expanduser() / "config.toml").open("rb") as file:
+                entry = tomllib.load(file).get("plugins", {}).get(PLUGIN)
+            return isinstance(entry, dict) and entry.get("enabled") is not False
+    except (OSError, ValueError, AttributeError):
+        return False
+    return False
 
 
 def status() -> list[str]:
