@@ -17,7 +17,7 @@ uv tool install agent-parley
 ```
 
 `pipx install agent-parley` works as well. Launch each agent session in its
-own terminal with `agent-parley run <provider>`, for example
+own terminal with `agent-parley run <participant>`, for example
 `agent-parley run claude`. The tool gives each session its own worktree and
 connects it to the local coordination server.
 
@@ -34,7 +34,8 @@ Agent Parley does not read or forward the credentials of the agents it
 coordinates.
 
 Some commands reach the Git host you already use through your own `gh` and
-`git` clients and sign-in, for example to assign a claimed issue or open a
+`git` clients (or `bd` when the project's forge is `beads`) and sign-in, for
+example to assign a claimed issue or open a
 pull request. Notifications to Telegram or email are off unless you turn
 them on. The [privacy policy](https://github.com/suneel944/agent-parley/blob/main/docs/privacy.md)
 lists everything the software stores and transmits.

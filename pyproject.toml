@@ -54,7 +54,7 @@ packages = ["agent_parley"]
 "plugins/agent-parley" = "agent_parley/plugins/agent-parley"
 
 [tool.hatch.build.targets.sdist]
-include = ["/agent_parley", "/plugins", "/tests", "/scripts", "/docs", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/LICENSE", "/SECURITY.md", "/CODE_OF_CONDUCT.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents", "/.github", "/.release-please-manifest.json", "/release-please-config.json"]
+include = ["/agent_parley", "/plugins", "/tests", "/scripts", "/docs", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/LICENSE", "/SECURITY.md", "/CODE_OF_CONDUCT.md", "/Makefile", "/pyproject.toml", "/uv.lock", "/.claude-plugin", "/.agents", "/.github"]
 
 [dependency-groups]
 dev = [

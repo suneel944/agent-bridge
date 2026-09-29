@@ -7,9 +7,9 @@ its annotated tag, and dispatches the separate publication workflow. There is
 no proposal pull request. A tag push alone does not publish anything; an
 existing tag can be dispatched explicitly for recovery.
 
-Release 0.4.0 was published on 2026-09-13. All six GitHub bundle assets passed
-checksum verification, and downloaded PyPI wheel and source archive hashes
-matched the GitHub packages. See the
+Historical record: release 0.4.0 was published on 2026-09-13. All six GitHub
+bundle assets passed checksum verification, and downloaded PyPI wheel and
+source archive hashes matched the GitHub packages. See the
 [successful publication run](https://github.com/suneel944/agent-parley/actions/runs/34775070514).
 
 Published descriptions for 0.1.0, 0.1.1, 0.2.0, 0.3.0 and 0.4.0 are curated
@@ -190,9 +190,9 @@ on its own after an eligible push to `main`, and what to inspect afterwards.
    proposed and the step reports the counts it measured. Counting is local and
    repeatable: it reads Git history; selecting an available version
    additionally queries the release services described below.
-   `python3 -m scripts.release_publish candidate` performs those checks before
-   any merge. Every push to `main` runs it, and a push that reaches no marker
-   ends there.
+   `python3 -m scripts.release_publish candidate` performs those checks and
+   can be run locally at any time. Every push to `main` runs it after the
+   push lands, and a push that reaches no marker ends there.
 2. The chosen number must be free. Previously consumed versions cannot be
    reused, including a deleted or yanked 0.1.2. A release that lands on an
    unavailable version advances to the next free version of the same kind
@@ -285,7 +285,8 @@ deployment succeeds.
 ## Retry contract
 
 The GitHub bundle is the canonical artifact set. It contains exactly the wheel,
-source archive, plugin ZIP, requirements, changelog, release notes and SHA256SUMS.
+source archive, plugin ZIP, Codex skills ZIP (`-codex-skills.zip`),
+requirements, changelog, release notes and SHA256SUMS.
 The checksum manifest is uploaded last, and its digest is passed between jobs.
 Paths, duplicate entries, extra files and hash mismatches stop publication.
 An existing complete bundle is reused byte for byte, even when a subsequent
@@ -311,8 +312,9 @@ version automatically.
 
 The gate proves the protocol with synthetic clients and proves nothing about
 a day of real native clients. The unattended acceptance run in
-[acceptance.md](acceptance.md) closes that gap on the maintainer's machine,
-and its report is attached to the release it validates.
+[acceptance.md](acceptance.md) closes that gap on the maintainer's machine.
+It is optional: a release does not require it, and the maintainer runs it by
+hand when wanted.
 
 `make check` includes real temporary Git repositories for tag resolution and
 history and migration checks, plus simulated GitHub/PyPI failures for retry

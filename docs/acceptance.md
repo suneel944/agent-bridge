@@ -322,15 +322,16 @@ the time it was taken. A frame that
 failed to sample records an `error` rather than aborting the run, so a
 single bad frame never loses a day.
 
-Attach the report to the release it validates:
+A release does not require this run; attaching the report to a release is
+optional:
 
 ```sh
 gh release upload v<version> <workspace>/acceptance/report.md
 ```
 
-A release does not require this run. The verdict measures the lane count,
-the issues the lanes claimed, how many of those reported ready, the idle
-lane-minutes the lanes' event logs measure over the period, and the
+`verdict.json` records the measured numbers. The verdict measures the lane
+count, the issues the lanes claimed, how many of those reported ready, the
+idle lane-minutes the lanes' event logs measure over the period, and the
 claim-minutes nothing accounted for. A claim's minute is accounted for when
 its owner reads as active or the problems view names the owner or a service
 or store fault, the same rule the fault-injection suite applies. Records

@@ -65,7 +65,7 @@ defaults:
     values:
       title: Operations
       description: >-
-        Install, upgrade and operate Agent Parley on Linux and macOS: daily
+        Install, upgrade and operate Agent Parley on Linux, macOS and WSL2: daily
         use, providers, accounts, recovery and plugins.
   - scope:
       path: docs/providers.md
@@ -94,7 +94,8 @@ defaults:
       title: Unattended acceptance run
       description: >-
         How a day of real parallel coding agent lanes is run without an
-        operator and turned into the evidence a minor release needs.
+        operator and turned into optional evidence about real-client
+        behaviour.
   - scope:
       path: docs/catalog-submission.md
     values:
@@ -107,8 +108,8 @@ defaults:
     values:
       title: 0.11.0 work-loop validation
       description: >-
-        Release acceptance protocol for the autonomous work loop, run with
-        native Claude and Codex terminals.
+        Historical 0.11.0 acceptance record for the autonomous work loop, run
+        with native Claude and Codex terminals.
   - scope:
       path: docs/windows-port.md
     values:
