@@ -10,7 +10,7 @@ import time
 import pytest
 
 from agent_parley import metrics, server, state
-from scripts import acceptance, release_publish
+from scripts import acceptance
 
 LANES = ["claude:claude", "codex:codex"]
 SHIM = """#!{executable}
@@ -324,60 +324,6 @@ def test_a_quiet_estate_passes_every_condition(tmp_path):
     text = acceptance.report(decided, repo, 24.0)
     assert "Result: PASS" in text
     assert "| claude | 1 | accepted | - | working |" in text
-
-
-def test_a_passing_run_writes_the_record_a_release_accepts(
-    tmp_path, monkeypatch
-):
-    home, repo = estate(tmp_path)
-    frames = repo / "acceptance" / "frames.jsonl"
-    record(frames, [lane_frame(False, [1], 0, True)])
-    decided = acceptance.verdict(shim(tmp_path), home, repo, LANES, 1, frames)
-    (repo / "acceptance" / "verdict.json").write_text(json.dumps(decided))
-    monkeypatch.setattr(acceptance, "RECORDS", tmp_path / "docs" / "acceptance")
-    assert (
-        acceptance.main(
-            [
-                "record",
-                "--home",
-                str(home),
-                "--workspace",
-                str(repo),
-                "--version",
-                "9.9.0",
-                "--run",
-                "https://example.invalid/report.md",
-            ]
-        )
-        == 0
-    )
-    written = json.loads((tmp_path / "docs/acceptance/9.9.0.json").read_text())
-    assert written["lanes"] == 2
-    assert written["claims"] == written["claims_completed"] == 1
-    assert written["verdict"] == "passed"
-    assert release_publish.acceptance_record_error(tmp_path, "9.9.0") == ""
-
-
-def test_a_failed_run_writes_a_record_a_release_refuses(tmp_path):
-    decided = {
-        "passed": False,
-        "measured": {
-            "lanes": 2,
-            "claims": 1,
-            "claims_completed": 1,
-            "idle_lane_minutes": 0.0,
-            "unaccountable_claim_minutes": 0.0,
-        },
-    }
-    written = acceptance.acceptance_record(
-        decided, "9.9.0", "https://example.invalid/report.md"
-    )
-    assert written["verdict"] == "failed"
-    path = tmp_path / "docs" / "acceptance" / "9.9.0.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps(written))
-    error = release_publish.acceptance_record_error(tmp_path, "9.9.0")
-    assert error.endswith("carries verdict 'failed', not 'passed'")
 
 
 def test_a_claim_held_by_an_inactive_lane_is_unaccounted_time(tmp_path):

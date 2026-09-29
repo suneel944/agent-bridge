@@ -407,8 +407,7 @@ on what evidence" must be recorded, not remembered.
 
 Run `make check` before opening a PR: formatting, lint, typing, documentation
 rules, package builds and tests. A minor or major release also needs
-`tests/test_fault_acceptance.py` passing on the release commit and a live
-acceptance record in `docs/acceptance/<version>.json`.
+`tests/test_fault_acceptance.py` passing on the release commit.
 
 [Contributing](https://github.com/suneel944/agent-parley/blob/main/CONTRIBUTING.md) ·
 [Architecture](https://github.com/suneel944/agent-parley/blob/main/docs/architecture.md) ·

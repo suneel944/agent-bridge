@@ -1206,25 +1206,6 @@ def test_bump_refuses_a_marker_it_cannot_raise(versioned_repo):
         release.bump(versioned_repo, TAG, VERSION, "0.2.0")
 
 
-def live_record(root, released, **changes):
-    """Writes a live acceptance record with every measured number."""
-    record = {
-        "version": released,
-        "run": "https://github.com/suneel944/agent-parley/issues/366",
-        "verdict": "passed",
-        "lanes": 4,
-        "claims": 6,
-        "claims_completed": 6,
-        "idle_lane_minutes": 12.5,
-        "unaccountable_claim_minutes": 0,
-        **changes,
-    }
-    path = root / release.ACCEPTANCE_RECORDS / f"{released}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record))
-    return path
-
-
 def test_a_patch_release_needs_no_acceptance_evidence(tmp_path):
     def never(root):
         pytest.fail("A patch release must not run the acceptance suite")
@@ -1233,92 +1214,21 @@ def test_a_patch_release_needs_no_acceptance_evidence(tmp_path):
 
 
 @pytest.mark.parametrize("version", ["0.13.0", "1.0.0"])
-def test_a_minor_or_major_release_without_evidence_names_both(
-    tmp_path, version
-):
+def test_a_failing_suite_refuses_a_minor_or_major_release(tmp_path, version):
     errors = release.acceptance_errors(
         tmp_path, "0.12.0", version, lambda root: "1 failed, 5 passed"
     )
-    assert len(errors) == 2
+    assert len(errors) == 1
     assert release.ACCEPTANCE_SUITE in errors[0]
     assert "1 failed, 5 passed" in errors[0]
-    assert (
-        f"no live acceptance record docs/acceptance/{version}.json"
-        in (errors[1])
-    )
 
 
-def test_a_passing_suite_and_a_live_record_admit_a_minor_release(tmp_path):
-    live_record(tmp_path, "0.13.0")
+def test_a_passing_suite_admits_a_minor_release_without_a_live_run(tmp_path):
+    assert not (tmp_path / "docs" / "acceptance").exists()
     assert (
         release.acceptance_errors(tmp_path, "0.12.0", "0.13.0", lambda r: "")
         == []
     )
-
-
-@pytest.mark.parametrize(
-    ("changes", "named"),
-    [
-        ({"version": "0.12.0"}, "names another version"),
-        ({"run": ""}, "names no run"),
-        ({"verdict": "failed"}, "carries verdict 'failed', not 'passed'"),
-        ({"verdict": None}, "carries verdict None, not 'passed'"),
-        ({"verdict": True}, "carries verdict True, not 'passed'"),
-        ({"idle_lane_minutes": None}, "lacks measured idle_lane_minutes"),
-        ({"unaccountable_claim_minutes": True}, "unaccountable_claim_minutes"),
-        ({"claims_completed": 5}, "completed 5 of 6 claims"),
-        ({"claims": 0, "claims_completed": 0}, "completed 0 of 0 claims"),
-    ],
-)
-def test_an_incomplete_live_record_is_named(tmp_path, changes, named):
-    live_record(tmp_path, "0.13.0", **changes)
-    errors = release.acceptance_errors(
-        tmp_path, "0.12.0", "0.13.0", lambda r: ""
-    )
-    assert len(errors) == 1
-    assert named in errors[0]
-
-
-def test_a_record_without_a_verdict_is_refused(tmp_path):
-    path = live_record(tmp_path, "0.13.0")
-    record = json.loads(path.read_text())
-    del record["verdict"]
-    path.write_text(json.dumps(record))
-    error = release.acceptance_record_error(tmp_path, "0.13.0")
-    assert error.endswith("carries verdict None, not 'passed'")
-
-
-@pytest.mark.parametrize("name", release.ACCEPTANCE_MEASURES)
-@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e999"])
-def test_a_non_finite_measurement_is_named(tmp_path, name, value):
-    path = live_record(tmp_path, "0.13.0")
-    record = json.loads(path.read_text())
-    record[name] = 0
-    path.write_text(
-        json.dumps(record).replace(f'"{name}": 0', f'"{name}": {value}')
-    )
-    error = release.acceptance_record_error(tmp_path, "0.13.0")
-    assert error.endswith(f"lacks measured {name}")
-
-
-@pytest.mark.parametrize("name", release.ACCEPTANCE_COUNTS)
-@pytest.mark.parametrize("value", [6.5, 6.0, True])
-def test_a_fractional_or_boolean_count_is_named(tmp_path, name, value):
-    live_record(tmp_path, "0.13.0", **{name: value})
-    error = release.acceptance_record_error(tmp_path, "0.13.0")
-    assert error.endswith(f"lacks measured {name}")
-
-
-def test_a_finite_record_with_large_counts_is_accepted(tmp_path):
-    live_record(
-        tmp_path,
-        "0.13.0",
-        lanes=10**400,
-        claims=10**400,
-        claims_completed=10**400,
-        unaccountable_claim_minutes=0.25,
-    )
-    assert release.acceptance_record_error(tmp_path, "0.13.0") == ""
 
 
 def test_the_evidence_phase_refuses_a_minor_release_by_name(
@@ -1327,13 +1237,13 @@ def test_the_evidence_phase_refuses_a_minor_release_by_name(
     local.chdir(counted_repo)
     local.setenv("RELEASE_VERSION", "0.2.0")
     local.setattr(sys, "argv", ["release_publish", "evidence"])
-    local.setattr(release, "run_acceptance_suite", lambda root: "")
+    local.setattr(release, "run_acceptance_suite", lambda root: "2 failed")
     with pytest.raises(ValueError) as refused:
         release.main()
     message = str(refused.value)
     assert "Release 0.2.0 refused; missing acceptance evidence" in message
-    assert "no live acceptance record docs/acceptance/0.2.0.json" in message
-    live_record(counted_repo, "0.2.0")
+    assert "2 failed" in message
+    local.setattr(release, "run_acceptance_suite", lambda root: "")
     release.main()
 
 

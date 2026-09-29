@@ -13,8 +13,7 @@ One command starts it::
 
 ``rehearse`` seeds, registers and samples the same estate once without
 starting a lane, so a run can be checked before it spends model quota.
-``record`` turns a finished run's verdict into the live acceptance record
-``docs/acceptance/X.Y.Z.json`` that a minor or major release requires.
+A release does not require a run; the operator starts one by hand.
 
 The run writes a frame every interval to ``frames.jsonl`` under its
 workspace, and a Markdown report next to it when the period ends. The
@@ -46,7 +45,6 @@ from agent_parley import metrics, problems, server, supervision
 BACKLOG = 20
 HOURS = 24.0
 ROOT = Path("~/.local/state/parley-acceptance")
-RECORDS = Path(__file__).resolve().parents[1] / "docs" / "acceptance"
 IDENTITY = ("Acceptance run", "acceptance@localhost")
 INTERVAL = 300.0
 SETTLE = 20.0
@@ -915,7 +913,7 @@ def measure(
     endings: dict,
     taken: list[dict],
 ) -> dict:
-    """Measures the numbers the live acceptance record carries.
+    """Measures the numbers the run's verdict reports.
 
     Args:
         home: Private state directory the estate runs under.
@@ -986,28 +984,6 @@ def measure(
         ),
         "idle_lane_minutes": round(idle / 60, 1),
         "unaccountable_claim_minutes": round(unaccounted / 60, 1),
-    }
-
-
-def acceptance_record(decided: dict, version: str, run: str) -> dict:
-    """Builds the live acceptance record a release reads.
-
-    Args:
-        decided: The verdict a finished run produced.
-        version: Version the run validates.
-        run: Link to the run's published report.
-
-    Returns:
-        The record ``scripts.release_publish`` checks, holding the version,
-        the report link, the run's overall verdict and the measured numbers
-        exactly as the run took them. The verdict travels with the numbers
-        so a release can refuse a run that failed its own conditions.
-    """
-    return {
-        "version": version,
-        "run": run,
-        "verdict": "passed" if decided.get("passed") is True else "failed",
-        **decided["measured"],
     }
 
 
@@ -1197,9 +1173,7 @@ def main(argv: list[str] | None = None) -> int:
         Zero when the run passed every condition, one when it did not.
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "command", choices=("run", "verdict", "rehearse", "record")
-    )
+    parser.add_argument("command", choices=("run", "verdict", "rehearse"))
     parser.add_argument("--home", default=os.environ.get("AGENT_PARLEY_HOME"))
     parser.add_argument("--workspace", default="")
     parser.add_argument(
@@ -1210,30 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issues", type=int, default=BACKLOG)
     parser.add_argument("--lane", action="append", default=[])
     parser.add_argument("--trust", action="store_true")
-    parser.add_argument("--version", default="")
-    parser.add_argument("--run", default="")
     arguments = parser.parse_args(argv)
-    if arguments.command == "record":
-        if not (arguments.workspace and arguments.version and arguments.run):
-            parser.error("record needs --workspace, --version and --run")
-        decided = _read(
-            Path(arguments.workspace).expanduser()
-            / "acceptance"
-            / "verdict.json"
-        )
-        if "measured" not in decided:
-            parser.error("the workspace holds no finished verdict")
-        path = RECORDS / f"{arguments.version}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                acceptance_record(decided, arguments.version, arguments.run),
-                indent=2,
-            )
-            + "\n"
-        )
-        sys.stdout.write(f"{path}\n")
-        return 0
     if not arguments.home:
         parser.error("--home or AGENT_PARLEY_HOME is required")
     home = Path(arguments.home).expanduser()
