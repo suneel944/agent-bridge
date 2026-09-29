@@ -1,11 +1,13 @@
 """Checks that a lane is told once when its pull request's state changes."""
 
 import json
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from agent_parley import forge, issues, store, supervision
+from agent_parley import forge, issues, problems, store, supervision, tables
 
 SHA = "a" * 40
 NEXT = "b" * 40
@@ -243,3 +245,146 @@ def test_the_forge_reading_reports_absence_instead_of_raising(
     assert forge.open_pull_requests(tmp_path) is None
     forge.select(tmp_path, {"forge": "null"})
     assert forge.open_pull_requests(tmp_path) is None
+
+
+STARTED = [{"name": "wsl", "state": "queued", "started": 1.0}]
+
+
+def backdate(directory, seconds):
+    """Moves the recorded pending clock of pull request 7 into the past."""
+    path = directory / supervision.PULL_REQUEST_RECORD
+    record = json.loads(path.read_text())
+    record["pull_requests"]["7"]["pending_since"] -= seconds
+    path.write_text(json.dumps(record))
+
+
+def stalls(bridge):
+    """Returns the stalled-checks notices the Claude lane received."""
+    return [
+        notice
+        for notice in received(bridge, "claude")
+        if "checks pending over" in notice
+    ]
+
+
+def stalled_rows(directory):
+    """Returns the checks-stalled problem rows the record yields."""
+    return problems._checks_rows(directory, "root", time.time())
+
+
+def test_a_head_pending_past_the_ceiling_is_announced_once(
+    bridge, project, monkeypatch
+):
+    pending = reading(project, pending=STARTED)
+    observe(bridge, project, monkeypatch, pending)
+    observe(bridge, project, monkeypatch, pending)
+    assert stalls(bridge) == []
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, pending)
+    observe(bridge, project, monkeypatch, pending)
+    notices = stalls(bridge)
+    assert len(notices) == 1
+    assert "checks pending over 60 min: wsl queued" in notices[0]
+    assert "gh run rerun --failed" in notices[0]
+    rows = stalled_rows(project)
+    assert [row["participant"] for row in rows] == ["claude"]
+    assert rows[0]["condition"] == problems.CHECKS
+    assert "#7 checks pending: wsl queued" in rows[0]["detail"]
+    assert rows[0]["seconds"] >= supervision.CHECKS_STALLED_SECONDS
+
+
+def test_a_new_head_restarts_the_pending_clock(bridge, project, monkeypatch):
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(
+        bridge,
+        project,
+        monkeypatch,
+        reading(project, sha=NEXT, pending=STARTED),
+    )
+    assert stalls(bridge) == []
+    assert stalled_rows(project) == []
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, reading(project, checks="green"))
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    assert stalls(bridge) == []
+    record = json.loads((project / supervision.PULL_REQUEST_RECORD).read_text())
+    assert time.time() - record["pull_requests"]["7"]["pending_since"] < 60
+
+
+def test_a_forge_without_start_times_is_never_stalled(
+    bridge, project, monkeypatch
+):
+    unknown = [{"name": "wsl", "state": "queued", "started": None}]
+    observe(bridge, project, monkeypatch, reading(project, pending=unknown))
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, reading(project, pending=unknown))
+    observe(bridge, project, monkeypatch, reading(project))
+    assert received(bridge, "claude") == []
+    assert stalled_rows(project) == []
+
+
+def test_the_ceiling_doubles_the_longest_declared_job_timeout(tmp_path):
+    assert (
+        supervision.checks_ceiling(tmp_path)
+        == supervision.CHECKS_STALLED_SECONDS
+    )
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "check.yml").write_text(
+        "jobs:\n  a:\n    timeout-minutes: 20\n  b:\n    timeout-minutes: 45\n"
+    )
+    assert supervision.checks_ceiling(tmp_path) == 5400.0
+
+
+def test_status_shows_the_pending_age_and_the_stall():
+    pull = {"number": 7, "checks": "pending", "mergeable": "MERGEABLE"}
+    assert tables.pull_cell({"pull_request": pull}) == "#7 CI pending"
+    pull.update(pending_seconds=4500, stalled=True)
+    assert tables.pull_cell({"pull_request": pull}) == (
+        "#7 CI pending 75m, stalled"
+    )
+
+
+def test_the_forge_reading_keeps_each_pending_check_start(
+    monkeypatch, tmp_path
+):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    records = [
+        {
+            "number": 1,
+            "statusCheckRollup": [
+                {
+                    "name": "wsl",
+                    "status": "QUEUED",
+                    "startedAt": "2026-09-29T12:45:00Z",
+                },
+                {
+                    "name": "macos",
+                    "status": "IN_PROGRESS",
+                    "startedAt": "0001-01-01T00:00:00Z",
+                },
+                {"context": "ci/legacy", "state": "PENDING"},
+                {
+                    "name": "lint",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(forge, "_run", lambda *args: json.dumps(records))
+    (one,) = forge.open_pull_requests(tmp_path)
+    assert one["checks"] == "pending"
+    assert one["pending"] == [
+        {
+            "name": "wsl",
+            "state": "queued",
+            "started": datetime.fromisoformat(
+                "2026-09-29T12:45:00+00:00"
+            ).timestamp(),
+        },
+        {"name": "macos", "state": "in_progress", "started": None},
+        {"name": "ci/legacy", "state": "pending", "started": None},
+    ]

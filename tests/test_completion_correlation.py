@@ -181,8 +181,9 @@ def test_an_issue_closed_from_a_non_lane_branch_is_observed_complete(
     assert ended["1"]["pull_request"] == 1328
     assert ended["1"]["commit"] == "abcdef1234567"
     supervision.poll(bridge.home, claimed.parent)
-    assert prompt(claimed)["trigger"] == "pull request ended"
-    assert issues.snapshot(claimed.parent)["issues"]["1"]["owner"] == "claude"
+    ended_record = issues.snapshot(claimed.parent)["issues"]["1"]
+    assert ended_record["owner"] is None
+    assert ended_record["resolution"]["actor"] == "supervisor"
 
 
 def test_an_issue_closed_before_the_claim_is_not_observed_complete(

@@ -396,9 +396,10 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         One reading per open pull request: its number, URL, head branch and
         head commit, the checks verdict (`pending`, `green`, `red`, or
         `none` when nothing reported), the sorted names of failing checks,
-        the latest reviews as author, state and submission time, the merge
-        state the forge reports, the bare numbers of the issues it closes
-        and the sorted repository paths it changes. None when the forge is
+        each unfinished check with its state and start time, the latest
+        reviews as author, state and submission time, the merge state the
+        forge reports, the bare numbers of the issues it closes and the
+        sorted repository paths it changes. None when the forge is
         unavailable or the response cannot be read.
     """
     if _implementation(repo) != "github":
@@ -438,6 +439,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
                     "sha": str(record.get("headRefOid") or ""),
                     "checks": checks,
                     "failing": failing,
+                    "pending": _pending(record.get("statusCheckRollup")),
                     "reviews": [
                         {
                             "author": str(
@@ -505,6 +507,72 @@ def _checks(rollup: list | None) -> tuple[str, list[str]]:
     if failing:
         return "red", sorted(failing)
     return ("green" if rollup else "none"), []
+
+
+def _pending(rollup: list | None) -> list[dict]:
+    """Names each unfinished check on a pull request and when it began.
+
+    Args:
+        rollup: The forge's `statusCheckRollup` entries, check runs and
+            commit statuses mixed.
+
+    Returns:
+        One entry per check `_checks` counts as pending: its name, its state
+        in lower case (`queued`, `in_progress`, `pending` or `expected`) and
+        its start in Unix seconds, or None when the forge reports no usable
+        start time.
+    """
+    pending: list[dict] = []
+    for entry in rollup or []:
+        if "status" in entry:
+            state = str(entry.get("status") or "").upper()
+            if state == "COMPLETED":
+                continue
+        else:
+            state = str(entry.get("state") or "").upper()
+            if state not in {"", "PENDING", "EXPECTED"}:
+                continue
+        try:
+            started: float | None = _epoch(str(entry.get("startedAt") or ""))
+        except (ValueError, OverflowError, OSError):
+            started = None
+        pending.append(
+            {
+                "name": str(
+                    entry.get("name") or entry.get("context") or "unnamed"
+                ),
+                "state": state.lower() or "pending",
+                "started": started if started and started > 0 else None,
+            }
+        )
+    return pending
+
+
+JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)
+
+
+def checks_timeout(repo: Path) -> float | None:
+    """Reads the longest job timeout the repository's workflows declare.
+
+    Only literal `timeout-minutes` values in `.github/workflows` count; an
+    expression or a job without one is not read, so a repository that sets
+    none reports None rather than the forge's own six-hour default.
+
+    Args:
+        repo: Repository checkout whose workflows are read.
+
+    Returns:
+        The longest declared job timeout in seconds, or None when no
+        workflow declares one or none can be read.
+    """
+    minutes: list[int] = []
+    for path in sorted((repo / ".github" / "workflows").glob("*.y*ml")):
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        minutes.extend(int(value) for value in JOB_TIMEOUT.findall(text))
+    return 60.0 * max(minutes) if minutes else None
 
 
 def _epoch(value: str) -> float:
