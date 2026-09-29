@@ -12,12 +12,15 @@ from pathlib import Path
 import pytest
 
 from agent_parley import (
+    checkpoints,
     cli,
     dialogs,
     issues,
     lanes,
     process,
     roster,
+    server,
+    state,
     store,
     supervision,
     terminal,
@@ -272,6 +275,35 @@ def test_release_reminds_waiter_without_transferring_work(bridge, paired):
     assert after["issues"]["1"]["owner"] is None
     assert after["issues"]["2"]["owner"] == "codex"
     assert after["issues"]["1"]["handoff_prompt"]["responded_at"]
+
+
+def test_withheld_completion_note_answers_the_release_reminder(bridge, paired):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    bridge.issue(lane, "release", "1")
+    supervision.reminders(lane.parent, roster.read(lane.parent), {"1"})
+    prompt = issues.snapshot(lane.parent)["issues"]["1"]["handoff_prompt"]
+    assert prompt["waiting"] == []
+    sent = store.call(
+        bridge.home,
+        actors["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Merged #1 into main",
+            "body_md": "Released #1 after the merge.",
+            "idempotency_key": "done",
+        },
+    )
+    assert sent["withheld"] == ["codex"]
+    supervision.observe_responses(
+        bridge.home, lane.parent, roster.read(lane.parent)
+    )
+    record = issues.snapshot(lane.parent)["issues"]["1"]
+    assert record["owner"] is None
+    assert record["handoff_prompt"]["responded_at"]
+    assert not mailbox(bridge.home, paired["root"], "codex")["unread"]
 
 
 def test_closed_pr_reminds_holder_and_preserves_claim(
@@ -823,6 +855,161 @@ def test_dead_manual_session_resumes_from_its_recorded_session(
     assert record["result"] == "resume requested (launcher 4321)"
 
 
+def test_operator_stop_holds_until_the_next_launch(
+    bridge, repo, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    path = directory / "codex-activity.json"
+    write_json(
+        path,
+        {
+            "activity": "stopped",
+            "session_id": "12345678-abcd-1234-abcd-123456789abc",
+        },
+    )
+    send(bridge, actors["claude"], "codex")
+    bridge.stop(repo, "codex")
+    assert json.loads(path.read_text())["operator_stopped"] is True
+
+    class Child:
+        pid = 4321
+
+    launched = []
+    popen = supervision.subprocess.Popen
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    observed = sampled(bridge, paired, directory, "codex", 300)
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched == []
+
+    monkeypatch.setattr(supervision.subprocess, "Popen", popen)
+    monkeypatch.setattr(bridge, "up", lambda: None)
+
+    async def identity(*args):
+        return {"registration_token": "test-only"}
+
+    monkeypatch.setattr(bridge, "identity", identity)
+    from agent_parley import cli
+
+    original = cli.shutil.which
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name: "/bin/true" if name == "codex" else original(name),
+    )
+    monkeypatch.setattr(terminal, "run", lambda *args, **kwargs: 0)
+    assert bridge.launch("codex", repo, terminal.PROMPT, resume=True) == 0
+    assert "operator_stopped" not in json.loads(path.read_text())
+
+
+def test_stopping_a_live_session_with_backlog_is_not_resumed_by_a_wake(
+    bridge, repo, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    path = directory / "codex-activity.json"
+    send(bridge, actors["claude"], "codex")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"]
+    )
+    try:
+        write_json(
+            path,
+            {
+                "activity": "idle",
+                "session_id": "12345678-abcd-1234-abcd-123456789abc",
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+                "updated": time.time(),
+            },
+        )
+        assert "ended from the base checkout" in bridge.stop(repo, "codex")
+        assert child.wait(10) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(10)
+    stopped = json.loads(path.read_text())
+    assert stopped["operator_stopped"] is True
+    assert stopped["session_id"]
+
+    class Child:
+        pid = 4321
+
+    launched = []
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+    observed = sampled(
+        bridge, paired, directory, "codex", 300, stopped["session_id"]
+    )
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched == []
+    stopped.pop("operator_stopped")
+    write_json(path, stopped)
+    supervision.wake(
+        bridge.home, directory, paired, "codex", observed, supervision.DEFAULTS
+    )
+    assert launched and "--resume" in launched[0]
+
+
+@pytest.mark.parametrize(
+    "answer,result,attempts",
+    [
+        ("accepted", "accepted", 1),
+        ("unavailable", supervision.SESSION_HELD, 0),
+    ],
+)
+def test_a_held_session_lock_is_asked_over_its_socket_never_resumed(
+    bridge, paired, monkeypatch, answer, result, attempts
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    write_json(
+        directory / "codex-activity.json",
+        {"activity": "stopped", "session_id": "live-session"},
+    )
+    send(bridge, actors["claude"], "codex")
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("resumed a held session"),
+    )
+    asked = []
+    monkeypatch.setattr(
+        terminal,
+        "request",
+        lambda directory, name: asked.append(name) or answer,
+    )
+    with state.lock(directory / "codex.session.lock"):
+        assert supervision.session_held(directory, "codex")
+        supervision.wake(
+            bridge.home,
+            directory,
+            paired,
+            "codex",
+            {"process_alive": False},
+            supervision.DEFAULTS,
+        )
+    assert not supervision.session_held(directory, "codex")
+    assert asked == ["codex"]
+    record = json.loads((directory / "codex-wake.json").read_text())
+    assert record["result"] == result
+    assert record["attempts"] == attempts
+
+
 def test_manual_session_without_process_identity_requires_attention(
     bridge, paired, monkeypatch
 ):
@@ -1281,3 +1468,48 @@ def test_bare_stops_escalate_and_a_commit_resets_the_budget(
     empty_commit(lane)
     record = woken()
     assert record["attempts"] == 1 and record["exhausted_at"] is None
+
+
+def test_a_recovery_burst_queues_one_capture_with_merged_evidence(
+    bridge, monkeypatch
+):
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def capture(directory, agent, payload, timeout, evidence=None):
+        calls.append((payload, evidence))
+        started.set()
+        release.wait(20)
+        return True
+
+    monkeypatch.setattr(checkpoints, "recover", capture)
+    lane = ("project", "codex")
+    passing = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "make check"},
+        "tool_response": {"exit_code": 0},
+    }
+
+    def owed(payload):
+        return {
+            "directory": str(bridge.home),
+            "participant": "codex",
+            "payload": payload,
+        }
+
+    with server.Server(bridge.home, bridge.config) as instance:
+        instance.recover(lane, owed({"step": 0}))
+        assert started.wait(20)
+        instance.recover(lane, owed(passing))
+        for step in range(1, 4):
+            instance.recover(lane, owed({"step": step}))
+        release.set()
+        deadline = time.monotonic() + 20
+        while lane in instance.recovering:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+    assert [payload for payload, _ in calls] == [{"step": 0}, {"step": 3}]
+    assert [evidence for _, evidence in calls] == [None, passing]

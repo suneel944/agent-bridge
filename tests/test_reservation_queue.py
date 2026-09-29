@@ -153,6 +153,43 @@ def test_a_release_grants_and_notifies_the_first_queued_lane(
     assert request(bridge, peer, "src/engine.py")["granted"]
 
 
+@pytest.mark.parametrize("scoped", [False, True])
+def test_a_transferred_key_settles_the_receivers_queued_request(
+    bridge, repo, paired, scoped
+):
+    holder = actor(bridge, paired["root"], "claude")
+    peer = actor(bridge, paired["root"], "codex")
+    reserve(bridge, holder, "a.txt")
+    request(bridge, peer, "a.txt")
+    if scoped:
+        with store.connect(bridge.home, write=True) as db:
+            db.execute(
+                "UPDATE file_reservations SET claim_id='c1' WHERE agent_id=?",
+                (holder["id"],),
+            )
+        moved = store.transfer_claim_reservations(
+            bridge.home, paired["root"], "claude", "codex", "c1", "c2"
+        )
+    else:
+        moved = store.transfer_reservations(
+            bridge.home, paired["root"], "claude", "codex", ["a.txt"]
+        )
+    assert moved == ["a.txt"]
+    with store.connect(bridge.home) as db:
+        assert (
+            db.execute(
+                "SELECT count(*) FROM reservation_requests WHERE agent_id=? "
+                "AND granted_ts IS NULL AND cancelled_ts IS NULL",
+                (peer["id"],),
+            ).fetchone()[0]
+            == 0
+        )
+    release(bridge, peer)
+    reserve(bridge, holder, "a.txt")
+    assert release(bridge, holder)["granted"] == []
+    assert store.active_reservations(bridge.home, paired["root"]) == {}
+
+
 def test_the_grant_and_the_notice_share_the_release_transaction(
     bridge, repo, paired, monkeypatch
 ):

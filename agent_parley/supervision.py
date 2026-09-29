@@ -29,11 +29,19 @@ from agent_parley import (
     process,
     reclaim,
     records,
+    recovery,
     roster,
     store,
     terminal,
 )
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
+from agent_parley.status import (
+    FORGE_ISSUES,
+    FORGE_LIMIT,
+    FORGE_RETRY,
+    FORGE_TIMEOUT,
+    FORGE_TTL,
+)
 
 DEFAULTS = {
     "interval": 30,
@@ -80,6 +88,7 @@ DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
+SESSION_HELD = "busy:session"
 WORKING = "working"
 WAITING = "waiting"
 TOOL_TIMEOUT = 600
@@ -308,6 +317,14 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
     the silence those paths measure. An operator restart records a new
     session, which moves the record out of `stopped` and clears the mark.
 
+    A session recorded in the current boot is left alone. A lane launched
+    after the restart can publish its new session before the first poll,
+    and marking that live session would read the lane as stopped on every
+    poll until the next launch. The launcher and the hooks stamp each
+    recorded session with the boot it started in, so a record carrying the
+    current boot identifier is known to be live rather than a leftover. A
+    record without that stamp predates it and is marked as before.
+
     The record is written before the mark, and the boot identifier only
     after every lane was marked, so a lane whose checkpoint lock or store
     was busy is marked on the next poll.
@@ -330,14 +347,18 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
         previous = str(json.loads(record.read_text()).get("boot_id") or "")
     except (OSError, ValueError, AttributeError):
         previous = ""
-    if previous == current:
+    if previous == current or previous.startswith(f"{{ sec = {current},"):
         return []
     marked = []
     if previous:
         for name in manifest["participants"]:
             with lock(directory / f"{name}-checkpoint.lock", timeout=1):
                 state = checkpoints.activity(directory, name)
-                if state.get("session_pid") is None or rebooted(state):
+                if (
+                    state.get("session_pid") is None
+                    or state.get("session_boot") == current
+                    or rebooted(state)
+                ):
                     continue
                 with store.connect(home, write=True) as db:
                     lanes.transition(
@@ -2186,6 +2207,31 @@ def _work_progress(ledger: dict, numbers: list[str]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 
+def _work_changed(previous: dict, published: dict) -> bool:
+    """Reports whether a lane's work publication needs rewriting.
+
+    A lane's capacity is the newest observation of every lane sharing its
+    provider account, so a running peer moves it on nearly every poll. A
+    lane whose session is not running reads none of it, and rewriting its
+    file for that alone keeps a dead lane's state looking fresh. Such a
+    lane's publication is rewritten only when something other than its
+    capacity changed; a lane that runs, or has no reading yet, is
+    rewritten on any change.
+
+    Args:
+        previous: The publication already on disk.
+        published: The publication this poll derived.
+
+    Returns:
+        Whether the new publication should be written.
+    """
+    if published == previous:
+        return False
+    if published["checks"].get("session") is not False:
+        return True
+    return {**published, "capacity": None} != {**previous, "capacity": None}
+
+
 def _work_dispatch(previous: dict, offer: dict) -> dict:
     """Keeps one dispatch obligation until work changes or disappears.
 
@@ -2439,12 +2485,18 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     recovered = recovery.quiesce_authorized(directory, manifest, isolate=True)
     if recovered:
         ledger = issues.snapshot(directory)
+        audience = _audience(
+            manifest,
+            {name: condition(home, manifest["root"], name) for name in serving},
+            set(),
+        )
         for number, record in ledger["issues"].items():
             marker = record.get("orphan")
             if marker in recovered:
                 _announce_orphan(
                     home,
                     manifest,
+                    audience,
                     str(record["owner"]),
                     [number],
                     list(marker.get("reservations") or []),
@@ -2484,7 +2536,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             if offer:
                 published["dispatch"] = _work_dispatch(previous, offer)
             path = directory / f"{name}-work.json"
-            if published != previous:
+            if _work_changed(previous, published):
                 write_json(path, published)
     idle = [
         name
@@ -2712,7 +2764,7 @@ def observed_complete(record: dict) -> bool:
 def completion_escalations(
     directory: Path,
     manifest: dict,
-    observed: dict,
+    observed: dict | None,
     threshold: int,
     window: float,
 ) -> None:
@@ -2735,12 +2787,18 @@ def completion_escalations(
     A holder that answers before the threshold clears its own escalation,
     because the reminder it answered is no longer unanswered.
 
+    The forge is read again on every poll, so a marker is retracted as soon
+    as the latest observation no longer reads its issue ended, as after a
+    reopen: advice to resolve the claim would otherwise end live work. A
+    poll whose forge reading failed observed nothing and keeps every marker.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
         observed: Forge observation per issue number whose lane branch ended
             inside the current ownership generation, carrying the branch, the
-            pull request state and the instant it was observed.
+            pull request state and the instant it was observed, or None when
+            this poll could not read the forge.
         threshold: Unanswered reminders this project escalates after.
         window: Seconds of silence after which a lane is asked again, the
             span one unanswered reminder is counted over.
@@ -2762,7 +2820,11 @@ def completion_escalations(
                 if record.pop("unresolved_completion", None):
                     changed = True
                 continue
-            seen = observed.get(number) or {}
+            seen = (observed or {}).get(number) or {}
+            if current and not seen and observed is not None:
+                record.pop("unresolved_completion")
+                changed = True
+                continue
             if current or not seen:
                 continue
             elapsed = max(0.0, time.time() - float(prompt.get("created", 0)))
@@ -2794,7 +2856,9 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
     attempt count that caused it, so a lane and its waiting peers are told
     once rather than on every read. Recording a notice moves nothing: the
     issue keeps its owner, its offer and its dependencies, and the notice
-    itself says so.
+    itself says so. A notice whose holder no longer owns the open claim, after
+    a release, completion, transfer or closure on the forge, is dropped, so
+    the ledger stops carrying a pause directive nobody stands behind.
 
     Args:
         directory: Private project state directory.
@@ -2804,6 +2868,11 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
         ledger = issues.snapshot(directory)
         changed = False
         for number, record in ledger["issues"].items():
+            if record.get("deadline_notice") and not issues.deadline_notice(
+                record
+            ):
+                record.pop("deadline_notice")
+                changed = True
             holder = record.get("owner")
             if holder not in manifest["participants"]:
                 continue
@@ -2887,7 +2956,9 @@ def tool_silence(directory: Path, name: str) -> float | None:
     `PreToolUse` counts while its session is still open, since a long tool
     call is work in progress. One followed by `SessionEnd` before any
     `PostToolUse` never completed, so a supervisor resume that starts a
-    tool and ends does not reset the silence clock.
+    tool and ends does not reset the silence clock. A hook call from another
+    session, or a record the service wrote itself, is not the lane's work
+    and is skipped, as :func:`silence` skips it.
 
     Args:
         directory: Private project state directory.
@@ -2903,9 +2974,12 @@ def tool_silence(directory: Path, name: str) -> float | None:
         events = checkpoints.read_events(directory, name)
     except (BridgeError, OSError, ValueError):
         return None
+    ignored = {reason.value for reason in checkpoints.UNOBSERVED}
     latest = 0.0
     pending = 0.0
     for entry in events:
+        if entry.get("reason_class") in ignored:
+            continue
         kind = entry.get("event")
         stamp = float(entry.get("ts", 0) or 0)
         if kind == "PostToolUse":
@@ -3198,7 +3272,8 @@ def _overdue_step(
                 "at": now,
             }
             record["attempts"] = int(record.get("attempts", 0) or 0) + 1
-            record.setdefault("history", []).append(
+            lifecycle.append_history(
+                record,
                 {
                     "action": f"overdue-{step}",
                     "actor": "supervisor",
@@ -3206,7 +3281,7 @@ def _overdue_step(
                     "owner": record.get("owner"),
                     "offer": record.get("offer"),
                     "claim_id": record.get("claim_id"),
-                }
+                },
             )
         ledger["revision"] += 1
         write_json(directory / "issues.json", ledger)
@@ -3313,9 +3388,10 @@ def overdue_claims(
                 "wake",
                 (
                     f"Issue #{number} {cause}. Record progress with "
-                    f"agent-parley report partial --issue {number}, or offer "
-                    "or release it; otherwise the supervisor offers it to an "
-                    "idle peer, then releases it."
+                    f"agent-parley report --state partial --issue {number} "
+                    '--summary "..." --remaining "...", or offer or release '
+                    "it; otherwise the supervisor offers it to an idle peer, "
+                    "then releases it."
                 )
                 if idle
                 else "",
@@ -3770,12 +3846,14 @@ def _quiesced(marker: dict, name: str, record: dict) -> bool:
 
 
 def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
-    """Marks a dead lane's claims as orphaned and tells every other lane once.
+    """Marks a dead lane's claims as orphaned and tells the able lanes once.
 
     A crashed lane keeps its issues, and peers that wait on them cannot tell a
     working owner from one that will never answer. The marker states that
     observation where the ledger is read, and one notice per dead lane names
-    the orphaned issues and the reservations it still holds.
+    the orphaned issues and the reservations it still holds. Notices go only
+    to lanes that could take the work: a lane that is itself dead, reclaimed
+    or retired is left out, since nobody reads its mail.
 
     Nothing moves here. The issue keeps its owner, the reservations keep their
     holder, and only an explicit ``issue claim --take-orphaned`` by a peer
@@ -3839,7 +3917,8 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     ]
     if not dead and not returned:
         return
-    recoverable: set[str] = set()
+    audience = _audience(manifest, records, set(dead))
+    uncaptured: dict[str, str] = {}
     reservations: dict = {}
     if dead:
         from agent_parley import recovery
@@ -3847,9 +3926,8 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         for name in dead:
             try:
                 recovery.capture(directory, manifest, name)
-                recoverable.add(name)
-            except (BridgeError, OSError, ValueError):
-                pass
+            except (BridgeError, OSError, ValueError) as exc:
+                uncaptured[name] = str(exc) or type(exc).__name__
         try:
             reservations = store.active_reservations(home, manifest["root"])
         except (BridgeError, OSError, sqlite3.Error):
@@ -3860,12 +3938,16 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         ledger = issues.snapshot(directory)
         changed = False
         for name, lane in dead.items():
-            if name not in recoverable:
-                continue
             keys = reservations.get(
                 manifest["participants"][name]["display"], []
             )
             reason = orphan_reason(name, lane)
+            if name in uncaptured:
+                reason += (
+                    "; no recovery checkpoint was captured "
+                    f"({uncaptured[name]}), so a takeover starts from the "
+                    "base without the dead lane's uncommitted work"
+                )
             marked = []
             fresh = False
             for number, record in ledger["issues"].items():
@@ -3889,6 +3971,8 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                     "reservations": list(keys),
                     "created": time.time(),
                 }
+                if name in uncaptured:
+                    record["orphan"]["capture_failed"] = uncaptured[name]
                 changed = True
                 fresh = True
             if fresh:
@@ -3910,19 +3994,54 @@ def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             ledger["revision"] += 1
             write_json(directory / "issues.json", ledger)
     for name, marked, keys in notices:
-        _announce_orphan(home, manifest, name, marked, keys)
+        _announce_orphan(home, manifest, audience, name, marked, keys)
     for name, recovered in withdrawn:
-        _announce_return(home, manifest, name, recovered)
+        _announce_return(home, manifest, audience, name, recovered)
+
+
+def _audience(
+    manifest: dict, records: dict[str, dict | None], dead: set[str]
+) -> list[str]:
+    """Names the lanes an orphan notice can reach a reader through.
+
+    Args:
+        manifest: Current participant manifest.
+        records: Each candidate lane's state record, or None without one.
+        dead: Lanes the caller read as dead from their presence alone.
+
+    Returns:
+        The candidates that are not retired, not read as dead, and whose
+        record is neither `dead` nor `reclaimed`, in record order.
+    """
+    return [
+        name
+        for name, record in records.items()
+        if name not in dead
+        and not roster.retired(manifest["participants"][name])
+        and (
+            record is None
+            or record["state"] not in (lanes.DEAD, lanes.RECLAIMED)
+        )
+    ]
 
 
 def _announce_orphan(
-    home: Path, manifest: dict, name: str, numbers: list[str], keys: list[str]
+    home: Path,
+    manifest: dict,
+    audience: list[str],
+    name: str,
+    numbers: list[str],
+    keys: list[str],
 ) -> None:
-    """Tells every other lane once that one lane's claims read as orphaned.
+    """Tells every lane that can take the work once that claims are orphaned.
+
+    A dead, reclaimed or retired lane cannot take the work, and mail to it
+    only inflates the unread and unacknowledged counts nobody will clear.
 
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
+        audience: Participants that are neither dead, reclaimed nor retired.
         name: Participant whose claims were marked.
         numbers: Issue numbers marked orphaned, in ledger order.
         keys: Reservation keys that lane still holds.
@@ -3936,9 +4055,10 @@ def _announce_orphan(
         "--take-orphaned, which records you as the owner and releases those "
         "reservations. Leaving it alone keeps it with " + name + "."
     )
-    for peer, participant in manifest["participants"].items():
+    for peer in audience:
         if peer == name:
             continue
+        participant = manifest["participants"][peer]
         digest = hashlib.sha256(
             f"{name}\x00{listed}\x00{held}\x00{peer}".encode()
         ).hexdigest()[:32]
@@ -3954,9 +4074,13 @@ def _announce_orphan(
 
 
 def _announce_return(
-    home: Path, manifest: dict, name: str, numbers: list[str]
+    home: Path,
+    manifest: dict,
+    audience: list[str],
+    name: str,
+    numbers: list[str],
 ) -> None:
-    """Tells every other lane once that one lane's orphan marker is withdrawn.
+    """Tells every lane that can take work once that a marker is withdrawn.
 
     A peer that was told to take the work is told that the work is no longer
     available, so the earlier notice is never left standing as the last thing
@@ -3965,6 +4089,7 @@ def _announce_return(
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
+        audience: Participants that are neither dead, reclaimed nor retired.
         name: Participant whose marker was withdrawn.
         numbers: Issue numbers that lost the marker, in ledger order.
     """
@@ -3976,9 +4101,10 @@ def _announce_return(
         "take one should leave it alone and ask that lane for a handoff "
         "instead."
     )
-    for peer, participant in manifest["participants"].items():
+    for peer in audience:
         if peer == name:
             continue
+        participant = manifest["participants"][peer]
         digest = hashlib.sha256(
             f"{name}\x00{listed}\x00{peer}".encode()
         ).hexdigest()[:32]
@@ -4139,6 +4265,56 @@ def branch_lane(manifest: dict, branch: str) -> str:
         ):
             owners.append(name)
     return owners[0] if len(owners) == 1 else ""
+
+
+def refresh_forge_issues(directory: Path, manifest: dict) -> None:
+    """Keeps the cached reading of the forge's open issues current.
+
+    `status` hides claims on closed issues and shows titles from
+    `FORGE_ISSUES`, but stays read-only, so the poll owns the forge read.
+    One bounded call reads every open issue once the cached reading is
+    `FORGE_TTL` seconds old. A failed call is recorded and retried no sooner
+    than `FORGE_RETRY` seconds later, so a forge that is down costs one
+    timeout per retry window, and the last good reading is kept meanwhile.
+    A project without a GitHub forge is never read.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    path = directory / FORGE_ISSUES
+    try:
+        cached = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cached = {}
+    if not isinstance(cached, dict):
+        cached = {}
+    now = time.time()
+    if (
+        isinstance(cached.get("issues"), dict)
+        and now - float(cached.get("read_at") or 0) < FORGE_TTL
+    ):
+        return
+    root = Path(manifest["root"])
+    if forge.select(root, manifest) != "github":
+        return
+    if now - float(cached.get("failed_at") or 0) < FORGE_RETRY:
+        return
+    catalog = forge.open_issue_catalog(root, FORGE_LIMIT, FORGE_TIMEOUT)
+    if catalog is None:
+        write_json(path, {**cached, "failed_at": now})
+        return
+    write_json(
+        path,
+        {
+            "read_at": now,
+            "limit": FORGE_LIMIT,
+            "issues": {
+                number: {"title": str(item.get("title") or "")}
+                for number, item in catalog.items()
+            },
+        },
+    )
 
 
 PULL_REQUEST_SECONDS = 60.0
@@ -4433,12 +4609,18 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     next attempt and gives the operator the account of what was removed and
     what was kept. The worktrees lanes made for themselves are swept in the
     same pass and published beside the lanes, without their sizes, because
-    measuring them walks every file they hold. The state directory's total
+    measuring them walks every file they hold. The files retired lanes no
+    longer need and wake logs past their retention are then deleted, as
+    `reclaim.prune` decides, and published by name. The state directory's
+    total
     size and the count of worktrees still left for a reclaim are measured
     here once, so `status` reports both without walking the disk itself.
     Every lane the sweep removed requests the `reclaimed` transition of its
     state; the transition table refuses it, and records the refusal, for a
-    lane whose state is not `stopped` or `dead`.
+    lane whose state is not `stopped` or `dead`. The same pass prunes the
+    recovery bundles no live claim can still read, so the state directory
+    stops growing by one bundle per capture of an issue nothing owns
+    anymore.
 
     Args:
         home: Private bridge state root.
@@ -4452,10 +4634,15 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
         return
     rows: list[dict] = []
     made: list[dict] = []
+    pruned: list[str] = []
+    bundles: list[str] = []
     bridge = cli.Bridge(home)
     try:
         rows = bridge.reclaim(Path(manifest["root"]), apply=True)
         made = bridge.reclaim_worktrees(Path(manifest["root"]), apply=True)
+        pruned = reclaim.prune(directory, roster.read(directory), now)
+        with contextlib.suppress(OSError, ValueError):
+            bundles = recovery.prune(directory, issues.snapshot(directory))
     except BridgeError:
         pass
     finally:
@@ -4467,9 +4654,11 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     "swept": now,
                     "lanes": rows,
                     "worktrees": made,
+                    "pruned": pruned,
                     "state_bytes": reclaim.size(directory),
                     "reclaimable": sum(row["reclaim"] for row in left),
                     "forceable": sum(reclaim.forceable(row) for row in left),
+                    "bundles_pruned": len(bundles),
                 },
             )
     removed = [row["participant"] for row in rows if row.get("removed")]
@@ -4721,6 +4910,7 @@ def _poll(home: Path, directory: Path) -> None:
         store.reclaim_expired(home, manifest["root"])
     stage("deliveries", deliveries, home, directory, manifest)
     stage("dependencies", lifecycle.settle_dependencies, directory)
+    stage("forge issues", refresh_forge_issues, directory, manifest)
     if config["prompts"]:
         stage(
             "completions",
@@ -5055,15 +5245,18 @@ def _remind(
 
     Completion reads the forge and each lane's reflog, so it runs as its own
     stage. A reading that raises is recorded and leaves no claim observed
-    ended for this poll, so reminders and every later stage still run.
+    ended for this poll, so reminders and every later stage still run, and
+    completion escalations keep their markers rather than read the failure
+    as a reopened issue.
     """
-    ended: dict[str, dict] = {}
+    read: list[dict[str, dict]] = []
     stage(
         "completion",
-        lambda: ended.update(
+        lambda: read.append(
             completed_claims(manifest, issues.snapshot(directory))
         ),
     )
+    ended = read[0] if read else {}
     closed = set(ended)
     stage(
         "reminders",
@@ -5097,7 +5290,7 @@ def _remind(
         completion_escalations,
         directory,
         manifest,
-        ended,
+        read[0] if read else None,
         int(
             config.get("completion_reminders", DEFAULTS["completion_reminders"])
         ),
@@ -5110,6 +5303,12 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
 
     This observes delivery, not the semantic completeness of a handoff. It
     never acknowledges mail, releases an issue or transfers ownership.
+
+    A message the store routed to the project feed answers the reminder
+    whether or not any mailbox received it. Routing withholds a broadcast
+    from idle or unconcerned lanes and records no recipient row for them,
+    yet every lane reads that message from the feed, so waiting on a
+    recipient row would leave the reminder open until a peer returned.
     """
     with lock(directory / "issues.lock", timeout=1):
         ledger = issues.snapshot(directory)
@@ -5122,27 +5321,29 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
                 holder = manifest["participants"].get(prompt["holder"])
                 if not holder:
                     continue
-                recipients = {
-                    row["name"]
-                    for row in db.execute(
-                        "SELECT recipient.name FROM messages m "
-                        "JOIN agents sender ON sender.id=m.sender_id "
-                        "JOIN projects p ON p.id=m.project_id "
-                        "JOIN message_recipients r ON r.message_id=m.id "
-                        "JOIN agents recipient ON recipient.id=r.agent_id "
-                        "WHERE p.human_key=? AND sender.name=? "
-                        "AND m.id>?",
-                        (
-                            manifest["root"],
-                            holder["display"],
-                            prompt.get("after_message_id", 0),
-                        ),
+                rows = db.execute(
+                    "SELECT m.feed AS feed, recipient.name AS name "
+                    "FROM messages m "
+                    "JOIN agents sender ON sender.id=m.sender_id "
+                    "JOIN projects p ON p.id=m.project_id "
+                    "LEFT JOIN message_recipients r ON r.message_id=m.id "
+                    "LEFT JOIN agents recipient ON recipient.id=r.agent_id "
+                    "WHERE p.human_key=? AND sender.name=? "
+                    "AND m.id>?",
+                    (
+                        manifest["root"],
+                        holder["display"],
+                        prompt.get("after_message_id", 0),
+                    ),
+                ).fetchall()
+                recipients = {row["name"] for row in rows if row["name"]}
+                if any(row["feed"] for row in rows) or (
+                    recipients
+                    and all(
+                        manifest["participants"].get(name, {}).get("display")
+                        in recipients
+                        for name in prompt["waiting"]
                     )
-                }
-                if recipients and all(
-                    manifest["participants"].get(name, {}).get("display")
-                    in recipients
-                    for name in prompt["waiting"]
                 ):
                     prompt["responded_at"] = time.time()
                     changed = True
@@ -5160,6 +5361,13 @@ def _work_backlog(
     record: dict,
 ) -> tuple[str, dict] | None:
     """Builds a wake key for one still-actionable published work offer.
+
+    A continue offer whose lane holds no claim it can move now only names
+    waiting claims and leads. Once a wake delivered that generation, the
+    same offer is not delivered again: nothing the lane can do changed, so
+    each backoff wake only repeated it and spent attempts toward a false
+    escalation. A change to the ledger or to the leads publishes a new
+    generation, which is delivered once.
 
     Args:
         home: Private bridge state root.
@@ -5218,6 +5426,12 @@ def _work_backlog(
         current.get("id"),
         current.get("progress"),
     ) != (offer.get("id"), offer.get("progress")):
+        return None
+    if (
+        current["kind"] == "continue"
+        and dispatch.get("delivered")
+        and not lifecycle.actionable(ledger, name)
+    ):
         return None
     return (
         f"work:{current['id']}:{current.get('progress', current['id'])}",
@@ -5315,6 +5529,12 @@ def _write_work_dispatch(
 ) -> None:
     """Persists a dispatch outcome only for the current offer generation.
 
+    A launcher that accepted the wake, or a resume it started, marks the
+    generation delivered, so `_work_backlog` does not wake the lane again
+    with a waiting-only offer it already read. A busy refusal, an
+    unavailable socket or manual attention never reached the lane and
+    leave the mark unset.
+
     Args:
         directory: Private project state directory.
         name: Participant owning the offer.
@@ -5338,6 +5558,8 @@ def _write_work_dispatch(
             last_result=result,
             updated_at=time.time(),
         )
+        if result == "accepted" or result.startswith("resume requested"):
+            dispatch["delivered"] = True
         current["dispatch"] = dispatch
         write_json(path, current)
 
@@ -5617,6 +5839,52 @@ def _mail_digest(rows: list) -> list[str]:
     return [str(identifier) for identifier in newest]
 
 
+def session_held(directory: Path, name: str) -> bool:
+    """Reports whether a live launcher or operation holds the session lock.
+
+    The lock is what a resumed launcher takes first, so probing it reads
+    the one fact that decides whether a resume can start, independently of
+    the presence the lane's record states. The probe holds the lock only
+    for the instant it takes to acquire and release it.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose session lock is probed.
+
+    Returns:
+        True when another process holds `<name>.session.lock`.
+    """
+    try:
+        with lock(directory / f"{name}.session.lock"):
+            return False
+    except LockBusy:
+        return True
+
+
+def _fenced(directory: Path, name: str, state: dict) -> bool:
+    """Reports whether the session a resume would continue was fenced.
+
+    The launcher resumes the activity record's resumable session, falling
+    back to its session identifier. A published ownership takeover fences
+    that session generation, so resuming it could only be refused again.
+
+    Args:
+        directory: Private project state directory.
+        name: Lane participant name.
+        state: The lane's activity record.
+
+    Returns:
+        True when a published takeover fenced the session to be resumed.
+    """
+    from agent_parley import recovery
+
+    session = str(state.get("resumable_session", state.get("session_id")) or "")
+    return bool(
+        session
+        and recovery.stale_session(directory, name, {"session_id": session})
+    )
+
+
 def wake(
     home: Path,
     directory: Path,
@@ -5658,6 +5926,17 @@ def wake(
     and an idle one is still asked for a turn, so a store
     that has not seeded the record never silences a wake. A reading that
     would record nothing leaves the presence reading as it is.
+
+    A recorded state can be wrong about the process, so before resuming a
+    lane its record calls stopped or dead the session lock is probed with
+    `session_held`. A launcher that still holds it is asked for a turn over
+    its wake socket instead, and a resume is spawned only once nothing holds
+    the lock. When the socket does not answer either, the wake is recorded
+    as `SESSION_HELD`, a busy refusal that spends no attempt and that
+    `status` and `problems` report, rather than as a requested resume the
+    lock would refuse. A session whose ownership generation a published
+    takeover fenced is never resumed; the wake is recorded as needing
+    manual attention, because that session can only end its turn.
 
     The attempt bound counts wakes without progress. Each attempt records the
     lane's progress marker from `_lane_activity`: its `HEAD` moves, the state
@@ -5710,6 +5989,9 @@ def wake(
     A lane whose record `settle_reboot` stopped on a host restart is not
     woken or resumed either, because the resume would reset the silence its
     claims and leases are judged on; `participant restart` brings it back.
+    A lane the operator ended with `participant stop` is not woken or resumed
+    until its next launch clears the stop, so a stop is not undone within one
+    sweep and the operator's own `run` does not meet a service-held lock.
     """
     participant = manifest["participants"][name]
     if (
@@ -5725,10 +6007,12 @@ def wake(
     recorded = condition(home, root, name)
     if lanes.rebooted(recorded):
         return
+    path = directory / f"{name}-activity.json"
+    state = json.loads(path.read_text()) if path.exists() else {}
+    if state.get("operator_stopped"):
+        return
     stopped = False
     if recorded is None:
-        path = directory / f"{name}-activity.json"
-        state = json.loads(path.read_text()) if path.exists() else {}
         if rebooted(state):
             return
         label = str(state.get("activity", ""))
@@ -5888,7 +6172,15 @@ def wake(
             result = "busy:stale"
         elif observed["process_alive"]:
             result = terminal.request(directory, name)
-        elif (observed["process_alive"] is False or stopped) and session:
+        elif session_held(directory, name):
+            result = terminal.request(directory, name)
+            if result == "unavailable":
+                result = SESSION_HELD
+        elif (
+            (observed["process_alive"] is False or stopped)
+            and session
+            and not _fenced(directory, name, state)
+        ):
             entry = roster.provider(home, participant["provider"])
             if entry["adapter"] in roster.ADAPTERS and not entry.get(
                 "require_env"

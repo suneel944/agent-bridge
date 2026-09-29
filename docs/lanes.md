@@ -47,7 +47,10 @@ runs only when a lane is created, never on a resume, and `participant add` runs
 it as well. `AGENT_PARLEY_BASE` names the base checkout while it runs, so the
 command can copy a file Git does not track. A non-zero exit refuses the launch
 and reports the exit status with the tail of the output; the worktree is left in
-place so you can see what happened.
+place so you can see what happened. Like `verify set`, `init set` runs only from
+an operator shell in the base checkout: it refuses inside an assigned worktree
+and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
+a command every later lane runs. `init show` stays readable from a lane.
 
 ## Steering a lane
 
@@ -91,10 +94,10 @@ agent-parley participant restart claude-2   # start it again in its worktree
 
 A paused lane keeps its session, its claims and its reservations. Only acting is
 refused: every coordination call and every tool use comes back denied naming the
-operator, and `top` shows `paused`. `stop` tells the lane once, then signals the
-recorded session process exactly as a normal exit does, sends `SIGKILL` to one
-that ignores it, and never signals a process whose recorded identity no longer
-matches. `restart` refuses while a current session is alive, and ends a wedged
+operator, and `top` shows `paused`. `stop` mails the lane nothing, because only the
+next session would read it, as an order to end; it signals the recorded session
+process exactly as a normal exit does, sends `SIGKILL` to one that ignores it,
+and never signals a process whose recorded identity no longer matches. `restart` refuses while a current session is alive, and ends a wedged
 one first: a live process whose evidence is stale past `inactive_after`, such
 as a client left in a native dialog. It refuses a lane that is off its assigned
 branch. Uncommitted work stays in place; when there is any, the lane's claims
@@ -110,7 +113,11 @@ A lane whose work has landed does not need removing by hand. The service sweeps
 merged lanes that hold no work, and the worktrees lanes made, at most every 900
 seconds. `agent-parley gc` reports the same sweep on demand, `gc --apply`
 removes what it may, and `--force` also removes a lane-made worktree holding
-uncommitted or unpushed work after writing a recovery checkpoint of it. The
+uncommitted or unpushed work after writing a recovery checkpoint of it. A quiet
+lane-made worktree whose unpushed commits already landed through another branch
+is bundled into a checkpoint and removed without `--force`; a lane's own
+worktree with unpushed commits is still kept. A worktree holding ignored files
+is kept even with `--force`, because no checkpoint carries them. The
 conditions are in [Operations](operations.md#reclaiming-landed-lanes). An
 attached `run` titles its terminal tab with the lane name, its state and its
 claim progress, and `agent-parley title` prints the same line for a native
@@ -219,7 +226,9 @@ no peer reservation covers a changed path. The merge is the
 `participant merge` step with the same locks, approvals and gate, and every
 attempt records a decision in the lane's report log. It never pushes, never
 repairs an unverified integration, and the service never runs it on its own:
-it is an operator command. The full policy is in
+it is an operator command. A lane holding several claims integrates its only
+ready one; when several are ready, name one with `--issue N`, which
+`participant merge NAME` accepts too. The full policy is in
 [Operations](operations.md#requiring-a-recorded-approval).
 
 ## Revising the plan
@@ -345,8 +354,9 @@ one, and `history participant NAME --kind approval` lists the decisions with
 the rest of the chain.
 
 `approve` and `reject` run from the base checkout and refuse to run inside an
-assigned worktree, so no lane records the approval of its own work through
-these commands. That is this tool's command-line boundary and not an
+assigned worktree, or with a lane's `AGENT_PARLEY_TOKEN` in the environment
+even after changing directory to the base checkout, so no lane records the
+approval of its own work through these commands. That is this tool's command-line boundary and not an
 operating-system one: a program running as you can write coordination state
 directly. The decision also records that a human decided, not that the code is
 correct; the verification command, the attribution scan and GitHub's own

@@ -88,7 +88,7 @@ class ClaimsMixin(ReportsMixin):
         _, directory = self.project(repo)
         data = roster.read(directory)
         root = Path(data["root"]).resolve()
-        if repo.resolve() != root or roster.caller_lane(data):
+        if repo.resolve() != root or roster.from_lane(data):
             raise BridgeError(
                 "Live recovery approval must be recorded from the project "
                 "base checkout."
@@ -193,7 +193,7 @@ class ClaimsMixin(ReportsMixin):
         if (
             action == "unblock"
             and lane == Path(data["root"]).resolve()
-            and not roster.caller_lane(data)
+            and not roster.from_lane(data)
         ):
             agent = roster.OPERATOR
         else:
@@ -243,7 +243,8 @@ class ClaimsMixin(ReportsMixin):
                 takeover = recovery.prepare_takeover(
                     directory, data, agent, parse_issue(number)
                 )
-                recovery.preflight(directory, repo, takeover["checkpoint"])
+                if takeover["checkpoint"]:
+                    recovery.preflight(directory, lane, takeover["checkpoint"])
         try:
             record = change(
                 directory,
@@ -279,7 +280,7 @@ class ClaimsMixin(ReportsMixin):
             from agent_parley import recovery
 
             if recovery.current_take(record):
-                record = recovery.restore(directory, repo, record)
+                record = recovery.restore(directory, lane, record)
             record = self._free_orphaned(data, record)
             if not forge.assigned(repo, parse_issue(number)) and forge.assign(
                 repo, parse_issue(number)
@@ -437,7 +438,9 @@ class ClaimsMixin(ReportsMixin):
         if previous not in data["participants"]:
             return record
         checkpoint = taken.get("checkpoint") or {}
-        source_claim = str(checkpoint.get("claim_id") or "")
+        source_claim = str(
+            checkpoint.get("claim_id") or taken.get("claim_id") or ""
+        )
         new_owner = str(record.get("owner") or "")
         if new_owner not in data["participants"]:
             return record
@@ -935,7 +938,7 @@ class ClaimsMixin(ReportsMixin):
             data = roster.read(directory)
             checkout = Path(git(repo, "rev-parse", "--show-toplevel"))
             if checkout.resolve() != Path(data["root"]).resolve() or (
-                roster.caller_lane(data)
+                roster.from_lane(data)
             ):
                 raise BridgeError(
                     "Only the operator applies a plan, from the project base "
@@ -990,7 +993,7 @@ class ClaimsMixin(ReportsMixin):
         data = roster.read(directory)
         lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
         operator = lane == Path(data["root"]).resolve() and not (
-            roster.caller_lane(data)
+            roster.from_lane(data)
         )
         if action == "propose":
             by = roster.OPERATOR if operator else roster.resolve(data, lane)

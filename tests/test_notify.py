@@ -283,6 +283,40 @@ def test_a_refused_send_records_one_event_and_moves_on(tmp_path, refusing):
     assert "the bot token is rejected" in recorded[0]["cause"]
 
 
+def test_a_refused_send_is_sent_again_on_the_next_observation(
+    tmp_path, refusing
+):
+    for _ in range(2):
+        assert notify.deliver(
+            tmp_path, "codex", notify.Event.RUN_FINISHED, {"session": "s1"}
+        )
+        notify.drain()
+    assert not (tmp_path / "codex-notify.json").exists()
+
+
+def test_a_send_abandoned_by_an_exiting_process_is_not_marked(
+    tmp_path, monkeypatch
+):
+    started = []
+    monkeypatch.setitem(
+        notify.TRANSPORTS,
+        "fake",
+        lambda config, subject, body: started.append(subject),
+    )
+    monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "fake")
+    monkeypatch.setattr(notify, "_SENDING", set())
+    monkeypatch.setattr(notify, "_THREADS", [])
+    monkeypatch.setattr(notify.threading.Thread, "start", lambda self: None)
+    assert notify.deliver(
+        tmp_path, "codex", notify.Event.RUN_FINISHED, {"session": "s1"}
+    )
+    assert not notify.deliver(
+        tmp_path, "codex", notify.Event.RUN_FINISHED, {"session": "s1"}
+    )
+    assert not (tmp_path / "codex-notify.json").exists()
+    assert started == []
+
+
 def test_the_test_message_reports_each_transport(tmp_path, fake):
     report = notify.probe("demo")
     assert report["root"] == "demo"

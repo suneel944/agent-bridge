@@ -89,6 +89,7 @@ BODY_FIELDS = (
 
 _THREADS: list[threading.Thread] = []
 _THREADS_LOCK = threading.Lock()
+_SENDING: set[tuple[str, str, str, str]] = set()
 
 
 def enabled() -> bool:
@@ -414,14 +415,16 @@ def send(config: dict, subject: str, body: str) -> list[dict]:
     return results
 
 
-def _claim(
+def _pending(
     directory: Path, agent: str, event: Event, fields: Mapping[str, object]
-) -> bool:
-    """Records that one situation has notified, and reports whether it is new.
+) -> str:
+    """Reports the digest of one situation that has not notified yet.
 
     The lane's notification marker holds a digest per event, so a situation
     that has not changed sends nothing further. The marker mirrors the
     checkpoint's own suppression of unchanged state and carries no secret.
+    Reading it claims nothing: only `_mark`, after a send succeeds, records
+    the situation as notified.
 
     Args:
         directory: Private project state directory.
@@ -430,7 +433,8 @@ def _claim(
         fields: Situation fields the event's key is taken from.
 
     Returns:
-        True when the situation is new and the caller should send.
+        The situation's digest when it still has to notify, or an empty
+        string when it already did or the marker cannot be read.
     """
     key = "\x00".join(str(fields.get(name, "")) for name in KEY_FIELDS[event])
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
@@ -438,28 +442,57 @@ def _claim(
     try:
         with lock(directory / f"{agent}-notify.lock", timeout=1):
             sent = json.loads(path.read_text()) if path.exists() else {}
-            if sent.get(event.value) == digest:
-                return False
+    except (OSError, ValueError, BridgeError):
+        return ""
+    return "" if sent.get(event.value) == digest else digest
+
+
+def _mark(directory: Path, agent: str, event: Event, digest: str) -> None:
+    """Records one situation as notified after every transport accepted it.
+
+    Args:
+        directory: Private project state directory.
+        agent: Lane the notification reports on.
+        event: Notification that was sent.
+        digest: Digest `_pending` returned for the sent situation.
+    """
+    path = directory / f"{agent}-notify.json"
+    try:
+        with lock(directory / f"{agent}-notify.lock", timeout=1):
+            sent = json.loads(path.read_text()) if path.exists() else {}
             sent[event.value] = digest
             write_json(path, sent)
     except (OSError, ValueError, BridgeError):
-        return False
-    return True
+        return
 
 
 def _report(
-    directory: Path, agent: str, config: dict, text: tuple[str, str]
+    directory: Path,
+    agent: str,
+    config: dict,
+    text: tuple[str, str],
+    sending: tuple[str, str, str, str],
 ) -> None:
-    """Sends one composed message and records every transport that failed.
+    """Sends one composed message and records its outcome.
+
+    Every transport that failed is recorded as a lane event. The situation
+    is marked notified only when every transport accepted the message, so a
+    failed send, and a send abandoned when its process exited, is attempted
+    again the next time the situation is observed.
 
     Args:
         directory: Private project state directory.
         agent: Lane the notification reports on.
         config: Resolved notification configuration.
         text: The composed subject and body.
+        sending: Key of this send among the process's sends in flight.
     """
-    for result in send(config, text[0], text[1]):
-        if not result["ok"]:
+    try:
+        failed = False
+        for result in send(config, text[0], text[1]):
+            if result["ok"]:
+                continue
+            failed = True
             checkpoints.record(
                 directory,
                 agent,
@@ -469,6 +502,11 @@ def _report(
                 "notifying",
                 f"{result['transport']}: {result['error']}",
             )
+        if not failed:
+            _mark(directory, agent, Event(sending[2]), sending[3])
+    finally:
+        with _THREADS_LOCK:
+            _SENDING.discard(sending)
 
 
 def deliver(
@@ -479,7 +517,11 @@ def deliver(
     The send runs on its own thread, so a hook decision or a supervision
     sweep never waits on a network round trip. The thread is a daemon: a
     short-lived hook process that exits first abandons the send rather than
-    holding its agent, which is the trade the best-effort contract names.
+    holding its agent past the hook budget. An abandoned or failed send
+    leaves the situation unmarked, so the next observation of it sends
+    again; a send still in flight in this process suppresses a repeat. Two
+    processes observing one situation at once can each send it, which is
+    the price of never losing a notification to an early exit.
 
     Args:
         directory: Private project state directory.
@@ -498,17 +540,24 @@ def deliver(
     if not enabled():
         return ""
     config = settings()
-    if not config["transports"] or not _claim(directory, agent, event, fields):
+    if not config["transports"]:
         return ""
+    digest = _pending(directory, agent, event, fields)
+    if not digest:
+        return ""
+    sending = (str(directory), agent, event.value, digest)
     text = compose(
         event.value, {**dict(fields), "lane": agent, "event": event.value}
     )
     thread = threading.Thread(
         target=_report,
-        args=(directory, agent, config, text),
+        args=(directory, agent, config, text, sending),
         daemon=True,
     )
     with _THREADS_LOCK:
+        if sending in _SENDING:
+            return ""
+        _SENDING.add(sending)
         _THREADS.append(thread)
     thread.start()
     return event.value

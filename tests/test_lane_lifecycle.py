@@ -23,7 +23,7 @@ from agent_parley import (
     store,
     supervision,
 )
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 SLEEPER = "import time; time.sleep(120)"
 
@@ -105,6 +105,21 @@ def test_pause_retains_claims_and_never_releases_them(bridge, repo, paired):
     ledger = cli.snapshot(lane.parent)["issues"]["7"]
     assert ledger["owner"] == "claude"
     assert "already paused" in bridge.pause(repo, "claude")
+
+
+def test_retire_refuses_a_busy_lane_before_removing_anything(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    with lock(directory / "claude-checkpoint.lock"):
+        with pytest.raises(LockBusy):
+            bridge.retire(repo, "claude")
+    assert lane.is_dir()
+    participant = roster.read(directory)["participants"]["claude"]
+    assert cli.has_branch(repo, participant["branch"])
+    assert "Retired claude." in bridge.retire(repo, "claude")
+    assert not lane.exists()
 
 
 def test_top_reports_a_paused_lane(bridge, repo, paired, capsys):
@@ -268,6 +283,57 @@ def test_restart_ends_a_wedged_session_before_launching(
         child.wait(10)
 
 
+def lane_actor(bridge, paired, name):
+    """Registers one lane so operator mail reaches its inbox."""
+    store.initialize(bridge.home)
+    return store.authenticate(
+        bridge.home,
+        store.register(bridge.home, paired["root"], name)["registration_token"],
+    )
+
+
+def unread_bodies(bridge, actor):
+    """Returns the bodies waiting in a lane's inbox."""
+    inbox = store.call(
+        bridge.home, actor, "fetch_inbox", {"include_bodies": True}
+    )
+    return [message.get("body_md", "") for message in inbox["messages"]]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_stopped_or_restarted_lane_reads_no_stale_stop_notice(
+    bridge, repo, paired, monkeypatch, restart
+):
+    directory = Path(paired["lanes"]["claude"]).parent
+    actor = lane_actor(bridge, paired, "claude")
+    captured = capture_launch(bridge, monkeypatch)
+    child = subprocess.Popen([sys.executable, "-c", SLEEPER])
+    try:
+        write_json(
+            directory / "claude-activity.json",
+            {
+                "activity": "waiting for approval",
+                "updated": 1.0,
+                "session_pid": child.pid,
+                "session_ticks": process.start_ticks(child.pid),
+            },
+        )
+        if restart:
+            assert bridge.restart(repo, "claude") == 0
+            assert captured[0][0] == "claude"
+        else:
+            assert "ended from the base checkout" in bridge.stop(repo, "claude")
+        assert child.wait(10) is not None
+        assert not any(
+            "operator is ending" in body
+            for body in unread_bodies(bridge, actor)
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(10)
+
+
 def test_stop_kills_a_session_that_ignores_sigterm(
     bridge, repo, paired, monkeypatch
 ):
@@ -345,6 +411,34 @@ def test_a_reboot_marks_the_lane_stopped_orphaned_and_restartable(
     assert captured[0][0] == "claude"
 
 
+def test_a_reboot_leaves_a_session_recorded_in_the_new_boot_live(
+    bridge, paired, monkeypatch
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    manifest = roster.read(directory)
+    write_json(
+        directory / "claude-activity.json",
+        {
+            "activity": "working",
+            "updated": time.time(),
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+            "session_boot": "new",
+        },
+    )
+    write_json(directory / supervision.BOOT_RECORD, {"boot_id": "old"})
+    monkeypatch.setattr(process, "boot_id", lambda: "new")
+    home = bridge.home
+    assert supervision.settle_reboot(home, directory, manifest) == []
+    state = json.loads((directory / "claude-activity.json").read_text())
+    assert state["activity"] == "working"
+    assert not supervision.rebooted(state)
+    assert supervision.presence(directory, "claude")["process_alive"] is True
+    record = json.loads((directory / supervision.BOOT_RECORD).read_text())
+    assert record["boot_id"] == "new"
+
+
 def test_restart_replays_initialization_and_launches_the_same_provider(
     bridge, repo, paired, monkeypatch, tmp_path
 ):
@@ -387,3 +481,34 @@ def test_a_non_boolean_paused_setting_is_refused(bridge, repo, paired):
     write_json(directory / "project.json", manifest)
     with pytest.raises(BridgeError, match="paused setting must be a boolean"):
         roster.read(directory)
+
+
+def test_darwin_boot_id_ignores_the_timezone_of_its_local_time(monkeypatch):
+    printed = iter(
+        (
+            "{ sec = 1790578800, usec = 0 } Sun Sep 28 09:00:00 2026",
+            "{ sec = 1790578800, usec = 0 } Sun Sep 28 18:30:00 2026",
+        )
+    )
+    monkeypatch.setattr(
+        process.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=next(printed) + "\n"
+        ),
+    )
+    assert process.darwin_boot_id() == "1790578800"
+    assert process.darwin_boot_id() == "1790578800"
+
+
+def test_a_darwin_boot_record_in_the_old_form_is_the_same_boot(
+    bridge, paired, monkeypatch
+):
+    directory = Path(paired["lanes"]["claude"]).parent
+    manifest = json.loads((directory / "project.json").read_text())
+    write_json(
+        directory / supervision.BOOT_RECORD,
+        {"boot_id": "{ sec = 1790578800, usec = 0 } Sun Sep 28 09:00:00 2026"},
+    )
+    monkeypatch.setattr(process, "boot_id", lambda: "1790578800")
+    assert supervision.settle_reboot(bridge.home, directory, manifest) == []

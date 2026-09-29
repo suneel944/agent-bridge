@@ -27,7 +27,7 @@ from agent_parley import (
     roster,
     store,
 )
-from agent_parley.issues import describe, snapshot
+from agent_parley.issues import deadline_notice, describe, snapshot
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 MAX_CONTEXT_BYTES = 1536
@@ -172,6 +172,7 @@ class Reason(StrEnum):
     SESSION_MISMATCH = "session_mismatch"
     BRANCH_OK = "branch_ok"
     BRANCH_RESTORE = "branch_restore"
+    BRANCH_REBASE = "branch_rebase"
     BRANCH_DRIFT = "branch_drift"
     BRANCH_SWITCH = "branch_switch"
     OBSERVED = "observed"
@@ -205,6 +206,8 @@ UNOBSERVED = frozenset(
         Reason.SESSION_MISMATCH,
         Reason.STALE_GENERATION,
         Reason.SUPERSEDED,
+        Reason.WAKE_REQUESTED,
+        Reason.NOTIFICATION_FAILED,
     }
 )
 
@@ -868,6 +871,24 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
     return False
 
 
+def _subcommand(words: list[str]) -> list[str]:
+    """Drops the root options that precede an agent-parley subcommand.
+
+    The launch protocol teaches lanes the ``agent-parley --home HOME``
+    form, so the root options and the ``--home`` value are skipped before
+    the subcommand is read.
+
+    Args:
+        words: Shell words that follow the agent-parley program name.
+
+    Returns:
+        The words from the subcommand onwards.
+    """
+    while words and words[0].startswith("-"):
+        words = words[2:] if words[0] == "--home" else words[1:]
+    return words
+
+
 def lifts_run_budget(payload: dict, depth: int = 2) -> bool:
     """Reports whether a native tool command changes the run budget.
 
@@ -891,11 +912,15 @@ def lifts_run_budget(payload: dict, depth: int = 2) -> bool:
     command = str(tool_input.get("command", tool_input.get("cmd", "")))
     for segment in shell_segments(command):
         for index, word in enumerate(segment):
-            if Path(word).name in {"agent-parley", "agent_parley"} and (
-                segment[index + 1 : index + 2] == ["budget"]
+            rest = _subcommand(segment[index + 1 :])
+            if Path(word).name in {
+                "agent-parley",
+                "agent_parley",
+                "agent_parley.cli",
+            } and (
+                rest[:1] == ["budget"]
                 and any(
-                    argument in {"enforce", "resume"}
-                    for argument in segment[index + 2 :]
+                    argument in {"enforce", "resume"} for argument in rest[1:]
                 )
             ):
                 return True
@@ -938,10 +963,7 @@ def option_values(args: list[str], options: tuple[str, ...]) -> list[str]:
         options: Option names whose value carries publishable text.
 
     Returns:
-        Every value those options were given, in the order they appear. A
-        value supplied through a file is not collected, because the hook reads
-        the command line rather than the file system; integration still scans
-        the commit that value produced.
+        Every value those options were given, in the order they appear.
     """
     values: list[str] = []
     index = 0
@@ -969,12 +991,44 @@ def option_values(args: list[str], options: tuple[str, ...]) -> list[str]:
 
 
 MESSAGE_OPTIONS = {
-    "commit": ("-m", "--message"),
+    "commit": ("-m", "--message", "--trailer"),
     "merge": ("-m", "--message"),
     "tag": ("-m", "--message"),
     "revert": ("-m", "--message"),
 }
+MESSAGE_FILES = {
+    "commit": ("-F", "--file"),
+    "merge": ("-F", "--file"),
+    "tag": ("-F", "--file"),
+}
 PULL_REQUEST_OPTIONS = ("-t", "--title", "-b", "--body")
+PULL_REQUEST_FILES = ("-F", "--body-file")
+MESSAGE_FILE_LIMIT = 65536
+
+
+def message_files(base: Path, names: list[str]) -> list[str]:
+    """Reads the message files a command names, as it would publish them.
+
+    Args:
+        base: Directory a relative file name resolves against.
+        names: File names given to a message file option.
+
+    Returns:
+        The leading bytes of every file that could be read, decoded
+        leniently. Standard input and unreadable names yield nothing.
+    """
+    texts = []
+    for name in names:
+        if name == "-":
+            continue
+        try:
+            with (base / name).open("rb") as handle:
+                texts.append(
+                    handle.read(MESSAGE_FILE_LIMIT).decode(errors="replace")
+                )
+        except OSError:
+            continue
+    return texts
 
 
 def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
@@ -983,8 +1037,8 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
     A lane reaches Git and the forge through its own tools, so the text that
     would land in a commit, a merge, a tag or a pull request is inspected
     where the agent asks for it, before anything is written. The check reads
-    the command line only: it runs nothing, writes nothing and never consults
-    the network.
+    the command line and the message files it names: it runs nothing, writes
+    nothing and never consults the network.
 
     Args:
         payload: Native lifecycle hook payload.
@@ -1006,14 +1060,23 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
         texts: list[str] = []
         if Path(words[0]).name == "gh":
             if words[1:3] == ["pr", "create"] and cwd.is_relative_to(lane):
-                texts = option_values(words[3:], PULL_REQUEST_OPTIONS)
+                texts = option_values(
+                    words[3:], PULL_REQUEST_OPTIONS
+                ) + message_files(
+                    cwd, option_values(words[3:], PULL_REQUEST_FILES)
+                )
         else:
             action = git_action(segment, cwd)
             if action is None:
                 continue
             target, subcommand, args = action
             if subcommand in MESSAGE_OPTIONS and target.is_relative_to(lane):
-                texts = option_values(args, MESSAGE_OPTIONS[subcommand])
+                texts = option_values(
+                    args, MESSAGE_OPTIONS[subcommand]
+                ) + message_files(
+                    target,
+                    option_values(args, MESSAGE_FILES.get(subcommand, ())),
+                )
         for text in texts:
             rule = policy.matched_rule(text)
             if rule:
@@ -1596,6 +1659,34 @@ def _git_directory(lane: Path) -> Path | None:
     return directory if directory.is_absolute() else lane / directory
 
 
+def rebasing_branch(lane: Path) -> str:
+    """Names the branch an in-progress rebase will end on, if any.
+
+    Git detaches ``HEAD`` while a rebase runs and records the branch it
+    started from in ``rebase-merge/head-name`` or ``rebase-apply/head-name``
+    of the checkout's administrative directory. Both ``--continue`` and
+    ``--abort`` return to that branch.
+
+    Args:
+        lane: Assigned bridge worktree.
+
+    Returns:
+        The rebased branch name, or an empty string when no rebase of a
+        local branch is in progress or its metadata is unreadable.
+    """
+    directory = _git_directory(lane)
+    if directory is None:
+        return ""
+    for state in ("rebase-merge", "rebase-apply"):
+        try:
+            head = (directory / state / "head-name").read_text().strip()
+        except (OSError, ValueError):
+            continue
+        if head.startswith("refs/heads/"):
+            return head.removeprefix("refs/heads/")
+    return ""
+
+
 def head_moves(lane: Path) -> int:
     """Measures how often a lane's ``HEAD`` has moved, without running Git.
 
@@ -1834,6 +1925,29 @@ def branch_guard(
         exact repair command remains available after drift.
     """
     actual = current_branch(lane)
+    if actual == "<detached HEAD>" and rebasing_branch(lane) == expected:
+        message = (
+            f"Agent Parley lane is rebasing {expected!r}. Finish with "
+            "`git rebase --continue` or undo with `git rebase --abort` "
+            "before ending the turn."
+        )
+        if event == "PreToolUse":
+            return None, Reason.BRANCH_REBASE
+        if event == "Stop":
+            if payload.get("stop_hook_active"):
+                return {}, Reason.BRANCH_REBASE
+            return {
+                "decision": "block",
+                "reason": message,
+            }, Reason.BRANCH_REBASE
+        if event != "SessionEnd":
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": message,
+                }
+            }, Reason.BRANCH_REBASE
+        return {}, Reason.BRANCH_REBASE
     if actual != expected:
         missing = not branch_exists(lane, expected)
         rename_from = actual if missing and actual != "<detached HEAD>" else ""
@@ -2556,9 +2670,15 @@ def checkpoint(
         if (new_session and not seeded) or (event == "SessionStart" and ended):
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
+            state.pop("session_boot", None)
             state.pop("session_started", None)
         state.update(session_id=session, updated=time.time(), event=event)
         if session_process is not None:
+            if "session_boot" not in state or (
+                state.get("session_pid"),
+                state.get("session_ticks"),
+            ) != (session_process.pid, session_process.ticks):
+                state["session_boot"] = process.boot_id()
             state["session_pid"] = session_process.pid
             state["session_ticks"] = session_process.ticks
         if session:
@@ -2704,9 +2824,9 @@ def checkpoint(
                             and not item["handoff_prompt"].get("responded_at")
                         ]
                         reminders += [
-                            item["deadline_notice"]["text"]
+                            notice["text"]
                             for item in issues["issues"].values()
-                            if (notice := item.get("deadline_notice"))
+                            if (notice := deadline_notice(item))
                             and (
                                 notice["holder"] == agent
                                 or agent in notice.get("waiting", [])
@@ -2969,27 +3089,39 @@ def recover(
     agent: str,
     payload: dict,
     timeout: float = LOCK_SECONDS,
+    evidence: dict | None = None,
 ) -> bool:
     """Writes the recovery checkpoint a decision left for after its reply.
 
-    It holds the lane's checkpoint lock, as the decision did, so it never
-    interleaves with another event's record. A session whose ownership
-    generation was transferred meanwhile writes nothing, because its
-    worktree no longer backs the claims. The activity file is rewritten
+    The capture itself runs outside the lane's checkpoint lock, under the
+    capture lock `recovery.capture` takes, because Git over a large
+    worktree outlasts the one-second wait every hook decision has for the
+    checkpoint lock. The checkpoint lock is held only to check the session
+    generation before the capture and to record its outcome after it, so
+    the record never interleaves with another event's. A session whose
+    ownership generation was transferred before either check writes
+    nothing, because its worktree no longer backs the claims. A capture
+    another caller is already running raises `LockBusy` rather than
+    recording an error. The activity file is rewritten
     only when the checkpoint ids or the error changed, and never created,
-    so an unchanged tree adds no write after the reply.
+    so an unchanged tree adds no write after the reply. Gate evidence from
+    ``evidence`` is dropped when its session was fenced, as that session's
+    own capture would have written nothing.
 
     Args:
         directory: Common project state directory.
         agent: Assigned native lane name.
         payload: Native lifecycle event the decision observed.
         timeout: Seconds to wait for the lane's checkpoint lock.
+        evidence: Earlier event carried by `merge_recovery` whose gate
+            evidence is recorded when ``payload`` ran no gate command.
 
     Returns:
         Whether a checkpoint was attempted.
 
     Raises:
-        LockBusy: If the lane's checkpoint lock stays held.
+        LockBusy: If the lane's checkpoint lock stays held, or another
+            capture of the lane holds its capture lock.
         BridgeError: If the project manifest cannot be read.
         OSError: If the activity file cannot be read or written.
     """
@@ -2999,14 +3131,21 @@ def recover(
     with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
         if recovery.stale_session(directory, agent, payload):
             return False
-        manifest = roster.read(directory)
-        try:
-            saved = recovery.capture(directory, manifest, agent, payload)
-            outcome: dict = {
-                "recovery_checkpoints": [item["id"] for item in saved]
-            }
-        except (BridgeError, OSError, ValueError) as exc:
-            outcome = {"recovery_error": clip(str(exc), MAX_CAUSE_BYTES)}
+        if evidence is not None and recovery.stale_session(
+            directory, agent, evidence
+        ):
+            evidence = None
+    manifest = roster.read(directory)
+    try:
+        saved = recovery.capture(directory, manifest, agent, payload, evidence)
+        outcome: dict = {"recovery_checkpoints": [item["id"] for item in saved]}
+    except LockBusy:
+        raise
+    except (BridgeError, OSError, ValueError) as exc:
+        outcome = {"recovery_error": clip(str(exc), MAX_CAUSE_BYTES)}
+    with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
+        if recovery.stale_session(directory, agent, payload):
+            return False
         if not path.exists():
             return True
         state = json.loads(path.read_text())
@@ -3024,6 +3163,34 @@ def recover(
         if after != before:
             write_json(path, state)
     return True
+
+
+def merge_recovery(waiting: dict, owed: dict) -> dict:
+    """Returns one recovery request standing for a waiting and a newer one.
+
+    The newer request supplies the event the capture records. When it ran
+    no gate command, the most recent event among the requests it replaces
+    that did run one travels with it as ``evidence``, so a burst of events
+    queues one capture without losing the gate evidence an earlier one had.
+
+    Args:
+        waiting: The lane's request still waiting behind a running capture.
+        owed: The newer ``recovery`` request `serve` returned.
+
+    Returns:
+        The request to run in place of both.
+    """
+    from agent_parley import recovery
+
+    if recovery.gate_evidence(owed["payload"]):
+        return owed
+    if recovery.gate_evidence(waiting["payload"]):
+        earlier = waiting["payload"]
+    else:
+        earlier = waiting.get("evidence")
+    if earlier is None:
+        return owed
+    return {**owed, "evidence": earlier}
 
 
 def serve(

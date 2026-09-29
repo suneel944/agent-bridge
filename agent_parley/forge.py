@@ -26,6 +26,8 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+TIMELINE_PAGE = 100
+TIMELINE_PAGES = 10
 FAILED_CHECKS = frozenset(
     {
         "FAILURE",
@@ -232,12 +234,14 @@ def issue_completion(repo: Path, number: str) -> dict | None:
         number: Bare repository issue number.
 
     Returns:
-        None when the forge cannot say. Otherwise the issue state, `OPEN` or
-        `CLOSED`, and for a closed issue the instant it closed in Unix
-        seconds, together with the closing pull request's state, number,
-        URL, head branch and merge commit, each empty when no pull request
-        is linked or it cannot be read. A closing pull request that merged
-        reports the state `MERGED`.
+        None when the forge cannot say, including when a linked closing
+        pull request cannot be read, since a closed issue whose pull request
+        is unknown must not read as closed without merging. Otherwise the
+        issue state, `OPEN` or `CLOSED`, and for a closed issue the instant
+        it closed in Unix seconds, together with the closing pull request's
+        state, number, URL, head branch and merge commit, each empty when no
+        pull request is linked. A closing pull request that merged reports
+        the state `MERGED`.
     """
     if _implementation(repo) != "github":
         return None
@@ -297,15 +301,16 @@ def issue_completion(repo: Path, number: str) -> dict | None:
     )
     try:
         request = json.loads(pull or "null")
+        state = str(request["state"]).upper()
         reading.update(
-            state="MERGED" if request.get("state") == "MERGED" else "CLOSED",
+            state="MERGED" if state == "MERGED" else "CLOSED",
             pull_request=int(request.get("number") or 0),
             url=str(request.get("url") or ""),
             branch=str(request.get("headRefName") or ""),
             commit=str((request.get("mergeCommit") or {}).get("oid") or ""),
         )
-    except (ValueError, TypeError, AttributeError):
-        reading["pull_request"] = max(linked)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
     return reading
 
 
@@ -325,24 +330,36 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
         number: Bare repository issue number.
         closed_at: Instant the issue closed, in Unix seconds.
 
+    An issue worked by several lanes collects labels, assignments and
+    progress comments, so its closing reference often lies past the first
+    page. The timeline is read one page of `TIMELINE_PAGE` events at a time
+    until a short page ends it, for at most `TIMELINE_PAGES` pages, so one
+    reading stays bounded however long the timeline grows.
+
     Returns:
         The matching pull request numbers, empty when none match or the
         timeline cannot be read.
     """
-    output = _run(
-        [
-            "gh",
-            "api",
-            f"repos/{project}/issues/{number}/timeline?per_page=100",
-        ],
-        5,
-    )
     keyword = re.compile(
         rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{number}\b",
         re.IGNORECASE,
     )
     try:
-        events = json.loads(output or "[]")
+        events = []
+        for page in range(1, TIMELINE_PAGES + 1):
+            output = _run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{project}/issues/{number}/timeline"
+                    f"?per_page={TIMELINE_PAGE}&page={page}",
+                ],
+                5,
+            )
+            batch = json.loads(output or "[]")
+            events.extend(batch)
+            if len(batch) < TIMELINE_PAGE:
+                break
         found = []
         for event in events:
             if event.get("event") != "cross-referenced":

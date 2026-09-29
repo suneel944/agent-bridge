@@ -1017,6 +1017,17 @@ def test_the_shell_client_asks_for_a_timeout_bash_3_2_accepts(bridge):
     assert '\\"hook_pid\\":$AGENT_PARLEY_HOOK_PID' in script.read_text()
 
 
+def test_rewriting_the_client_leaves_a_reader_the_whole_old_script(bridge):
+    script = Path(hook.write_client(str(bridge.home), sys.executable))
+    old = script.read_text()
+    with script.open() as reader:
+        hook.write_client(str(bridge.home), "/opt/other/python3")
+        assert reader.read() == old
+    assert "/opt/other/python3" in script.read_text()
+    assert script.stat().st_mode & 0o777 == 0o755
+    assert [path.name for path in script.parent.glob("*.tmp")] == []
+
+
 @pytest.mark.skipif(not shutil.which("bash"), reason="requires bash")
 def test_the_launcher_configures_the_shell_client(bridge, repo, paired):
     lane = Path(paired["lanes"]["codex"])

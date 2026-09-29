@@ -239,7 +239,9 @@ reported.
                 the participant already has a launcher, or the repository
                 lies on a mounted Windows drive under WSL, or the lane's
                 checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`, or the
-                project's enforced run budget is exhausted.
+                project's enforced run budget is exhausted, or the lane
+                retired while the launch waited for that lock, since a
+                retirement removes the worktree under the same lock.
         """
         from agent_parley.cli import (
             COPILOT_EVENTS,
@@ -312,8 +314,13 @@ reported.
             )
         import asyncio
 
+        from agent_parley.merges import launch_busy
+
         lane = Path(participant["lane"])
-        with lock(lane.parent / f"{agent}.session.lock"):
+        with lock(
+            lane.parent / f"{agent}.session.lock",
+            launch_busy(lane.parent, agent),
+        ):
             self.up()
             identity = asyncio.run(self.identity(agent, data))
             prompt = self.protocol(agent, data)
@@ -480,6 +487,14 @@ reported.
                 lane.parent / f"{agent}-checkpoint.lock",
                 timeout=LAUNCH_LOCK_SECONDS,
             ):
+                if roster.retired(
+                    roster.read(lane.parent)["participants"].get(agent, {})
+                ):
+                    raise BridgeError(
+                        f"{agent} retired while this launch was starting; "
+                        f"re-admit it with agent-parley participant add "
+                        f"{agent} before launching it."
+                    )
                 previous = (
                     json.loads(activity_path.read_text())
                     if activity_path.exists()
@@ -499,6 +514,16 @@ reported.
                             "No usable native session to resume; "
                             "launch manually."
                         )
+                    from agent_parley import recovery
+
+                    if recovery.stale_session(
+                        lane.parent, agent, {"session_id": session}
+                    ):
+                        raise BridgeError(
+                            f"Session {session} lost its claim to a "
+                            "takeover and cannot resume; launch a new "
+                            "session without --resume."
+                        )
                     if entry["adapter"] == "codex":
                         command[1:1] = ["resume", session]
                     elif entry["adapter"] == "opencode":
@@ -516,11 +541,14 @@ reported.
                     cursor=0,
                     session_pid=os.getpid(),
                     session_ticks=process.start_ticks(os.getpid()),
+                    session_boot=process.boot_id(),
                     launcher_pid=os.getpid(),
                     launcher_ticks=process.start_ticks(os.getpid()),
                     session_started=time.time(),
+                    attached=sys.stdin.isatty(),
                 )
                 previous.pop("last_prompt", None)
+                previous.pop("operator_stopped", None)
                 write_json(activity_path, previous)
             with contextlib.suppress(sqlite3.OperationalError):
                 with store.connect(self.home, write=True) as db:

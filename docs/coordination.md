@@ -10,7 +10,9 @@ the repository. [Running lanes](lanes.md) covers the operator side, and
 No process exit hands an issue to another lane: a peer gets it only by a claim
 or an accepted offer. The one timed path is the overdue and idle-claim sequence
 below, which offers a claim and then returns it to the pool. `agent-parley
-status` reports who owns what, which handoff is waiting on an offer ID, and any
+status` reports the open work of the project the working directory belongs to,
+or of every project with `--all-projects`, and `--all` adds claims that ended
+on the forge: who owns what, which handoff is waiting on an offer ID, and any
 lane that left its assigned branch. An owner can record that one issue waits on
 another with `agent-parley issue block 42 --on 17`; the listing then names who
 holds the blocking issue, and every lane sees the change at its next
@@ -18,7 +20,8 @@ checkpoint. A dependency never stops a claim, but it keeps the issue out of the
 unclaimed work lanes are shown, and `report ready` and a verified completion
 refuse while a dependency is incomplete. A block on an unrecorded issue or one
 that would form a cycle is refused, and the supervisor drops an edge once its
-blocker is complete or no longer recorded.
+blocker is complete, was released after it ended on the forge, or is no longer
+recorded.
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-issues.svg" width="880" alt="agent-parley issue list showing an issue that waits on another, the participant holding it, and a pending handoff with its offer ID">
@@ -149,8 +152,9 @@ A lane whose state record reads `dead` has its claims marked `orphaned` in
 gone, when its session ended cleanly with `SessionEnd`, or after a host
 restart, so a lane that exited on purpose is marked like one that crashed. The
 marker states what was observed: an idle lane with a live process is never
-marked, however long it has been quiet. Every other lane receives one notice
-naming the orphaned issues and the reservations that lane still holds.
+marked, however long it has been quiet. Each lane that could take the work
+receives one notice naming the orphaned issues and the reservations the dead
+lane still holds; a lane that is itself dead, reclaimed or retired is left out.
 
 Ownership does not move on the marker. A peer takes the work explicitly, and
 the take records the previous owner and the reason, then moves the

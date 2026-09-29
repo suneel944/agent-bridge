@@ -10,11 +10,15 @@ Repository installation does not imply public directory approval. The Codex
 listing went live on 2026-09-14 at
 `https://chatgpt.com/plugins/plugins_6aa7c91c25008191ad715f14756e5deb`, and
 the submission archive has been attached to every release from v0.6.0 through
-v0.12.0; each new version still needs a manual portal upload, because neither
+v0.13.0; each new version still needs a manual portal upload, because neither
 catalog offers a publishing API. The Claude submission was made on 2026-09-14
-and was still awaiting review on 2026-09-26; a code search of
-`anthropics/claude-plugins-official` for `agent-parley` returned no match on
-that date.
+through the Console form and was still awaiting review on 2026-09-26; a code
+search of `anthropics/claude-plugins-official` for `agent-parley` returned no
+match on that date. The directory has since retired that form, and its
+pre-submission checklist blocks a plugin folder without a README, which the
+folder lacked until `plugins/agent-parley/README.md` was added for 0.14.0. The
+listing therefore needs a fresh submission through the developer portal once
+that README is on `main`.
 
 The developer lists that compare orchestrators are a separate surface from
 both catalogs, and nothing in this repository can file an entry there. On
@@ -41,8 +45,8 @@ this listing would describe.
 ### Claude plugin directory
 
 Submissions go through the
-[Console form](https://platform.claude.com/plugins/submit) or the
-[claude.ai form](https://claude.ai/admin-settings/directory/submissions/plugins/new).
+[developer portal](https://claude.ai/directory/manage). The earlier Console
+form is no longer supported, and a submission made there is not reviewed.
 The directory surfaces in Claude Code as the `claude-plugins-official`
 marketplace. [Anthropic's submission guide](https://claude.com/docs/plugins/submit)
 is authoritative for the process, and
@@ -54,11 +58,18 @@ closed-source plugins are not accepted, and the manifest must pass
 `claude plugin validate`. Identifying metadata belongs on the manifest: name,
 display name, version, description, author, homepage, repository, license and
 keywords. The repository must carry a license and a way to report problems.
+The
+[pre-submission checklist](https://claude.com/docs/plugins/pre-submission-checklist)
+also requires a README of at least 40 words, not counting code blocks, inside
+the submitted plugin folder, and treats a missing one as blocking.
+`plugins/agent-parley/README.md` meets it: it describes the `coordinate`
+skill, the separately installed command line tool, what the plugin runs and
+transmits in line with `docs/privacy.md`, and where to find the privacy
+policy, terms and issue tracker. The submission names that plugin folder, not
+the repository root, because the root is a marketplace.
 
-Submitting is account-bound and role-gated. The Console form requires a
-Developer, Admin or Owner role on a Console organization, which is the route
-for an individual author. The claude.ai form requires a Team or Enterprise
-organization with directory management access.
+Submitting is account-bound and happens under the owner's signed-in account
+on the developer portal.
 
 Once a listing is published, pushes to the repository are mirrored
 automatically and rescreened. Updates do not need a new submission.
@@ -92,7 +103,9 @@ and `composerIcon` pointing to square images inside the archive, and the
 in `.codex-plugin/plugin.json` and `make codex-bundle` merges them into the
 archived copy. The archive lands at
 `dist/agent-parley-VERSION-codex-skills.zip` and contains only the merged
-manifest, `skills/` and `assets/`. `scripts/check_policy.py` fails the gate if
+manifest, `skills/` and `assets/`; the plugin-folder README stays out,
+because the portal renders the listing from the manifest rather than from a
+README. `scripts/check_policy.py` fails the gate if
 either manifest drifts from the shape its directory reads.
 
 That archive is a release asset. `make release-artifacts` builds it into
@@ -100,9 +113,10 @@ That archive is a release asset. `make release-artifacts` builds it into
 records its hash in `SHA256SUMS`, and `scripts/release_publish.py` requires it
 by name, so a release missing it fails instead of publishing. A portal upload
 therefore starts from a released artifact rather than a local build. Releases
-v0.6.0 through v0.9.1 carry the same archive, uploaded by hand after the fact.
-Neither catalog exposes a publishing API, so each new
-version still needs a manual upload through the portal. Claude mirrors pushes
+from v0.10.0 onward carry it automatically; v0.6.0 through v0.9.1 carry the
+same archive, uploaded by hand after the fact. Neither catalog exposes a
+publishing API, so each new version still needs a manual upload through the
+portal. Claude mirrors pushes
 once a listing is live; Codex does not.
 
 Both forms change over time. Re-read them at submission time and treat the
@@ -130,7 +144,8 @@ confirm the stated expectation before opening either form.
   `gh release view vVERSION --json assets`
 - Neither manifest passes `claude plugin validate --strict`; the single
   `protocol` warning is expected and the gate runs without `--strict`.
-  `uv run --locked python scripts/check_policy.py`
+  `claude plugin validate --strict plugins/agent-parley` and
+  `claude plugin validate --strict .`
 - The `coordinate` skill carries YAML frontmatter with `name` and
   `description`.
   `head -5 plugins/agent-parley/skills/coordinate/SKILL.md`
@@ -270,11 +285,15 @@ accounts and to a legal identity that an agent does not hold.
   publisher. Verification proves control of an identity or a domain and cannot
   be delegated.
 - **Signing in and submitting.** Both forms are account-bound and role-gated.
-  The Claude directory needs a Developer, Admin or Owner role on a Console
-  organization, or a Team or Enterprise organization on claude.ai with
-  directory management access; Codex needs Apps Management write access.
-  Submitting requires the owner's authenticated session, and the submission
-  becomes a statement made by that account.
+  The Claude directory takes submissions through the developer portal at
+  `https://claude.ai/directory/manage`; Codex needs Apps Management write
+  access. Submitting requires the owner's authenticated session, and the
+  submission becomes a statement made by that account.
+- **Retiring the stale Claude submission.** The 2026-09-14 submission went
+  through the retired Console form. Withdraw it at
+  `https://platform.claude.com/plugins/submissions`, or ask
+  `directory@anthropic.com` to move it, before resubmitting through the
+  developer portal.
 - **Accepting catalog terms.** Each catalog attaches distribution terms to the
   listing. Only the owner can agree to them.
 - **Publishing the policy and listing URLs.** The owner chooses which pages

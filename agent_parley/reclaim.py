@@ -26,14 +26,18 @@ commits, so no work leaves with the row.
 Lanes also make worktrees of their own, for pull requests and sub-tasks, and
 Git registers each against the project repository. Those are read from
 `git worktree list` and attributed to a lane by path, when they sit inside a
-lane or the project state directory, or by branch, when their branch is
-named after a lane. A worktree no lane accounts for is the operator's and is
-never touched. An attributed one is removed when it is clean, carries no
-commit that neither the base checkout nor its upstream has, and either the
-base already holds its head, its lane retired, or it has been untouched past
-the inactivity threshold. Uncommitted changes and unpushed commits keep it
-unless the operator forces the removal, and a forced removal first writes a
-recovery checkpoint holding both.
+lane or directly inside the project state directory or a project directory
+of the state root the product used before its rename, or by branch, when
+their branch is named after a lane. A worktree no lane accounts for, even
+one nested deeper under the state directory, is the operator's and is
+never touched. An
+attributed one is removed when it is clean, holds no file Git ignores,
+carries no commit that neither the base checkout nor its upstream has, and
+either the base already holds its head, its lane retired, or it has been
+untouched past the inactivity threshold. Uncommitted changes and unpushed
+commits keep it unless the operator forces the removal, and a forced
+removal first writes a recovery checkpoint holding both; an ignored file
+keeps it regardless, because no force can recover what was never tracked.
 """
 
 import os
@@ -42,11 +46,14 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_parley import forge, issues, store
+from agent_parley import forge, issues, retirement, store
 from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
 MAX_REPORTED_PATHS = 10
+RENAMED_HOMES = {"agent-parley": "agent-bridge"}
+RETIRED_FILES = ("-work.json", "-wake-work.json", "-mcp.json", "-wake.log")
+WAKE_LOG_RETENTION = 2 * 24 * 3600
 
 MERGED = "its pull request merged"
 STOPPED = (
@@ -74,16 +81,32 @@ SESSION = "a session is running in it"
 IDLE = "an idle session is still running in it"
 CLAIMED = "it still holds a claim"
 UNCOMMITTED = "it holds uncommitted changes"
+IGNORED = "it holds files Git does not track elsewhere"
 UNMERGED = "its branch holds commits the base checkout does not have"
 UNUSED = "its branch never left the commit its lane was created from"
 UNPUSHED = "its branch holds commits its upstream does not have"
+ABSORBED = (
+    "its unpushed commits already landed in the base checkout through "
+    "another branch"
+)
 PULL_OPEN = "its pull request is still open"
 PUBLISHED = "its upstream still carries its branch"
 PULL_CLOSED = "its pull request was closed without merging"
 UNLANDED = "nothing shows its branch landed"
 REMOVABLE = frozenset(
-    {MERGED, GONE, STOPPED, VANISHED, MISSING, CONTAINED, ABANDONED, STALE}
+    {
+        MERGED,
+        GONE,
+        STOPPED,
+        VANISHED,
+        MISSING,
+        CONTAINED,
+        ABANDONED,
+        STALE,
+        ABSORBED,
+    }
 )
+BUNDLED = frozenset({ABSORBED})
 FORCEABLE = frozenset({UNCOMMITTED, UNPUSHED, RECENT})
 
 
@@ -506,7 +529,12 @@ def _entries(root: str) -> list[dict] | None:
 
 
 def size(path: Path) -> int:
-    """Totals the bytes of every regular file under a directory.
+    """Totals the bytes of every file under a directory, once per inode.
+
+    Worktrees and clones on one filesystem share Git objects through hard
+    links, so a file reached under several names is counted the first time
+    only. The total is then the space the files take, as `du -sb` reports
+    it, rather than the sum of every name.
 
     Args:
         path: Directory measured; symbolic links are counted, not followed.
@@ -515,18 +543,54 @@ def size(path: Path) -> int:
         The total in bytes, counting only what could be read.
     """
     total = 0
+    seen: set[tuple[int, int]] = set()
     for folder, _, files in os.walk(path, onerror=lambda error: None):
         for file in files:
             try:
-                total += os.lstat(os.path.join(folder, file)).st_size
+                found = os.lstat(os.path.join(folder, file))
             except OSError:
                 continue
+            if found.st_nlink > 1:
+                inode = (found.st_dev, found.st_ino)
+                if inode in seen:
+                    continue
+                seen.add(inode)
+            total += found.st_size
     return total
 
 
 def _within(path: Path, parent: Path) -> bool:
     """Reports whether a path lies inside, or is, another directory."""
     return path == parent or parent in path.parents
+
+
+def owned_roots(directory: Path) -> list[Path]:
+    """Names the directories whose direct children the project itself made.
+
+    The product places every lane and every worktree a lane adds for a
+    sub-task directly inside a project state directory, so only a direct
+    child is the project's. A worktree nested deeper, such as one an
+    operator adds under a directory of their own beside the lanes, is
+    theirs. The project state directory is one such directory. The
+    project directories under the state root the product used before its
+    rename are the others: lanes created then were registered with the
+    same repository from beneath them, and no lane of the current
+    manifest accounts for them any longer. They are only claimed when the
+    current state root carries the product's own default name, so a
+    relocated state root never reaches into a sibling the operator owns.
+
+    Args:
+        directory: Private project state directory.
+
+    Returns:
+        Resolved directories, the project state directory first.
+    """
+    home = directory.parent.parent
+    found = [directory.resolve()]
+    if renamed := RENAMED_HOMES.get(home.name):
+        legacy = (home.parent / renamed / "projects").resolve()
+        found.extend(sorted(path for path in legacy.glob("*") if path.is_dir()))
+    return found
 
 
 def _unpushed(root: str, entry: dict, ahead: list[str]) -> list[str] | None:
@@ -551,6 +615,30 @@ def _unpushed(root: str, entry: dict, ahead: list[str]) -> list[str] | None:
     return _ahead(root, reference, entry["head"])
 
 
+def _absorbed(root: str, head: str) -> bool:
+    """Reports whether the base checkout already holds a head's changes.
+
+    A branch squash-merged or cherry-picked through another branch keeps
+    commits no ref of the base carries, yet merging it into the base
+    changes nothing. Git's own merge is the test: the head is absorbed
+    only when the merge applies cleanly and leaves the base's tree exactly
+    as it is. A conflict, an older Git without `merge-tree --write-tree`
+    and any other failure are all no.
+
+    Args:
+        root: Base checkout whose head is merged into.
+        head: Commit whose changes are looked for.
+
+    Returns:
+        True only when the merge result is the base head's own tree.
+    """
+    merged = _read(root, "merge-tree", "--write-tree", "HEAD", head)
+    if not merged:
+        return False
+    base = _read(root, "rev-parse", "HEAD^{tree}")
+    return bool(base) and merged.splitlines()[0] == base
+
+
 def _stray(
     root: str,
     entry: dict,
@@ -571,7 +659,10 @@ def _stray(
     Returns:
         The condition that decided it and any paths or commits it names.
         Only a condition in `REMOVABLE` allows a removal, and only one in
-        `FORCEABLE` allows a forced one.
+        `FORCEABLE` allows a forced one. A worktree holding files Git
+        ignores is always kept: `git worktree remove` would delete them
+        with the tree, and no force writes a checkpoint of untracked
+        content, so a forced removal could not protect them either.
     """
     path = Path(entry["path"])
     if entry["locked"]:
@@ -585,6 +676,11 @@ def _stray(
         return UNREADABLE, []
     if changed:
         return UNCOMMITTED, changed
+    ignored = retirement.ignored_files(str(path))
+    if ignored is None:
+        return UNREADABLE, []
+    if ignored:
+        return IGNORED, ignored
     head = entry["head"]
     if not head:
         return UNREADABLE, []
@@ -596,6 +692,9 @@ def _stray(
         if unpushed is None:
             return UNREADABLE, []
         if unpushed:
+            quiet = retired or time.time() - _changed(path) > after
+            if quiet and _absorbed(root, head):
+                return ABSORBED, unpushed
             return UNPUSHED, unpushed
     if retired:
         return ABANDONED, []
@@ -637,14 +736,17 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
 
     Every worktree the project repository registers is read, except the
     base checkout and the participants' own lanes. Each is attributed to a
-    lane by path or branch; one inside the project state directory belongs
-    to the project even when no single lane accounts for it, and one
-    nothing accounts for is the operator's and is never removed. An
+    lane by path or branch; one directly inside the project state
+    directory, or directly inside a project directory under the state root
+    the product used before its rename, belongs to the project even when
+    no single lane accounts for it, and one nothing
+    accounts for is the operator's and is never removed. An
     attributed worktree is removed only when Git holds no lock on it, no
-    session runs in its lane, it is clean, every commit beyond the base is
-    on its upstream, and the base holds its head, its lane retired, or it
-    has not changed within the inactivity threshold. A registration whose
-    directory is already gone is reclaimed by dropping that registration.
+    session runs in its lane, it is clean, it holds no file Git ignores,
+    every commit beyond the base is on its upstream, and the base holds its
+    head, its lane retired, or it has not changed within the inactivity
+    threshold. A registration whose directory is already gone is reclaimed
+    by dropping that registration.
 
     Args:
         directory: Private project state directory holding the lanes.
@@ -681,7 +783,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
         key=lambda pair: len(pair[0]),
         reverse=True,
     )
-    state = directory.resolve()
+    owned = owned_roots(directory)
     rows = []
     for entry in entries:
         if entry["path"] == base or entry["path"] in lanes:
@@ -689,7 +791,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)
         paths: list[str]
-        if not owner and not _within(path, state):
+        if not owner and path.parent not in owned:
             reason, paths = FOREIGN, []
         else:
             reason, paths = _stray(
@@ -712,6 +814,48 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     return rows
 
 
+def prune(directory: Path, manifest: dict, now: float) -> list[str]:
+    """Deletes lane files nothing reads any more, and old wake logs.
+
+    A retired lane is never offered work, woken or launched until an
+    operator re-admits it, and a re-admitted lane writes these files anew,
+    so its published work, its wake prompt, its client configuration, which
+    carries a registration token, and its wake log only take space. The
+    lane's identity, activity, events, reports and capacity stay: they are
+    the history an archive exports, and capacity is read for every lane
+    sharing the same account. Lock files stay too, because unlinking a lock
+    another process holds would let a third take it. A lane whose session
+    still holds its session lock keeps everything.
+
+    A wake log records the relaunches the supervisor spawned and is only
+    ever appended to, so one untouched for `WAKE_LOG_RETENTION` seconds is
+    deleted whoever wrote it, including lanes no longer in the manifest.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Project manifest naming the participants.
+        now: Unix time the wake log retention is measured against.
+
+    Returns:
+        The names of the files deleted, sorted.
+    """
+    doomed: set[Path] = set()
+    for name, participant in manifest["participants"].items():
+        if participant.get("retired") and not _busy(directory, name):
+            doomed.update(directory / f"{name}{end}" for end in RETIRED_FILES)
+    for log in directory.glob("*-wake.log"):
+        if now - _changed(log) > WAKE_LOG_RETENTION:
+            doomed.add(log)
+    removed = []
+    for path in sorted(doomed):
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(path.name)
+    return removed
+
+
 def forceable(row: dict) -> bool:
     """Reports whether a forced sweep may remove one kept worktree."""
     return "worktree" in row and row["reason"] in FORCEABLE
@@ -729,7 +873,10 @@ def remove(
     A forced removal of a worktree kept for its uncommitted changes, its
     unpushed commits or a recent change first writes a recovery checkpoint
     holding all of them, and removes nothing when that checkpoint fails.
-    Branches are left in place.
+    A worktree whose unpushed commits already landed through another
+    branch is bundled the same way before its ordinary removal, so the
+    commits no ref of the base carries survive it too. Branches are left
+    in place.
 
     Args:
         root: Base checkout the worktree is registered with.
@@ -739,10 +886,18 @@ def remove(
 
     Returns:
         The row with whether Git removed it, and the checkpoint written
-        before a forced removal.
+        before a forced or bundled removal.
     """
     from agent_parley import recovery
 
+    if row["reclaim"] and row["reason"] in BUNDLED:
+        try:
+            saved = recovery.preserve(directory, Path(row["worktree"]))
+        except (BridgeError, OSError):
+            return {**row, "removed": False}
+        removed = _read(root, "worktree", "remove", row["worktree"])
+        gone = removed is not None
+        return {**row, "removed": gone, "checkpoint": saved["id"]}
     if row["reclaim"]:
         removed = _read(root, "worktree", "remove", row["worktree"])
         return {**row, "removed": removed is not None}
@@ -805,7 +960,9 @@ def lines(rows: list[dict]) -> list[str]:
         if "bytes" in row:
             detail += f"; {row['bytes'] / 1_000_000:.1f} MB"
         if "checkpoint" in row:
-            detail += f"; forced after checkpoint {row['checkpoint']}"
+            bundled = row["reason"] in BUNDLED
+            action = "bundled to" if bundled else "forced after"
+            detail += f"; {action} checkpoint {row['checkpoint']}"
         if row.get("remedy"):
             detail += f"; {row['remedy']}"
         label = row["participant"]

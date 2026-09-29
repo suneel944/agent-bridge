@@ -637,6 +637,26 @@ def test_a_worktree_with_unmerged_commits_is_kept(bridge, repo, idle):
     assert path.exists()
 
 
+def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-4")
+    exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    (exclude / "info").mkdir(exist_ok=True)
+    (exclude / "info" / "exclude").write_text(".env\n")
+    (path / ".env").write_text("SECRET=1\n")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    kept = worktree_of(swept, path)
+    assert kept["reason"] == reclaim.IGNORED
+    assert kept["paths"] == [".env"]
+    assert kept["reclaim"] is False
+    assert path.exists()
+    assert (path / ".env").exists()
+
+
 def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
     path = made(repo, tmp_path, "operator-wt")
     aged(path)
@@ -645,6 +665,41 @@ def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
 
     assert worktree_of(swept, path)["reason"] == reclaim.FOREIGN
     assert path.exists()
+
+
+def test_a_worktree_nested_under_the_state_directory_is_never_touched(
+    bridge, repo, idle
+):
+    nested = idle["directory"] / "operator-wt"
+    nested.mkdir()
+    path = made(repo, nested, "fix/616-c2")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True, force=True)
+
+    assert worktree_of(swept, path)["reason"] == reclaim.FOREIGN
+    assert path.exists()
+
+
+def test_a_worktree_under_the_pre_rename_state_root_is_reclaimed(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    legacy = tmp_path / "agent-bridge" / "projects" / "0123456789abcdef"
+    legacy.mkdir(parents=True)
+    path = made(repo, legacy, "wt-1092")
+    aged(path)
+
+    unrenamed = bridge.reclaim_worktrees(repo)
+    monkeypatch.setattr(
+        reclaim, "RENAMED_HOMES", {bridge.home.name: "agent-bridge"}
+    )
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    assert worktree_of(unrenamed, path)["reason"] == reclaim.FOREIGN
+    row = worktree_of(swept, path)
+    assert row["reason"] == reclaim.CONTAINED
+    assert row["removed"] is True
+    assert not path.exists()
 
 
 def test_a_merged_lane_worktree_outside_the_state_directory_is_reclaimed(
@@ -692,11 +747,100 @@ def test_force_removes_a_dirty_lane_worktree_after_a_checkpoint(
     record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
     bundle = folder / record["artifact"]["reference"]
     assert bundle.stat().st_size == record["artifact"]["bytes"]
-    reference = f"refs/agent-parley-recovery/{row['checkpoint']}"
-    git(repo, "fetch", str(bundle), reference)
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
     assert "draft.txt" in git(
         repo, "ls-tree", "-r", "--name-only", record["worktree_commit"]
     )
+
+
+def test_a_worktree_whose_commits_landed_elsewhere_is_bundled_then_removed(
+    bridge, repo, idle, tmp_path
+):
+    path = made(repo, tmp_path, "codex-pr-20")
+    (path / "landed.txt").write_text("landed\n")
+    commit(path, "Sub-task work")
+    head = git(path, "rev-parse", "HEAD").strip()
+    (repo / "landed.txt").write_text("landed\n")
+    commit(repo, "Same work through another branch")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    row = worktree_of(swept, path)
+    assert row["reason"] == reclaim.ABSORBED
+    assert row["removed"] is True
+    assert not path.exists()
+    assert "codex-pr-20" in branches(repo)
+    folder = idle["directory"] / "recovery"
+    record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
+    bundle = folder / record["artifact"]["reference"]
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
+    assert git(repo, "cat-file", "-t", head).strip() == "commit"
+
+
+def test_a_worktree_whose_commits_differ_from_the_base_is_kept(
+    bridge, repo, idle, tmp_path
+):
+    path = made(repo, tmp_path, "codex-pr-21")
+    (path / "landed.txt").write_text("mine\n")
+    commit(path, "Sub-task work")
+    (repo / "landed.txt").write_text("theirs\n")
+    commit(repo, "Different work through another branch")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    assert worktree_of(swept, path)["reason"] == reclaim.UNPUSHED
+    assert path.exists()
+
+
+def test_prune_removes_retired_lane_files_and_stale_wake_logs(
+    bridge, repo, idle
+):
+    directory = idle["directory"]
+    retirement.mark(directory, "codex", time.time())
+    doomed = [f"codex{end}" for end in reclaim.RETIRED_FILES]
+    kept = ["codex-identity.json", "codex-capacity.json", "codex-wake.json"]
+    for name in [*doomed, *kept, "claude-wake.log", "claude-work.json"]:
+        (directory / name).write_text("{}")
+    stale = directory / "old-wake.log"
+    stale.write_text("old\n")
+    aged(stale, reclaim.WAKE_LOG_RETENTION + 60)
+    manifest = roster.read(directory)
+
+    removed = reclaim.prune(directory, manifest, time.time())
+
+    assert sorted(removed) == sorted([*doomed, "old-wake.log"])
+    for name in [*kept, "claude-wake.log", "claude-work.json"]:
+        assert (directory / name).exists()
+    for name in doomed:
+        assert not (directory / name).exists()
+
+
+def test_prune_keeps_the_files_of_a_retired_lane_still_running(
+    bridge, repo, idle, monkeypatch
+):
+    directory = idle["directory"]
+    retirement.mark(directory, "codex", time.time())
+    (directory / "codex-work.json").write_text("{}")
+    monkeypatch.setattr(reclaim, "_busy", lambda directory, name: True)
+
+    removed = reclaim.prune(directory, roster.read(directory), time.time())
+
+    assert removed == []
+    assert (directory / "codex-work.json").exists()
 
 
 def test_reclaim_dry_run_lists_removals_with_sizes(
@@ -796,6 +940,39 @@ def test_a_missing_project_root_is_retired_within_one_interval(
     assert dashboard.collect(bridge.home, False, {})["projects"] == []
 
 
+def test_prune_removes_a_bundle_no_live_claim_can_still_read(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo, create=False)[1]
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    (saved,) = recovery.capture(directory, roster.read(directory), "claude")
+    folder = directory / "recovery"
+    bundle = folder / saved["artifact"]["reference"]
+    record = folder / f"{saved['id']}.json"
+    assert bundle.exists() and record.exists()
+
+    bridge.issue(lane, "release", "1")
+    removed = recovery.prune(directory, issues.snapshot(directory))
+
+    assert removed == [saved["id"]]
+    assert not bundle.exists()
+    assert not record.exists()
+
+
+def test_prune_keeps_a_bundle_its_claim_still_owns(bridge, repo, paired):
+    directory = bridge.project(repo, create=False)[1]
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    (saved,) = recovery.capture(directory, roster.read(directory), "claude")
+    folder = directory / "recovery"
+
+    removed = recovery.prune(directory, issues.snapshot(directory))
+
+    assert removed == []
+    assert (folder / saved["artifact"]["reference"]).exists()
+
+
 def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     store.initialize(bridge.home)
     directory = bridge.project(repo, create=False)[1]
@@ -878,14 +1055,27 @@ def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
     record = {
         "claims": [
             {"issue": 7, "orphaned": True, "orphan_recorded_seconds": 7200}
-        ]
+        ],
+        "availability": {"process_alive": False},
     }
+    live = {**record, "availability": {"process_alive": True}}
 
     rows = problems._retire_rows(record, "claude", "--repo /r", "/r", 3600)
     young = problems._retire_rows(record, "claude", "--repo /r", "/r", 9000)
+    assert problems._retire_rows(live, "claude", "--repo /r", "/r", 3600) == []
 
     assert [row["condition"] for row in rows] == [problems.READY]
     assert rows[0]["command"] == (
         "agent-parley participant retire claude --repo /r"
     )
     assert young == []
+
+
+def test_size_counts_a_hard_linked_file_once(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "object").write_bytes(b"x" * 4096)
+    os.link(tmp_path / "a" / "object", tmp_path / "b" / "object")
+    (tmp_path / "b" / "own").write_bytes(b"y" * 100)
+
+    assert reclaim.size(tmp_path) == 4196

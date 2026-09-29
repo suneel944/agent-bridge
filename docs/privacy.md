@@ -6,7 +6,7 @@ policy describes what the software stores, where it stores it, and what it
 transmits. It applies to the published package, to the Claude plugin and to
 the Codex plugin, which share one coordination runtime.
 
-Last updated 2026-09-26.
+Last updated 2026-09-29.
 
 ## What the software transmits
 
@@ -32,9 +32,12 @@ it unassigns it, and a report that turns ready posts its summary and evidence
 as a comment on the issue it is bound to. `issue next`, `issue match` and
 `issue resolve` read open issues, their labels and the pull requests that
 close them, and the supervision service and `gc` read whether a lane's branch
-or issue has landed. Agent Parley stores no forge token and adds no flag that
-bypasses a repository rule, and when no `gh` client, no GitHub remote or no
-network is available nothing is sent and the local record is unchanged.
+or issue has landed. A repository carrying a Beads ledger in `.beads/` uses
+the `beads` forge instead: the same title lookups, assignments and comments go
+through the `bd` client in place of `gh`. Agent Parley stores no forge token
+and adds no flag that bypasses a repository rule, and when no `gh` client, no
+GitHub remote or no network is available nothing is sent and the local record
+is unchanged.
 
 Notifications are off unless `AGENT_PARLEY_NOTIFY` names `telegram`, `email`
 or both. Then a change that moves ownership or holds a lane, such as a handoff
@@ -111,15 +114,21 @@ Logs are bounded automatically:
   it drops to `server.log.1`, which is bounded the same way. A lane's report
   log is bounded the same way, and an attachment goes with the report it
   belonged to.
-- A wake log is cut back to empty before a write would take it past 1 MiB.
-- The store keeps the newest 2,000 served-call records and the newest 2,000
-  lane state transitions of each project.
-- An offer's attachment is removed when the offer is declined, cancelled or
-  released.
+- A wake log is cut back to empty before a write would take it past 1 MiB,
+  and one left untouched for two days is deleted.
+- The store keeps the newest 2,000 served-call records, the newest 2,000
+  lane state events and, counted apart so they never evict those events,
+  the newest 2,000 lane accounting events of each project.
+- An offer's attachment is removed when the offer is declined, cancelled,
+  released, completed or resolved.
+- A recovery checkpoint is removed once the claim it was captured for is no
+  longer the issue's current one: released, taken again or closed.
+- An issue record keeps its newest 50 history entries, plus its latest claim,
+  take and complete markers.
 
-Everything else, messages, decisions and recovery checkpoints included,
-persists until you delete it. To remove all coordination state, stop the
-server and delete the state directory:
+Everything else, messages and decisions included, persists until you delete
+it. To remove all coordination state, stop the server and delete the state
+directory:
 
 ```sh
 agent-parley down

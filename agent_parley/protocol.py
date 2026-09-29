@@ -59,6 +59,12 @@ OK = "ok"
 MISMATCH = "mismatch"
 STALE = "stale"
 STOPPED = "not running"
+ROOT_GONE = "root gone"
+RESTORE_ROOT = (
+    "These projects name a root checkout that no longer exists; restore "
+    "it, or remove the project's state folder once nothing in it is "
+    "needed: "
+)
 
 
 def cli_command() -> str:

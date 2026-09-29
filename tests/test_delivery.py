@@ -41,17 +41,46 @@ def unread(bridge, data):
     return checkpoints.mailbox(bridge.home, data["root"], name)["unread"]
 
 
-def test_polled_mail_carries_the_digest_header_and_is_marked_read(
-    bridge, polled
-):
+def mark(bridge, data, ids):
+    """Marks mail read as the helper lane's mark_message_read would."""
+    directory = Path(data["lanes"]["helper"]).parent
+    name = roster.read(directory)["participants"]["helper"]["display"]
+    store.mark_read(bridge.home, data["root"], name, ids)
+
+
+def test_polled_mail_carries_the_digest_header_and_stays_unread(bridge, polled):
     directory = Path(polled["lanes"]["helper"]).parent
     assert unread(bridge, polled) == 1
 
     assert delivery.deliver(bridge.home, directory, "helper") > 0
 
     text = delivery.mail_file(directory, "helper").read_text()
+    assert text.startswith("## Batch 1, written ")
     assert "Mail: 1 of 1 unread, most relevant first; 0 superseded." in text
-    assert unread(bridge, polled) == 0
+    assert unread(bridge, polled) == 1
+
+
+def test_two_polls_before_a_read_keep_both_batches(bridge, polled):
+    directory = Path(polled["lanes"]["helper"]).parent
+    published = delivery.mail_file(directory, "helper")
+    delivery.deliver(bridge.home, directory, "helper")
+    first = checkpoints.activity(directory, "helper")["batches"][0]["ids"]
+    send(bridge, polled, "helper", "second", "Second batch")
+    delivery.deliver(bridge.home, directory, "helper")
+
+    text = published.read_text()
+    assert SUBJECT in text and "Second batch" in text
+    assert text.index("## Batch 1,") < text.index("## Batch 2,")
+
+    mark(bridge, polled, first)
+    assert delivery.deliver(bridge.home, directory, "helper") == 0
+    text = published.read_text()
+    assert "## Batch 1," not in text and "Second batch" in text
+
+    later = checkpoints.activity(directory, "helper")["batches"][0]["ids"]
+    mark(bridge, polled, later)
+    delivery.deliver(bridge.home, directory, "helper")
+    assert not published.exists()
 
 
 def test_polled_delivery_orders_mail_by_relevance(bridge, polled):
@@ -171,6 +200,7 @@ def test_a_delivery_composed_from_a_moved_state_is_dropped(
 def test_a_second_message_is_delivered_after_the_first(bridge, polled):
     directory = Path(polled["lanes"]["helper"]).parent
     assert delivery.deliver(bridge.home, directory, "helper") > 0
+    mark(bridge, polled, [checkpoints.activity(directory, "helper")["cursor"]])
     send(bridge, polled, "helper", key="delivery-2")
     assert delivery.deliver(bridge.home, directory, "helper") > 0
     published = delivery.mail_file(directory, "helper")

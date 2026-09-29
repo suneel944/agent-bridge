@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import shlex
     import shutil
     import socket as socket
+    import sqlite3
     import string
     import subprocess
     import textwrap
@@ -91,6 +92,7 @@ if TYPE_CHECKING:
         snapshot,
     )
     from agent_parley.issues import exact_claim as exact_claim
+    from agent_parley.issues import merge_claim as merge_claim
     from agent_parley.merges import attributed_commits
     from agent_parley.merges import group_lanes as group_lanes
     from agent_parley.merges import group_refusal as group_refusal
@@ -174,7 +176,7 @@ MOVED_CALLABLES = {
         "release_copilot",
     ),
     "forge": ("report_comment",),
-    "issues": ("exact_claim", "held_claim"),
+    "issues": ("exact_claim", "held_claim", "merge_claim"),
     "merges": (
         "attributed_commits",
         "group_lanes",
@@ -211,6 +213,7 @@ DEFERRED_STANDARD_MODULES = (
     "shlex",
     "shutil",
     "socket",
+    "sqlite3",
     "string",
     "subprocess",
     "textwrap",
@@ -395,10 +398,15 @@ def clock(text: str) -> float:
     The time of day is read in the timezone of the machine the operator types
     on, and the resulting instant is recorded absolutely. A later timezone
     change, a daylight-saving transition or a service restart therefore moves
-    nothing: the item keeps the instant it was recorded for.
+    nothing: the item keeps the instant it was recorded for. The offset is
+    the one the zone has on the target day, so a target past a
+    daylight-saving transition lands on the wall-clock time typed. A time
+    that carries its own offset, such as ``15:00+02:00``, is read in that
+    offset instead.
 
     Args:
-        text: A 24-hour time of day such as ``15:00``.
+        text: A 24-hour time of day such as ``15:00``, optionally with a
+            UTC offset.
 
     Returns:
         The next instant matching that time of day, today while it is still
@@ -411,10 +419,11 @@ def clock(text: str) -> float:
         moment = datetime.time.fromisoformat(text)
     except ValueError:
         raise ValueError(f"{text!r} is not a time of day; use 15:00.") from None
-    now = datetime.datetime.now().astimezone()
-    target = datetime.datetime.combine(now.date(), moment, now.tzinfo)
+    now = datetime.datetime.now(moment.tzinfo)
+    target = datetime.datetime.combine(now.date(), moment)
     if target <= now:
-        target += datetime.timedelta(days=1)
+        tomorrow = now.date() + datetime.timedelta(days=1)
+        target = datetime.datetime.combine(tomorrow, moment)
     return target.timestamp()
 
 
@@ -1346,7 +1355,8 @@ def matching_lanes(
     reported outcome, whether its checkout sits on the branch it was assigned,
     whether supervision currently reads it as stalled and whether it is over
     an advisory budget. `--all` adds no filter of its own, so it selects
-    whatever the others leave.
+    whatever the others leave. A retired lane is never matched: it has no
+    session to act on and no worktree whose branch could be compared.
 
     Args:
         home: Private bridge state root.
@@ -1370,6 +1380,8 @@ def matching_lanes(
     names = []
     for name in sorted(data["participants"]):
         participant = data["participants"][name]
+        if roster.retired(participant):
+            continue
         if args.provider and participant["provider"] != args.provider:
             continue
         reported = activity(directory, name).get("outcome", "unknown")
@@ -1777,6 +1789,18 @@ def merged_lanes(
         or args.idle
         or getattr(args, "over_budget", False)
     )
+    issue = getattr(args, "issue", "")
+    if issue and (
+        not args.name
+        or selected(args)
+        or args.group
+        or getattr(args, "verify_recovery", False)
+    ):
+        raise BridgeError(
+            "`participant merge --issue` picks a claim of one named lane; "
+            "name the lane and drop --all, --group, --verify-recovery and "
+            "the selectors."
+        )
     if getattr(args, "verify_recovery", False):
         if (
             preview
@@ -1847,7 +1871,7 @@ def merged_lanes(
     return (
         bridge.preview_merge(repo, args.name)
         if preview
-        else bridge.merge(repo, args.name, renew=renew)
+        else bridge.merge(repo, args.name, renew=renew, issue=issue)
     )
 
 
@@ -2126,7 +2150,10 @@ class Bridge(
         superseded, because a lane that left answers nothing; the messages
         themselves stay readable. Removing the worktree deletes its ignored
         files, which `git status` never reports, so they are deleted only
-        when every one of them was named in ``discard``.
+        when every one of them was named in ``discard``. The lane's session
+        and checkpoint locks are both taken before the first irreversible
+        step, so a busy lane refuses the retirement with its worktree,
+        branch, credential and record intact rather than failing halfway.
 
         Args:
             repo: Any checkout of the target repository.
@@ -2152,9 +2179,12 @@ class Bridge(
                 )
             lane = Path(participant["lane"])
             branch = participant["branch"]
-            with lock(
-                directory / f"{name}.session.lock",
-                f"{name} has a running session; stop that terminal first.",
+            with (
+                lock(
+                    directory / f"{name}.session.lock",
+                    f"{name} has a running session; stop that terminal first.",
+                ),
+                lock(directory / f"{name}-checkpoint.lock", timeout=1),
             ):
                 if lane.exists():
                     if git(lane, "status", "--porcelain"):
@@ -2208,23 +2238,22 @@ class Bridge(
                         **held_claim(directory, name),
                     },
                 )
-                with lock(directory / f"{name}-checkpoint.lock", timeout=1):
-                    for suffix in (
-                        "identity.json",
-                        "activity.json",
-                        "mcp.json",
-                        "events.jsonl",
-                        "events.1.jsonl",
-                        "events.jsonl.tmp",
-                        "events.1.jsonl.tmp",
-                        "gemini-settings.json",
-                        "amp-settings.json",
-                    ):
-                        (directory / f"{name}-{suffix}").unlink(missing_ok=True)
-                    shutil.rmtree(
-                        directory / f"{name}-opencode", ignore_errors=True
-                    )
-                    release_copilot(self.home, participant, name)
+                for suffix in (
+                    "identity.json",
+                    "activity.json",
+                    "mcp.json",
+                    "events.jsonl",
+                    "events.1.jsonl",
+                    "events.jsonl.tmp",
+                    "events.1.jsonl.tmp",
+                    "gemini-settings.json",
+                    "amp-settings.json",
+                ):
+                    (directory / f"{name}-{suffix}").unlink(missing_ok=True)
+                shutil.rmtree(
+                    directory / f"{name}-opencode", ignore_errors=True
+                )
+                release_copilot(self.home, participant, name)
                 del data["participants"][name]
                 write_json(directory / "project.json", data)
             (directory / f"{name}-checkpoint.lock").unlink(missing_ok=True)
@@ -2268,7 +2297,12 @@ class Bridge(
         directory, _, _ = self._lane(repo, name)
         with lock(directory / "setup.lock"):
             data = roster.read(directory)
-            participant = data["participants"][name]
+            participant = data["participants"].get(name)
+            if participant is None:
+                raise BridgeError(
+                    f"{name} was retired while this command ran; nothing "
+                    "changed."
+                )
             if participant.get("paused", False) is not resume:
                 state = "paused" if not resume else "not paused"
                 return f"{name} is already {state}; nothing changed."
@@ -2315,11 +2349,13 @@ class Bridge(
     def stop(self, repo: Path, name: str) -> str:
         """Ends one lane's native session from the base checkout.
 
-        The lane is told once that the operator is ending its session, then
-        the recorded session process is signalled exactly as a normal exit
+        The recorded session process is signalled exactly as a normal exit
         signals it and given a bounded time to leave; a process that ignores
         that signal is sent `SIGKILL`, and the session record is cleared only
-        once the process is verified gone. Identity is the recorded
+        once the process is verified gone. No notice is mailed to the lane:
+        the session is gone before it could read one, so the mail would only
+        reach the next session, including the one `restart` launches, as an
+        instruction to end, and would count as backlog. Identity is the recorded
         process ID together with its kernel creation time, checked here and
         again inside the platform's terminate step, so a recycled process ID
         is never signalled. The command-line check used to recognize the
@@ -2331,6 +2367,12 @@ class Bridge(
         deliberately. The command is recorded either way, including when it
         finds no session to end, so the ledger shows every operator action
         rather than only the ones that changed something.
+
+        The activity record is marked `operator_stopped` in both cases, and
+        the service does not wake or resume the lane until its next launch
+        clears the mark. Without it the stopped label reads as a lane owed a
+        turn, the next sweep resumes it, and the operator's own `run` meets a
+        lock held by a session with no terminal attached.
 
         Args:
             repo: Any checkout of the target repository.
@@ -2353,6 +2395,10 @@ class Bridge(
             or not process.alive(pid, ticks)
             or supervision.rebooted(state)
         ):
+            with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+                state = json.loads(path.read_text()) if path.exists() else {}
+                state.update(operator_stopped=True)
+                write_json(path, state)
             self._record_operator(
                 directory,
                 name,
@@ -2363,8 +2409,6 @@ class Bridge(
                 f"{name} has no verified running session to stop. "
                 f"{self._holdings(directory, name)}"
             )
-        with contextlib.suppress(BridgeError, OSError):
-            self.say(repo, name, "The operator is ending this session.")
         process.ServerProcess(pid, ticks).stop()
         if process.alive(pid, ticks):
             raise BridgeError(
@@ -2373,9 +2417,12 @@ class Bridge(
             )
         with lock(directory / f"{name}-checkpoint.lock", timeout=1):
             state = json.loads(path.read_text()) if path.exists() else {}
-            state.update(activity="stopped", updated=time.time())
+            state.update(
+                activity="stopped", operator_stopped=True, updated=time.time()
+            )
             state.pop("session_pid", None)
             state.pop("session_ticks", None)
+            state.pop("session_boot", None)
             state.pop("session_started", None)
             state.pop("launcher_pid", None)
             state.pop("launcher_ticks", None)
@@ -4400,6 +4447,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                     "accepted only from the base checkout."
                 ),
             )
+            command.add_argument(
+                "--issue",
+                default="",
+                help=(
+                    "Claimed issue whose work the named lane merges when it "
+                    "holds several; defaults to its only ready claim."
+                ),
+            )
             scope = command.add_mutually_exclusive_group()
             scope.add_argument(
                 "--all",
@@ -4529,6 +4584,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     standing_run = standings.add_parser("run")
     standing_run.add_argument(
         "name", help="Participant whose ready work is integrated."
+    )
+    standing_run.add_argument(
+        "--issue",
+        default="",
+        help=(
+            "Claimed issue to integrate when the lane holds several; "
+            "defaults to its only ready claim."
+        ),
     )
     standing_run.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
@@ -5610,7 +5673,11 @@ def main() -> int:
                     )
                 )
             elif args.action == "run":
-                print(unattended.integrate(bridge, repository, args.name))
+                print(
+                    unattended.integrate(
+                        bridge, repository, args.name, args.issue
+                    )
+                )
             else:
                 print(unattended.describe(bridge, repository))
         elif args.command in ("verify", "init"):
@@ -5719,7 +5786,10 @@ def main() -> int:
                 )
             elif args.action == "remove":
                 roster.remove(bridge.home, "credentials", args.name)
-            registered = roster.credentials(bridge.home)
+            registered = {
+                name: {**entry, "env": views.redacted(entry.get("env") or {})}
+                for name, entry in roster.credentials(bridge.home).items()
+            }
             print(
                 views.render(
                     "credentials",
@@ -5764,14 +5834,37 @@ def main() -> int:
         return 0
     except (
         BridgeError,
+        KeyError,
         OSError,
         ValueError,
+        sqlite3.Error,
         subprocess.TimeoutExpired,
     ) as exc:
-        print(f"agent-parley: {exc}", file=sys.stderr)
+        print(f"agent-parley: {_error_message(exc)}", file=sys.stderr)
         if getattr(args, "json", False):
             print(_error_document(exc))
         return 1
+
+
+def _error_message(exc: Exception) -> str:
+    """Words one runtime failure as the line the CLI prints.
+
+    A missing key reads as its quoted key alone, so it is named as a record
+    that vanished, which is how one reaches the handler: another process
+    retired or removed it between the command's read and its use.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The message both the human line and the error document carry.
+    """
+    if isinstance(exc, KeyError):
+        return (
+            f"No record {exc.args[0]!r} any more; another command changed "
+            "the project while this one ran. Rerun it."
+        )
+    return str(exc)
 
 
 def _error_document(exc: Exception) -> str:
@@ -5794,10 +5887,15 @@ def _error_document(exc: Exception) -> str:
         kind = "timeout"
     elif isinstance(exc, OSError):
         kind = "os"
+    elif isinstance(exc, KeyError):
+        kind = "missing"
+    elif isinstance(exc, sqlite3.Error):
+        kind = "store"
     else:
         kind = "value"
+    message = _error_message(exc)
     return json.dumps(
-        views.document("error", {"error": {"type": kind, "message": str(exc)}}),
+        views.document("error", {"error": {"type": kind, "message": message}}),
         ensure_ascii=False,
     )
 

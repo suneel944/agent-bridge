@@ -22,10 +22,11 @@ would touch are not listed in #449 (the private-home permission check, the
 Bash hook client, the directory `fsync`, the wake sockets and the loopback
 port probe). The runtime cannot be imported on Windows today:
 `agent_parley/state.py:4` imports `fcntl`, and
-`agent_parley/process.py:517` raises `Unsupported operating system` for any
-platform other than Linux and macOS. The installed command therefore refuses
-native Windows before loading the runtime (`agent_parley/entry.py:48`) and
-exits 2 with a pointer to WSL2; only `--version` answers there.
+`platform_for()` at `agent_parley/process.py:518` raises `Unsupported
+operating system` for any platform other than Linux and macOS. The installed
+command therefore refuses native Windows before loading the runtime
+(`agent_parley/entry.py:48`) and exits 2 with a pointer to WSL2; only
+`--version` or `-V` answers there.
 
 Overall estimate: L (several weeks of focused work plus a native CI job).
 Recommendation: do not start until #450 meets the decision rule below.
@@ -70,7 +71,7 @@ reservations built on top of them stay advisory.
 | `agent_parley/process.py:194-233` | `linux_terminate()`: `pidfd_open`, `SIGTERM`, `select` on the pidfd, `SIGKILL`, `waitpid(WNOHANG)`. |
 | `agent_parley/process.py:39-63`, `:236-402` | macOS equivalents through `ps` and `kill`. |
 | `agent_parley/process.py:444-458` | macOS boot identity through `sysctl -n kern.boottime`. |
-| `agent_parley/process.py:498-517` | `platform_for()` accepts only `linux*` and `darwin`; `PLATFORM` is bound at import, so any other platform fails on import. |
+| `agent_parley/process.py:502-521` | `platform_for()` accepts only `linux*` and `darwin`; `PLATFORM` is bound at import, so any other platform fails on import. |
 | `agent_parley/process.py:519-623` | WSL detection from `/proc/sys/kernel/osrelease` and the `/mnt` refusal. |
 
 ### Signals
@@ -115,8 +116,9 @@ child stays in the parent's console and process group.
 
 ### CI
 
-`.github/workflows/check.yml:41-65`: the `wsl` job runs the suite inside
-Ubuntu on WSL with `continue-on-error: true`. No job runs Python natively on
+`.github/workflows/check.yml:79-105`: the `wsl` job runs the suite inside
+Ubuntu on WSL with `continue-on-error: true` when package, launch or process
+code changes. No job runs Python natively on
 Windows.
 
 ## 2. Per-layer plan

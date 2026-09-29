@@ -22,6 +22,7 @@ directory.
 import contextlib
 import datetime
 import json
+import shlex
 import sqlite3
 import time
 from pathlib import Path
@@ -54,6 +55,8 @@ ACK = "awaiting acknowledgement"
 BOUNCE = "bounced share"
 RETIRED = "shares to a retired lane"
 RETIRED_WINDOW = 86400
+STALE_AFTER = 86400
+STALE_HEADING = "Older than a day:"
 DRIFT = "branch drift"
 DIRTY = "dirty worktree"
 BUDGET = "over budget"
@@ -89,6 +92,10 @@ WAKE_DETAILS = {
         "wake refused because the client is waiting for a native approval"
     ),
     ATTENTION: "wake requires operator attention",
+    supervision.SESSION_HELD: (
+        "resume refused because a running launcher holds the session lock "
+        "and its wake socket did not answer"
+    ),
 }
 
 
@@ -148,9 +155,41 @@ def _blocked(record: dict) -> str:
         return supervision.STOPPED
     if result in (DIALOG, ATTENTION):
         return result
+    held = record.get("dialog") or {}
+    if held.get("name") == dialogs.PERMISSION or held.get("escalated"):
+        return DIALOG
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _answer(name: str, repo: str, record: dict, text: str) -> str:
+    """Says where the operator answers a prompt the lane's client holds.
+
+    A lane the service resumed has no terminal: its launcher reads nothing
+    and writes to the lane's wake log, so no operator can answer the prompt
+    where it is. That lane is ended and started again in the operator's own
+    terminal, where the same prompt can be answered.
+
+    Args:
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        record: One participant record from the status reading.
+        text: Remedy for a lane whose launcher has a terminal.
+
+    Returns:
+        The given remedy, or the stop and restart commands naming the wake
+        log when the lane's launcher has no terminal.
+    """
+    log = record.get("wake_log") or ""
+    if not log:
+        return text
+    return (
+        f"{name} was resumed without a terminal, so no one can answer its "
+        f"prompt; its output is in {log}. Run `agent-parley participant "
+        f"stop {name} {repo}`, then `agent-parley participant restart "
+        f"{name} {repo}` in your terminal"
+    )
 
 
 def _attempted(name: str, record: dict) -> str:
@@ -192,7 +231,9 @@ def _remedy(
     A lane between turns and a lane whose launcher exited need opposite
     commands. Resuming a lane whose launcher is still running collides with
     the session lock that launcher holds, so only a stopped lane is resumed,
-    and a lane that cannot read mail is never handed a delivery command.
+    a lane whose last wake found that lock held is sent to its own client
+    even when its record reads stopped, and a lane that cannot read mail is
+    never handed a delivery command.
 
     Args:
         name: Participant that owns the lane.
@@ -207,12 +248,24 @@ def _remedy(
         the lane's recorded state.
     """
     blocked = _blocked(record)
+    wake = record.get("wake") or {}
+    if wake.get("result") == supervision.SESSION_HELD:
+        return (
+            f"take the turn waiting in {name}'s own client; its launcher "
+            "still holds the session lock, so a resume would be refused",
+            BY_OPERATOR,
+        )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
     if blocked == DIALOG:
         return (
-            f"answer the prompt open in {name}'s own client; it reads no "
-            "mail until that prompt is cleared",
+            _answer(
+                name,
+                repo,
+                record,
+                f"answer the prompt open in {name}'s own client; it reads no "
+                "mail until that prompt is cleared",
+            ),
             BY_OPERATOR,
         )
     if blocked == ATTENTION:
@@ -363,8 +416,10 @@ def _retire_rows(
     A lane whose session died keeps its claims, and the supervisor marks
     them orphaned so a peer can take them. A marker that has stood past the
     ceiling means nobody took them and the lane did not return, so the
-    lane is ready to retire. The row only names the command: the sweep
-    never releases held work on its own.
+    lane is ready to retire. A lane whose session process is alive is never
+    offered retirement, whatever its markers say, because `participant
+    retire` refuses a lane with a running session. The row only names the
+    command: the sweep never releases held work on its own.
 
     Args:
         record: One participant record from the status reading.
@@ -379,6 +434,8 @@ def _retire_rows(
         every marker is younger than the ceiling.
     """
     claims = record["claims"]
+    if record["availability"].get("process_alive") is True:
+        return []
     if not claims or not all(claim.get("orphaned") for claim in claims):
         return []
     oldest = max(
@@ -579,13 +636,16 @@ def _lane_rows(
         lane is inactive only while it owes work, meaning a claim it has not
         delivered, or while something recorded keeps it from its next turn.
         A lane that delivered everything it holds is at rest, and waking it
-        spends a turn on nothing. A lane that retired reports only the
+        spends a turn on nothing. Uncommitted work is reported only once
+        the session process is gone, because a running session owns its
+        worktree and a quiet reading does not make its edits abandoned. A
+        lane that retired reports only the
         worktree it kept,
         because its quiet is the state the operator asked for and every
         other remedy here would wake a lane that has given its work back.
     """
     name = record["participant"]
-    repo = f"--repo {root}"
+    repo = f"--repo {shlex.quote(str(root))}"
     rows: list[dict] = []
     if roster.retired(participant):
         if supervision.dirty_paths(participant["lane"]):
@@ -630,7 +690,12 @@ def _lane_rows(
                 _row(
                     APPROVAL,
                     f"the client is waiting for approval of {tool}",
-                    f"answer the prompt in {name}'s terminal",
+                    _answer(
+                        name,
+                        repo,
+                        record,
+                        f"answer the prompt in {name}'s terminal",
+                    ),
                     waited,
                     name,
                     root,
@@ -646,7 +711,12 @@ def _lane_rows(
             _row(
                 HELD,
                 f"the client is held by {shown}",
-                f"answer the prompt in {name}'s terminal",
+                _answer(
+                    name,
+                    repo,
+                    record,
+                    f"answer the prompt in {name}'s terminal",
+                ),
                 (
                     max(0, int(now - float(at)))
                     if isinstance(at, (int, float))
@@ -737,7 +807,11 @@ def _lane_rows(
                 root,
             )
         )
-    elif quiet and (changed := supervision.dirty_paths(participant["lane"])):
+    elif (
+        quiet
+        and availability["process_alive"] is not True
+        and (changed := supervision.dirty_paths(participant["lane"]))
+    ):
         lane = participant["lane"]
         rows.append(
             _row(
@@ -779,7 +853,7 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
         and counting the rest, so a lane ignoring five offers reads as one
         condition rather than five.
     """
-    repo = f"--repo {project['root']}"
+    repo = f"--repo {shlex.quote(str(project['root']))}"
     waiting: dict[str, list[tuple[int, int, dict]]] = {}
     for record in project["issues"]:
         offer = record["offer"]
@@ -795,7 +869,7 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
         age, number, offer = items[0]
         source = issues.offer_source(offer)
         command = (
-            f"agent-parley issue assign {number} {recipient} --unassign {repo}"
+            f"agent-parley issue assign {number} --unassign {repo}"
             if source == issues.OPERATOR
             else f"agent-parley issue cancel {number} {repo}"
         )
@@ -848,7 +922,7 @@ def _bounce_rows(
         name: record.get("availability") or {}
         for name, record in records.items()
     }
-    repo = f"--repo {project['root']}"
+    repo = f"--repo {shlex.quote(str(project['root']))}"
     rows = []
     for share in supervision.bounced_shares(
         home, directory, data, availability
@@ -1082,7 +1156,7 @@ def _plan_rows(directory: Path, root: str, now: float) -> list[dict]:
     except (OSError, ValueError):
         return []
     retained = list(filed.values())[-plan.MAX_PROPOSALS :]
-    where = f"--repo {root}"
+    where = f"--repo {shlex.quote(str(root))}"
     rows = [
         _row(
             ESCALATED,
@@ -1149,7 +1223,8 @@ def _run_rows(
         _row(
             RUN_BUDGET,
             f"{stopped['cause']}; no wake, dispatch, retry or launch starts",
-            f"agent-parley budget resume --repo {root} (add --reset to start "
+            f"agent-parley budget resume --repo {shlex.quote(str(root))} "
+            "(add --reset to start "
             "a new accounting period, or raise the limit with agent-parley "
             "budget enforce)",
             _age(stopped.get("at"), now),
@@ -1172,7 +1247,9 @@ def derive(
 
     Returns:
         One row per lane per cause, ordered by how long the oldest item behind
-        each has held, longest first. A store or service row carries no age and
+        each has held, longest first, with every row older than a day moved
+        after the rest so today's problems lead instead of rows a week old
+        from lanes long gone. A store or service row carries no age and
         leads the list, because no other row can be acted on until the store is
         usable and the service is up. Each row names its actor: the rows the
         coordination service already handles report what its wake loop has
@@ -1228,8 +1305,23 @@ def derive(
         aged.extend(_root_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
-    aged.sort(key=lambda row: -(row["seconds"] or 0))
+    aged.sort(
+        key=lambda row: (_stale(row), -(row["seconds"] or 0)),
+    )
     return rows + aged
+
+
+def _stale(row: dict) -> bool:
+    """Tells whether the oldest item behind a row has held past a day.
+
+    Args:
+        row: One row `derive` produced.
+
+    Returns:
+        True when the row's age exceeds `STALE_AFTER`; False for a younger
+        row or one whose age is unknown.
+    """
+    return (row["seconds"] or 0) > STALE_AFTER
 
 
 def lines(rows: list[dict]) -> list[str]:
@@ -1239,7 +1331,8 @@ def lines(rows: list[dict]) -> list[str]:
         rows: Rows `derive` produced.
 
     Returns:
-        One line per row, closed by a line counting what needs an operator
+        One line per row, with `STALE_HEADING` above the trailing rows
+        older than a day, closed by a line counting what needs an operator
         against what the coordination service is handling whenever any row
         belongs to the service, so a screen of rows still says how much of it
         is someone's work.
@@ -1254,6 +1347,11 @@ def lines(rows: list[dict]) -> list[str]:
         f"{row['condition'].ljust(width)}  {row['detail']}; {row['command']}"
         for row in rows
     ]
+    tail = len(rows)
+    while tail and _stale(rows[tail - 1]):
+        tail -= 1
+    if tail < len(rows):
+        listed.insert(tail, STALE_HEADING)
     handled = sum(row["actor"] == BY_SERVICE for row in rows)
     if handled:
         listed.append(

@@ -2,13 +2,21 @@
 
 import json
 import os
+import shlex
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from agent_parley import issues, lifecycle, process, store, supervision
+from agent_parley import (
+    cli,
+    issues,
+    lifecycle,
+    process,
+    store,
+    supervision,
+)
 from agent_parley.state import BridgeError, lock, write_json
 
 WINDOW = 300
@@ -105,6 +113,16 @@ def test_an_idle_claim_of_a_live_lane_is_offered_and_its_peer_kept(
     notice = woken["8"]["deadline_notice"]
     assert notice["holder"] == "claude"
     assert "has recorded no progress" in notice["text"]
+    taught = notice["text"].split("Record progress with ", 1)[1]
+    program, *arguments = shlex.split(taught.split(", or offer", 1)[0])
+    assert program == "agent-parley"
+    parser, _ = cli.root_parser(arguments[0])
+    parsed = parser.parse_args(arguments)
+    assert (parsed.command, parsed.state, parsed.issue) == (
+        "report",
+        "partial",
+        "8",
+    )
     assert "overdue_recovery" not in woken["7"]
 
     edit(
@@ -305,9 +323,65 @@ def test_ready_work_on_a_closed_issue_releases_without_requeueing(
     assert released["owner"] is None
     assert released["ended_on_forge"]
     assert "7" not in lifecycle.actionable(issues.snapshot(directory))
+    assert "7" not in issues.unclaimed(issues.snapshot(directory))
     reclaimed = bridge.issue(lane, "claim", "7")
     assert reclaimed["owner"] == "claude"
     assert "ended_on_forge" not in reclaimed
+
+
+def test_a_blocker_that_ended_on_the_forge_frees_its_dependents(bridge, paired):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    bridge.issue(lane, "claim", "8")
+    lifecycle.record_report(
+        directory,
+        "claude",
+        lifecycle.BLOCKED,
+        "",
+        "needs #7",
+        issue="8",
+        resume_on="7",
+    )
+    assert lifecycle.settle_dependencies(directory) == []
+    with lock(directory / "issues.lock", timeout=1):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["7"]["handoff_prompt"] = {
+            "trigger": issues.ENDED,
+            "holder": "claude",
+            "created": time.time(),
+            "responded_at": time.time(),
+        }
+        write_json(directory / "issues.json", ledger)
+    released = bridge.issue(lane, "release", "7")
+    assert released["ended_on_forge"]
+    assert lifecycle.state(released)["state"] != lifecycle.COMPLETE
+    assert "ended on forge" in issues.describe(issues.snapshot(directory))
+
+    assert lifecycle.settle_dependencies(directory) == [("8", "7")]
+    waiting = issues.snapshot(directory)["issues"]["8"]
+    assert waiting["blocked_by"] == []
+    assert lifecycle.state(waiting)["state"] == lifecycle.RUNNING
+    assert "8" in lifecycle.actionable(issues.snapshot(directory), "claude")
+    assert lifecycle.settle_dependencies(directory) == []
+
+
+def test_a_blocker_that_ended_on_the_forge_counts_as_satisfied():
+    authorized = {"authorized": True, "state": lifecycle.QUEUED}
+    ledger = {
+        "issues": {
+            "7": {"execution": dict(authorized), "ended_on_forge": {"at": 1}},
+            "8": {"execution": dict(authorized), "blocked_by": ["7"]},
+            "9": {"execution": dict(authorized)},
+            "10": {"execution": dict(authorized), "blocked_by": ["9"]},
+        }
+    }
+
+    assert lifecycle.dependencies_complete(ledger, ledger["issues"]["8"])
+    assert not lifecycle.dependencies_complete(ledger, ledger["issues"]["10"])
+    assert "8" in lifecycle.actionable(ledger)
+    assert "10" not in lifecycle.actionable(ledger)
 
 
 def test_resolve_without_an_escalation_names_release(bridge, paired):

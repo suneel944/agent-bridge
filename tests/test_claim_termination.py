@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 
@@ -155,6 +156,41 @@ def test_an_answering_holder_clears_its_own_escalation(
     assert record(claimed)["owner"] == "claude"
 
 
+def test_a_reopened_issue_retracts_its_escalation(bridge, claimed, monkeypatch):
+    closed = {
+        "state": "CLOSED",
+        "closed_at": time.time() + 1,
+        "pull_request": None,
+        "url": "",
+        "branch": "",
+        "commit": "",
+    }
+    reading = {"now": closed}
+    monkeypatch.setattr(supervision, "ISSUE_READING_SECONDS", 0.0)
+    monkeypatch.setattr(
+        supervision.forge, "issue_completion", lambda *args: reading["now"]
+    )
+    marker = escalated(bridge, claimed, monkeypatch)["unresolved_completion"]
+    assert marker["branch"] == "issue #1"
+    reading["now"] = {"state": "OPEN"}
+    supervision.poll(bridge.home, claimed.parent)
+    assert record(claimed).get("unresolved_completion") is None
+    assert record(claimed)["owner"] == "claude"
+    supervision.poll(bridge.home, claimed.parent)
+    assert record(claimed).get("unresolved_completion") is None
+
+
+def test_an_unreadable_forge_keeps_the_escalation(bridge, claimed, monkeypatch):
+    marker = escalated(bridge, claimed, monkeypatch)["unresolved_completion"]
+
+    def broken(*args):
+        raise ValueError("forge reply unreadable")
+
+    monkeypatch.setattr(forge, "issue_completion", broken)
+    supervision.poll(bridge.home, claimed.parent)
+    assert record(claimed)["unresolved_completion"] == marker
+
+
 def test_an_open_pull_request_never_escalates(bridge, claimed, monkeypatch):
     completion(monkeypatch, "OPEN", time.time() + 1)
     for _ in range(4):
@@ -208,7 +244,7 @@ def test_the_escalation_reaches_status_and_problems(
     assert len(listed) == 1
     assert listed[0]["participant"] == "claude"
     assert listed[0]["command"] == (
-        f"agent-parley issue resolve 1 --repo {paired['root']}"
+        f"agent-parley issue resolve 1 --repo {shlex.quote(paired['root'])}"
     )
 
 

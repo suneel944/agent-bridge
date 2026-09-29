@@ -6,12 +6,17 @@ reference for the same views is in [Operations](operations.md#reading-status).
 
 ## Four presence states
 
-A lane is reported in one of four states, and they are not interchangeable:
+A lane's availability is one of four states, and they are not interchangeable.
+Availability is what supervision decides on and what `--json` carries under
+`availability`; it is not the `STATE` column of `status` and `top`, which shows
+`retired` or `paused` when the operator set either, else the lane's recorded
+state, such as `working`, `blocked` or `dead`, and falls back to availability
+only for a lane with no record yet.
 
 | State | What it means | What it is not |
 | --- | --- | --- |
-| `active` | The lane served a coordination call inside the configured interval. | — |
-| `idle` | The session process is alive, but nothing was served inside the inactivity threshold. | Not a lost lane, and not an error. |
+| `active` | The session process is alive and its last hook checkpoint is inside the inactivity threshold. | — |
+| `idle` | The session process is alive, but its last hook checkpoint is older than the inactivity threshold. | Not a lost lane, and not an error. |
 | `stopped` | The recorded session process is gone. | Not merely a quiet lane. |
 | `unknown` | The session's process identity cannot be trusted. | Never inferred dead from its age; it is left for you to inspect. |
 
@@ -184,9 +189,12 @@ per project, the open work: each live claim's issue, title, owner, lane state,
 last event and pull request, then one line per lane with its state, live claim
 count and current task. Inside a project checkout it reports that project only;
 `--all-projects` adds the rest, dormant ones last, and `--all` adds claims whose
-issue is closed or whose pull request ended. Titles and open state come from a
-bounded read of the forge's open issues, cached for 300 seconds in the project
-state directory; a failed read falls back to that cache with one `Forge:` line.
+issue is closed or whose pull request ended. Titles and open state come from
+`forge-issues.json` in the project state directory, which the service's poll
+refreshes from a bounded read of the forge's open issues every 300 seconds;
+`status` reads only that file and never calls the forge. A cache older than
+600 seconds, one never read, or one listing too many issues to read whole adds
+one `Forge:` line.
 `--json` stays the complete reading of every
 project. `status --table` prints one table per project, a row per participant:
 ownership, activity and outcomes.
@@ -365,11 +373,13 @@ its lane history.
 
 ## `problems`
 
-One screen says what needs you now. `agent-parley problems` lists, oldest first,
-every condition an operator should act on: a lane stalled or inactive past its
-supervision threshold, a claim past its deadline, a handoff offer with no
-answer, a message awaiting acknowledgement past `--ack-after`, a lane whose
-branch drifted or whose worktree is dirty with no recent activity, a lane over
+One screen says what needs you now. `agent-parley problems` lists, longest-held
+first, with rows older than a day moved under an `Older than a day:` heading at
+the end, every condition an operator should act on: a lane stalled or inactive
+past its supervision threshold, a claim past its deadline, a handoff offer with
+no answer, a message awaiting acknowledgement past `--ack-after`, a lane whose
+branch drifted, a lane whose session process is no longer confirmed running and
+whose worktree is dirty with no recent activity, a lane over
 its advisory budget, a lane holding more claims than `max_claims_per_lane`, a
 store schema behind the code, and a service that is down. It also lists an
 issue `not converging`, an `integration unverified` on the base checkout, a

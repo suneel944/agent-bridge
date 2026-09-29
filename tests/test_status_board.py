@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import checkpoints, cli, forge, issues, store, supervision
+from agent_parley import (
+    checkpoints,
+    cli,
+    forge,
+    issues,
+    roster,
+    store,
+    supervision,
+)
 from agent_parley.state import write_json
 from agent_parley.status import FORGE_ISSUES, FORGE_TIMEOUT, dormant
 
@@ -340,11 +348,36 @@ def rows(lines):
     return [line.split()[0] for line in lines if line.startswith("#")]
 
 
+def poll_forge(bridge, repo):
+    """Runs the supervisor's forge refresh for the fixture's project."""
+    directory = bridge.project(repo)[1]
+    supervision.refresh_forge_issues(directory, roster.read(directory))
+
+
+def test_status_never_reads_the_forge_or_writes_its_cache(
+    bridge, repo, paired, monkeypatch, capsys, offline
+):
+    cache = claimed(bridge, repo, paired, monkeypatch)
+    offline["answer"] = {"42": {"title": "Wire the forge", "labels": []}}
+    lines = board(monkeypatch, bridge, capsys)
+    assert offline["calls"] == []
+    assert not cache.exists()
+    assert rows(lines) == ["#42", "#43"]
+    assert any("unavailable (service not refreshing)" in x for x in lines)
+    stale = {"read_at": time.time() - 3600, "limit": 1000, "issues": {}}
+    write_json(cache, stale)
+    lines = board(monkeypatch, bridge, capsys)
+    assert offline["calls"] == []
+    assert json.loads(cache.read_text()) == stale
+    assert any("refresh failed (service not refreshing)" in x for x in lines)
+
+
 def test_a_fresh_forge_reading_hides_closed_issues_and_titles_the_rest(
     bridge, repo, paired, monkeypatch, capsys, offline
 ):
     cache = claimed(bridge, repo, paired, monkeypatch)
     offline["answer"] = {"42": {"title": "Wire the forge", "labels": []}}
+    poll_forge(bridge, repo)
     lines = board(monkeypatch, bridge, capsys)
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#42"]
@@ -358,6 +391,7 @@ def test_a_fresh_forge_reading_hides_closed_issues_and_titles_the_rest(
         "42": {"title": "Wire the forge"}
     }
     offline["answer"] = {}
+    poll_forge(bridge, repo)
     lines = board(monkeypatch, bridge, capsys, "--all")
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#42", "#43"]
@@ -375,6 +409,7 @@ def test_a_failed_refresh_falls_back_to_the_stale_reading_once(
             "issues": {"43": {"title": "Still open"}},
         },
     )
+    poll_forge(bridge, repo)
     lines = board(monkeypatch, bridge, capsys)
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#43"]
@@ -384,6 +419,7 @@ def test_a_failed_refresh_falls_back_to_the_stale_reading_once(
     assert "ago; refresh failed (forge unreachable)" in notes[0]
     assert json.loads(cache.read_text())["failed_at"] > 0
     offline["answer"] = {"42": {"title": "Wire", "labels": []}}
+    poll_forge(bridge, repo)
     lines = board(monkeypatch, bridge, capsys)
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#43"]
@@ -393,6 +429,7 @@ def test_no_forge_reading_hides_nothing_and_says_so(
     bridge, repo, paired, monkeypatch, capsys, offline
 ):
     cache = claimed(bridge, repo, paired, monkeypatch)
+    poll_forge(bridge, repo)
     lines = board(monkeypatch, bridge, capsys)
     assert rows(lines) == ["#42", "#43"]
     assert [line for line in lines if line.startswith("Forge:")] == [
@@ -401,6 +438,8 @@ def test_no_forge_reading_hides_nothing_and_says_so(
     ]
     monkeypatch.setattr(forge, "select", lambda root, manifest: "null")
     cache.unlink()
+    poll_forge(bridge, repo)
+    assert not cache.exists()
     lines = board(monkeypatch, bridge, capsys)
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#42", "#43"]

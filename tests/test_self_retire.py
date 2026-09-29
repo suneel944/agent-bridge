@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from agent_parley import (
     terminal,
 )
 from agent_parley.process import start_ticks
-from agent_parley.state import BridgeError, write_json
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
 
 
 @pytest.fixture(autouse=True)
@@ -288,7 +289,8 @@ def test_a_retired_lane_reports_only_the_worktree_it_kept(bridge, repo, paired):
 
     assert [row["condition"] for row in found] == [problems.DIRTY]
     assert found[0]["command"] == (
-        f"agent-parley participant add claude --repo {paired['root']}"
+        "agent-parley participant add claude --repo "
+        f"{shlex.quote(paired['root'])}"
     )
 
 
@@ -358,3 +360,26 @@ def test_a_lane_holding_ready_work_is_refused_before_releasing_any(
         "claude",
     ]
     assert not roster.retired(entry(directory, "claude"))
+
+
+def test_a_held_lane_lock_refuses_the_retirement_and_changes_nothing(
+    bridge, repo, paired, monkeypatch
+):
+    monkeypatch.setattr(retirement, "LOCK_SECONDS", 0.05)
+    directory = bridge.project(repo)[1]
+    worktree = Path(paired["lanes"]["claude"])
+    identity = directory / "claude-identity.json"
+    write_json(identity, {})
+    bridge.issue(str(worktree), "claim", "4")
+
+    with lock(directory / "claude-checkpoint.lock"):
+        with pytest.raises(LockBusy, match="nothing was retired"):
+            retirement.withdraw(directory, "claude")
+
+    assert worktree.exists()
+    assert identity.exists()
+    assert not roster.retired(entry(directory, "claude"))
+    assert issues.snapshot(directory)["issues"]["4"]["owner"] == "claude"
+    result = retirement.withdraw(directory, "claude")
+    assert result["worktree"] == retirement.PRUNED
+    assert not identity.exists()

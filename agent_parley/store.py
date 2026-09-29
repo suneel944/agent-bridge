@@ -26,7 +26,7 @@ from agent_parley.roster import OPERATOR
 from agent_parley.state import BridgeError, lock
 
 DATABASE = "bridge.sqlite3"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 SCHEMA_ABSENT = "absent"
 SCHEMA_BEHIND = "needs migration"
 SCHEMA_CURRENT = "ok"
@@ -353,6 +353,11 @@ def initialize(home: Path) -> None:
     stored message an empty topic and keeps it out of the feed, so routing
     and supersession apply only to mail sent after the upgrade.
 
+    Upgrading a store written before spilled bodies were indexed rebuilds
+    the full-text index once, so a message whose body spilled to an
+    attachment is found by the text of that attachment rather than only by
+    the slice its record keeps.
+
     A store already stamped with this build's schema still has every column
     this build owns verified and added where it is missing. The stamp says
     which upgrade ran, not that its columns are all present, and a store
@@ -389,7 +394,7 @@ def initialize(home: Path) -> None:
                 _add_reservation_ttl(db)
                 _add_supersession(db)
                 _add_topic(db)
-                _add_message_search(db)
+                _add_message_search(db, home)
                 _add_schedule_cancellation(db)
                 if version == SCHEMA_VERSION:
                     return
@@ -403,7 +408,7 @@ def initialize(home: Path) -> None:
                         "WHERE created_ts IS NULL"
                     )
                 _open_threads(db)
-                _rebuild_search(db)
+                _rebuild_search(db, home)
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -567,13 +572,17 @@ def _add_reservation_created(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE file_reservations ADD COLUMN created_ts TEXT")
 
 
-def _add_message_search(db: sqlite3.Connection) -> None:
+def _add_message_search(db: sqlite3.Connection, home: Path) -> None:
     """Creates the full-text index where the SQLite build provides FTS5.
 
     Startup reconciles triggers even at the current schema version. Without
     FTS5, old triggers must be removed so ordinary message writes still work.
     When FTS5 returns, missing triggers cause an index rebuild to include mail
     delivered by the interpreter that could not maintain it.
+
+    Args:
+        db: Open write transaction owned by the caller.
+        home: Private bridge state root the project directories live under.
     """
     if not _fts_available(db):
         db.execute("DROP TRIGGER IF EXISTS message_indexed")
@@ -590,7 +599,7 @@ def _add_message_search(db: sqlite3.Connection) -> None:
             db.execute(statement)
             statement = ""
     if triggers != 2:
-        _rebuild_search(db)
+        _rebuild_search(db, home)
 
 
 def _fts_available(db: sqlite3.Connection) -> bool:
@@ -616,11 +625,46 @@ def _open_threads(db: sqlite3.Connection) -> None:
     )
 
 
-def _rebuild_search(db: sqlite3.Connection) -> None:
-    """Indexes every stored message when this store carries an index."""
-    if _searchable(db):
+def _rebuild_search(db: sqlite3.Connection, home: Path) -> None:
+    """Indexes every stored message when this store carries an index.
+
+    A body that spilled to an attachment keeps only its opening slice in
+    ``body_md``, which is all a rebuild reads. Each spilled message is then
+    indexed again from its attachment, as it was when it was sent, so its
+    whole body stays searchable. An attachment that is missing or unreadable
+    leaves the slice indexed.
+
+    Args:
+        db: Open write transaction owned by the caller.
+        home: Private bridge state root the project directories live under.
+    """
+    if not _searchable(db):
+        return
+    db.execute("INSERT INTO message_search(message_search) VALUES ('rebuild')")
+    rows = db.execute(
+        "SELECT m.id,m.subject,m.body_md,a.name,p.human_key FROM messages m "
+        "JOIN agents a ON a.id=m.sender_id "
+        "JOIN projects p ON p.id=m.project_id "
+        "WHERE m.body_md LIKE '%[attachment message-%'"
+    ).fetchall()
+    for identifier, subject, stored, sender, project in rows:
+        ref = attachments.reference("message", identifier)
+        found = attachments.find(stored)
+        directory = roster.locate(home, project)
+        if not found or found[0] != ref or directory is None:
+            continue
+        try:
+            body = attachments.body(directory, ref, sender)
+        except BridgeError:
+            continue
         db.execute(
-            "INSERT INTO message_search(message_search) VALUES ('rebuild')"
+            "INSERT INTO message_search(message_search,rowid,subject,body_md)"
+            " VALUES ('delete',?,?,?)",
+            (identifier, subject, stored),
+        )
+        db.execute(
+            "INSERT INTO message_search(rowid,subject,body_md) VALUES (?,?,?)",
+            (identifier, subject, body),
         )
 
 
@@ -1200,6 +1244,10 @@ def _send(
     its sender and its recipients alone. A decision addresses recipients
     like any other message, and may address none, which records the decision
     without putting it in an inbox.
+
+    A repeated send with a key that already names a delivered message
+    returns that message before any recipient's credential is judged, so a
+    retry succeeds even after a recipient has since been retired.
     """
     subject = _text(args.get("subject"), "subject", 160)
     body = _text(
@@ -1240,6 +1288,7 @@ def _send(
         )
     ids = []
     addressed: dict[int, str] = {}
+    inactive = []
     for recipient in recipients:
         name = _text(recipient, "recipient", 80)
         row = db.execute(
@@ -1249,10 +1298,7 @@ def _send(
         if not row:
             raise BridgeError("Recipient is not registered in your project.")
         if row["token_digest"] is None:
-            raise BridgeError(
-                f"Recipient {name!r} cannot receive mail: "
-                "operator or retired participant has no active credential."
-            )
+            inactive.append(name)
         ids.append(row[0])
         addressed[row[0]] = name
     existing = db.execute(
@@ -1289,6 +1335,11 @@ def _send(
             "thread_id": existing["thread_id"],
             "duplicate": True,
         }
+    if inactive:
+        raise BridgeError(
+            f"Recipient {inactive[0]!r} cannot receive mail: "
+            "operator or retired participant has no active credential."
+        )
     delivered = set(ids)
     if route and not ack and not decision:
         delivered = _routed(
@@ -1357,6 +1408,17 @@ def _send(
                     attachments.reference("message", message_id),
                 )
             )
+        if decision or fed:
+            readers = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM agents WHERE project_id=?",
+                    (actor["project_id"],),
+                )
+            }
+            readers.add(OPERATOR)
+        else:
+            readers = {str(name) for name in recipients}
         stored, ref = attachments.spill(
             directory,
             "message",
@@ -1364,7 +1426,8 @@ def _send(
             body,
             MAX_BODY_BYTES,
             actor["name"],
-            [str(name) for name in recipients],
+            sorted(readers),
+            _settled_attachments(db, actor, message_id),
         )
         db.execute(
             "UPDATE messages SET body_md=? WHERE id=?", (stored, message_id)
@@ -1372,6 +1435,39 @@ def _send(
         result["attachment"] = ref
         result["attachment_bytes"] = len(body.encode())
     return result
+
+
+def _settled_attachments(
+    db: sqlite3.Connection, actor: dict, message_id: int | None
+) -> list[str]:
+    """Lists the sender's attachment-bearing messages every recipient read.
+
+    Messages are never pruned, so this is what lets a lane's attachment
+    allowance free again. A recipient whose copy was superseded counts as
+    finished with it; a message with no recipient row, such as a feed-only
+    post, and a decision, which every participant may read, are never
+    listed. The list is oldest first so the longest-settled
+    bodies are released before newer ones.
+
+    Args:
+        db: Open store connection.
+        actor: Sending participant.
+        message_id: Message being sent, which is never listed.
+
+    Returns:
+        Attachment references of those messages, oldest first.
+    """
+    rows = db.execute(
+        "SELECT m.id FROM messages m WHERE m.sender_id=? AND m.id IS NOT ? "
+        "AND m.decision=0 AND m.body_md LIKE '%[attachment message-%' "
+        "AND EXISTS ("
+        "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id) "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id "
+        "AND r.read_ts IS NULL AND r.superseded_ts IS NULL) ORDER BY m.id",
+        (actor["id"], message_id),
+    ).fetchall()
+    return [attachments.reference("message", row[0]) for row in rows]
 
 
 def _roster(db: sqlite3.Connection, actor: dict) -> dict:
@@ -2497,7 +2593,9 @@ def _grant_queued(
 
     Requests are read in the order they were recorded, so the first lane to
     ask for a key is the first to take it, and a key that another lane still
-    holds is left queued rather than granted twice. A request whose lane no
+    holds is left queued rather than granted twice. A request whose lane
+    already holds the key at the strength it asked for is marked granted
+    without a new lease or notice. A request whose lane no
     longer holds a credential is left alone: a revoked registration expires
     its requests instead.
 
@@ -2539,6 +2637,18 @@ def _grant_queued(
     for request in queued:
         pattern = request["path_pattern"]
         if not any(overlapping(pattern, key) for key in released):
+            continue
+        if any(
+            owner == request["agent_id"]
+            and key == pattern
+            and (exclusive or not request["exclusive"])
+            for owner, key, exclusive in held
+        ):
+            db.execute(
+                "UPDATE reservation_requests SET granted_ts=CURRENT_TIMESTAMP "
+                "WHERE id=?",
+                (request["id"],),
+            )
             continue
         if any(
             owner != request["agent_id"]
@@ -3837,6 +3947,7 @@ def decide(home: Path, root: str, subject: str, body: str, key: str) -> dict:
                 "idempotency_key": key,
                 "decision": True,
             },
+            directory=roster.locate(home, root),
         )
 
 
@@ -4181,6 +4292,7 @@ def speak(
                 "ack_required": ack,
                 "ack_within": within,
             },
+            directory=roster.locate(home, root),
         )
 
 
@@ -4860,7 +4972,9 @@ def transfer_reservations(
     observes both lanes holding a key, and none observes neither holding it. A
     key the source no longer holds is skipped rather than invented for the
     target, and a key the target already holds is superseded by the moved
-    lease so one lane never accumulates two live records of one key.
+    lease so one lane never accumulates two live records of one key. A
+    request the target had queued for a moved key is marked granted, so a
+    later release never grants it the key a second time.
 
     Args:
         home: Private bridge state root.
@@ -4916,6 +5030,7 @@ def transfer_reservations(
                     lease["ttl_seconds"],
                 ),
             )
+            _settle_requests(db, receiver["id"], lease)
             moved.append(lease["path_pattern"])
     return moved
 
@@ -4980,8 +5095,33 @@ def transfer_claim_reservations(
                     lease["ttl_seconds"],
                 ),
             )
+            _settle_requests(db, receiver["id"], lease)
             moved.append(lease["path_pattern"])
     return moved
+
+
+def _settle_requests(
+    db: sqlite3.Connection, agent_id: int, lease: sqlite3.Row
+) -> None:
+    """Marks a lane's queued requests that a moved lease now satisfies.
+
+    A lane queued for a key and then handed that key's lease already holds
+    what it asked for. Leaving its request open would let the next release
+    of the key grant it again, displacing whoever holds it then. An
+    exclusive lease satisfies any request for its key; a shared lease
+    satisfies only a shared request.
+
+    Args:
+        db: Open transaction owned by the caller.
+        agent_id: Lane that received the lease.
+        lease: Moved lease, with its key and exclusivity.
+    """
+    db.execute(
+        "UPDATE reservation_requests SET granted_ts=CURRENT_TIMESTAMP "
+        "WHERE agent_id=? AND path_pattern=? AND granted_ts IS NULL "
+        "AND cancelled_ts IS NULL AND (exclusive=0 OR ?)",
+        (agent_id, lease["path_pattern"], bool(lease["exclusive"])),
+    )
 
 
 def release_reservations(home: Path, root: str, name: str) -> list[str]:

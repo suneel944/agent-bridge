@@ -92,8 +92,10 @@ ASK = "ask"
 FREE_TEXT = "type something"
 SHELL_TITLE = "Bash command"
 BRIDGE_ANSWER = "Yes"
+SHELL_NOTICE = "This command requires approval"
 SHELL_OPERATORS = re.compile(r"[;&|<>$`\\]")
 BOX = re.compile(r"[─-╿]")
+ROW_BREAKS = re.compile(r"\r\n|[\r\n]|\x1b\[[0-9;]*[ABEFHdf]")
 
 ESCAPES = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
@@ -226,6 +228,27 @@ def flatten(data: bytes) -> str:
     """
     text = ESCAPES.sub(" ", data.decode("utf-8", "replace"))
     return " ".join(CONTROL.sub(" ", text).split())
+
+
+def rows(data: bytes) -> list[str]:
+    """Renders a pseudo-terminal byte stream as the rows it draws.
+
+    A line feed, a carriage return and every escape that moves the cursor to
+    another row or to an absolute position end a row, so a command drawn on
+    two rows stays two rows however the client paints them. Box drawing is
+    blanked like any other border.
+
+    Args:
+        data: Bytes read from the client's pseudo-terminal.
+
+    Returns:
+        Each non-blank row in drawing order, whitespace collapsed to one
+        space.
+    """
+    text = ROW_BREAKS.sub("\n", data.decode("utf-8", "replace"))
+    text = BOX.sub(" ", CONTROL.sub(" ", ESCAPES.sub(" ", text)))
+    drawn = (" ".join(line.split()) for line in text.split("\n"))
+    return [line for line in drawn if line]
 
 
 def _picker_start(region: str, end: int) -> int:
@@ -635,7 +658,7 @@ def _opted_in(manifest: dict, name: str, key: str) -> bool:
     return chosen is True
 
 
-def bridge_shell(screen: str, text: str) -> bool:
+def bridge_shell(screen: str, text: str, data: bytes) -> bool:
     """Reports whether a shell permission prompt asks for this bridge's CLI.
 
     The protocol prompt orders every lane to run `protocol.cli_command`
@@ -643,11 +666,16 @@ def bridge_shell(screen: str, text: str) -> bool:
     parks on the first such command. Only a prompt titled as a shell command
     whose command begins with that exact interpreter and module, and whose
     remainder carries no shell operator that could chain a second command,
-    qualifies. Any other screen escalates as before.
+    qualifies. A newline chains commands too, and the flattened screen
+    cannot show one, so the drawn rows must hold the command on one row
+    followed by at most the description row and the client's approval
+    notice. A long command the client wraps onto a second row therefore
+    escalates as well. Any other screen escalates as before.
 
     Args:
         screen: Flattened screen text.
         text: Part of the screen that draws the prompt's question and options.
+        data: Terminal bytes the screen was flattened from.
 
     Returns:
         True when the prompt asks to run this bridge's CLI and nothing else.
@@ -661,7 +689,37 @@ def bridge_shell(screen: str, text: str) -> bool:
     command = protocol.cli_command() + " "
     if not shown.startswith(command):
         return False
-    return SHELL_OPERATORS.search(shown[len(command) :]) is None
+    if SHELL_OPERATORS.search(shown[len(command) :]) is not None:
+        return False
+    body = _shell_rows(data)
+    return 1 <= len(body) <= 2 and body[0].startswith(command)
+
+
+def _shell_rows(data: bytes) -> list[str]:
+    """Reads the rows a shell prompt draws between its title and question.
+
+    Args:
+        data: Terminal bytes that draw the prompt.
+
+    Returns:
+        The rows after the last shell title and before the prompt's question,
+        without a closing approval notice, or no rows when no title is drawn.
+    """
+    drawn = rows(data)
+    titles = [at for at, row in enumerate(drawn) if SHELL_TITLE in row]
+    if not titles:
+        return []
+    first = drawn[titles[-1]]
+    rest = first[first.rfind(SHELL_TITLE) + len(SHELL_TITLE) :].strip()
+    body = [rest] if rest else []
+    question = BY_NAME[PERMISSION].pattern
+    for row in drawn[titles[-1] + 1 :]:
+        if question.search(row):
+            break
+        body.append(row)
+    if body[-1:] == [SHELL_NOTICE]:
+        body.pop()
+    return body
 
 
 def standing_reply(manifest: dict, name: str) -> str:
@@ -861,7 +919,7 @@ class Watch:
             and found is not None
             and found.dialog.name == PERMISSION
             and not self._answers.get(PERMISSION)
-            and bridge_shell(screen, found.text)
+            and bridge_shell(screen, found.text, self._tail)
             and self._opted_in()
         )
 
@@ -907,7 +965,7 @@ class Watch:
             if (
                 not answer
                 and dialog.name == PERMISSION
-                and bridge_shell(screen, found.text)
+                and bridge_shell(screen, found.text, self._tail)
                 and self._opted_in()
             ):
                 answer = BRIDGE_ANSWER

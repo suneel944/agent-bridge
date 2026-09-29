@@ -55,7 +55,8 @@ from agent_parley.cli import (
     main,
     write_json,
 )
-from agent_parley.issues import MAX_BLOCKERS, describe
+from agent_parley.issues import MAX_BLOCKERS, describe, merge_claim
+from agent_parley.merges import launch_busy
 from agent_parley.process import start_ticks
 from agent_parley.server import TOOLS
 from scripts.check_pr_hygiene import issue_numbers, validate
@@ -189,7 +190,8 @@ def test_checkpoint_waits_for_a_short_activity_update(
 
 def test_public_state_directory_rejected(tmp_path):
     public = tmp_path / "public"
-    public.mkdir(mode=0o755)
+    public.mkdir()
+    public.chmod(0o755)
     with pytest.raises(BridgeError, match="private"):
         Bridge(public)
 
@@ -484,6 +486,69 @@ def test_native_hook_blocks_drift_until_exact_restore(bridge, repo, paired):
         None,
         "branch_restore",
     )
+
+
+def test_lane_rebasing_its_own_branch_can_finish_or_abort(bridge, repo, paired):
+    lane = Path(paired["lanes"]["codex"])
+    expected = paired["branches"]["codex"]
+    git(lane, "config", "user.email", "test@example.com")
+    git(lane, "config", "user.name", "Test")
+    git(lane, "switch", "-c", "upstream")
+    (lane / "clash.txt").write_text("upstream\n")
+    git(lane, "add", "clash.txt")
+    git(lane, "commit", "-m", "upstream side")
+    git(lane, "switch", expected)
+    (lane / "clash.txt").write_text("lane\n")
+    git(lane, "add", "clash.txt")
+    git(lane, "commit", "-m", "lane side")
+    rebase = subprocess.run(
+        ["git", "-C", str(lane), "rebase", "upstream"],
+        capture_output=True,
+        check=False,
+    )
+    assert rebase.returncode
+    assert git(lane, "branch", "--show-current") == ""
+    payload = {
+        "cwd": str(lane),
+        "tool_input": {"command": "git rebase --abort"},
+    }
+    assert branch_guard("PreToolUse", payload, lane, expected) == (
+        None,
+        "branch_rebase",
+    )
+    blocked, reason = branch_guard("Stop", payload, lane, expected)
+    assert "git rebase --abort" in blocked["reason"]
+    assert reason == "branch_rebase"
+    assert branch_guard(
+        "Stop", {**payload, "stop_hook_active": True}, lane, expected
+    ) == ({}, "branch_rebase")
+    git(lane, "rebase", "--abort")
+    assert git(lane, "branch", "--show-current") == expected
+    git(lane, "switch", "--detach")
+    denied, reason = branch_guard("PreToolUse", payload, lane, expected)
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert reason == "branch_drift"
+
+
+def test_launch_refusal_names_the_session_holding_the_lane(tmp_path):
+    assert "retry when it finishes" in launch_busy(tmp_path, "claude-3")
+    (tmp_path / "claude-3-activity.json").write_text(
+        json.dumps(
+            {
+                "launcher_pid": os.getpid(),
+                "launcher_ticks": start_ticks(os.getpid()),
+                "session_pid": 4242,
+                "session_started": 0,
+                "activity": "dialog: an unrecognized native prompt",
+            }
+        )
+    )
+    message = launch_busy(tmp_path, "claude-3")
+    assert f"launcher {os.getpid()}, client 4242" in message
+    assert "since 1970-01-01 00:00 UTC" in message
+    assert "dialog: an unrecognized native prompt" in message
+    assert "`agent-parley participant stop claude-3`" in message
+    assert "retry when" not in message
 
 
 @pytest.mark.parametrize("create_first", [False, True])
@@ -1872,8 +1937,8 @@ def test_a_report_requires_one_claim_and_comments_on_that_issue(
     assert "claude" not in posted[0][1]
     assert "make check passed" in posted[0][1]
     assert "neither review nor independent verification" in posted[0][1]
-    with pytest.raises(BridgeError, match="owns multiple issues"):
-        bridge.merge(repo, "claude")
+    directory = bridge.project(repo)[1]
+    assert merge_claim(directory, "claude")["issue"] == 432
 
     bridge.report(
         claude,

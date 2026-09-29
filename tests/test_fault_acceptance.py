@@ -162,6 +162,11 @@ class Scenario:
         self.repo = repo
         self.clock = clock
         self.directory = Path(paired["lanes"]["claude"]).parent
+        self.root = paired["root"]
+        self.displays = {
+            name: participant["display"]
+            for name, participant in paired["participants"].items()
+        }
         self.start = clock()
         self.service = True
         self.unaccounted = 0
@@ -285,6 +290,11 @@ def test_a_lane_killed_mid_claim_is_taken_over_and_completed(scenario):
     holder.kill()
     scenario.tick(STALL + 1)
     assert scenario.record()["orphan"]["owner"] == "claude"
+    assert "claude" in scenario.resumes
+    waiting = store.waiting(
+        scenario.bridge.home, scenario.root, scenario.displays["codex"]
+    )
+    assert waiting["kind"] == "unread"
     scenario.bridge.issue(peer.lane, "claim", NUMBER, take_orphaned=True)
     peer.turn()
     scenario.tick()

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -110,6 +111,11 @@ def run(monkeypatch, capsys, bridge, *extra):
     return code, capsys.readouterr().out
 
 
+def at(root):
+    """Renders the quoted --repo argument a remedy ends with."""
+    return f"--repo {shlex.quote(str(root))}"
+
+
 def rows(bridge, condition=None, **extra):
     """Derives the rows, optionally narrowed to one condition."""
     found = bridge.problems(**extra)
@@ -212,7 +218,7 @@ def test_a_stalled_lane_the_service_cannot_wake_names_the_say(
     [row] = rows(bridge, problems.STALLED)
     assert row["actor"] == problems.BY_OPERATOR
     assert row["command"] == (
-        f'agent-parley say claude "<text>" --repo {paired["root"]}'
+        f'agent-parley say claude "<text>" {at(paired["root"])}'
     )
     assert "--resume" not in row["command"]
 
@@ -241,7 +247,7 @@ def test_a_stopped_lane_awaiting_acknowledgement_names_the_resume(
     deliver(bridge, repo, paired, ack=True, aged=1800)
     [row] = rows(bridge, problems.ACK, ack_after=600)
     assert row["command"] == (
-        f"agent-parley run claude --resume --repo {paired['root']}"
+        f"agent-parley run claude --resume {at(paired['root'])}"
     )
     assert not rows(bridge, problems.STALLED)
     assert not rows(bridge, problems.INACTIVE)
@@ -405,6 +411,29 @@ def test_a_held_permission_prompt_is_a_waiting_on_approval_row(
     assert problems.APPROVAL == "waiting on approval"
 
 
+def test_a_prompt_in_a_lane_resumed_without_a_terminal_names_the_restart(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "claude",
+        attached=False,
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    deliver(bridge, repo, paired, ack=True, aged=1800)
+    found = rows(bridge, ack_after=600)
+    [row] = [item for item in found if item["condition"] == problems.APPROVAL]
+    assert "claude's terminal" not in row["command"]
+    assert str(directory / "claude-wake.log") in row["command"]
+    assert f"participant restart claude {at(paired['root'])}" in row["command"]
+    assert all("agent-parley say" not in item["command"] for item in found)
+
+
 def test_a_paused_lane_is_resumed_rather_than_spoken_to(
     bridge, repo, paired, served
 ):
@@ -414,7 +443,7 @@ def test_a_paused_lane_is_resumed_rather_than_spoken_to(
     [row] = rows(bridge, problems.INACTIVE)
     assert row["actor"] == problems.BY_OPERATOR
     assert row["command"] == (
-        f"agent-parley participant resume claude --repo {paired['root']}"
+        f"agent-parley participant resume claude {at(paired['root'])}"
     )
 
 
@@ -438,6 +467,12 @@ def test_a_paused_lane_is_resumed_rather_than_spoken_to(
             "produced no checkpoint",
             "the coordination service wakes claude on its next poll; no "
             "operator action yet",
+        ),
+        (
+            supervision.SESSION_HELD,
+            "holds the session lock",
+            "take the turn waiting in claude's own client; its launcher "
+            "still holds the session lock, so a resume would be refused",
         ),
     ],
 )
@@ -501,7 +536,7 @@ def test_an_overdue_claim_names_the_release(bridge, repo, paired, served):
     assert row["participant"] == "claude"
     assert row["seconds"] >= 300
     assert row["command"] == (
-        f"agent-parley issue release 42 --repo {paired['root']}"
+        f"agent-parley issue release 42 {at(paired['root'])}"
     )
     assert row["count"] == 1
 
@@ -575,12 +610,12 @@ def test_two_overdue_claims_on_one_lane_are_one_row(
     assert row["seconds"] >= 900
     assert row["detail"] == "2 claims are past their deadline: #42, #43"
     assert row["command"] == (
-        f"agent-parley issue release 42 --repo {paired['root']}"
+        f"agent-parley issue release 42 {at(paired['root'])}"
     )
 
 
 def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
-    bridge, repo, paired, served
+    bridge, repo, paired, served, monkeypatch, capsys
 ):
     bridge.issue(paired["lanes"]["claude"], "claim", "1")
     bridge.issue(
@@ -590,14 +625,21 @@ def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
     assert row["participant"] == "codex"
     assert "offered to codex by peer" in row["detail"]
     assert row["command"] == (
-        f"agent-parley issue cancel 1 --repo {paired['root']}"
+        f"agent-parley issue cancel 1 {at(paired['root'])}"
     )
     bridge.issue(paired["lanes"]["claude"], "cancel", "1")
     bridge.issue_assign(repo, "2", "codex")
     [row] = rows(bridge, problems.OFFER)
     assert row["command"] == (
-        f"agent-parley issue assign 2 codex --unassign --repo {paired['root']}"
+        f"agent-parley issue assign 2 --unassign {at(paired['root'])}"
     )
+    program, *arguments = shlex.split(row["command"])
+    monkeypatch.setattr(
+        sys, "argv", [program, "--home", str(bridge.home), *arguments]
+    )
+    assert cli.main() == 0
+    capsys.readouterr()
+    assert rows(bridge, problems.OFFER) == []
 
 
 def test_two_offers_waiting_on_one_lane_are_one_row(
@@ -622,7 +664,7 @@ def test_two_offers_waiting_on_one_lane_are_one_row(
     assert row["seconds"] >= 900
     assert row["detail"] == "2 offers await codex, the oldest issue #1 by peer"
     assert row["command"] == (
-        f"agent-parley issue cancel 1 --repo {paired['root']}"
+        f"agent-parley issue cancel 1 {at(paired['root'])}"
     )
 
 
@@ -654,7 +696,7 @@ def test_a_parked_lane_with_twenty_awaited_messages_is_one_row(
     assert row["seconds"] >= 1800
     assert row["detail"].startswith("20 messages await acknowledgement, ")
     assert row["command"] == (
-        f"agent-parley run claude --resume --repo {paired['root']}"
+        f"agent-parley run claude --resume {at(paired['root'])}"
     )
 
 
@@ -716,7 +758,7 @@ def test_a_bounced_share_is_a_row_on_the_sender(bridge, repo, paired, served):
     assert f"share {share['id']}" in row["detail"]
     assert "codex has no live session process" in row["detail"]
     assert row["command"] == (
-        f"agent-parley run codex --resume --repo {paired['root']}"
+        f"agent-parley run codex --resume {at(paired['root'])}"
     )
 
 
@@ -729,7 +771,7 @@ def test_a_drifted_lane_names_the_restore(bridge, repo, paired, served):
     [row] = rows(bridge, problems.DRIFT)
     assert "on elsewhere instead of" in row["detail"]
     assert row["command"] == (
-        f"agent-parley participant restore claude --repo {paired['root']}"
+        f"agent-parley participant restore claude {at(paired['root'])}"
     )
     assert not rows(bridge, problems.DIRTY)
 
@@ -762,7 +804,7 @@ def test_a_lane_over_its_budget_names_the_budget_command(
     [row] = rows(bridge, problems.BUDGET)
     assert row["detail"].startswith("over budget; hours 2h of 1h")
     assert row["command"] == (
-        f"agent-parley participant budget claude --repo {paired['root']}"
+        f"agent-parley participant budget claude {at(paired['root'])}"
     )
 
 
@@ -770,7 +812,7 @@ def test_rows_are_ordered_longest_held_first_behind_the_store_and_service(
     bridge, repo, paired, monkeypatch
 ):
     directory = bridge.project(repo)[1]
-    alive(directory, "claude")
+    alive(directory, "claude", updated=time.time() - 7200)
     alive(directory, "codex", updated=time.time() - 400)
     bridge.issue(paired["lanes"]["claude"], "claim", "42", within=60)
     bridge.issue(paired["lanes"]["codex"], "claim", "43")
@@ -828,21 +870,21 @@ def test_every_printed_row_names_the_lane_the_age_and_the_command(
     bridge, repo, paired, served, monkeypatch, capsys
 ):
     unwoken(bridge)
-    alive(bridge.project(repo)[1], "claude")
+    alive(bridge.project(repo)[1], "claude", updated=time.time() - 7200)
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
     [line] = out.splitlines()
     assert "claude" in line
     assert problems.INACTIVE in line
-    assert line.endswith(f"--repo {paired['root']}")
+    assert line.endswith(at(paired["root"]))
     assert line.split()[0].endswith("h")
 
 
 def test_the_report_closes_by_counting_what_the_service_is_handling(
     bridge, repo, paired, served, monkeypatch, capsys
 ):
-    alive(bridge.project(repo)[1], "claude")
+    alive(bridge.project(repo)[1], "claude", updated=time.time() - 7200)
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
     code, out = run(monkeypatch, capsys, bridge)
     assert code == 1
@@ -1187,13 +1229,86 @@ def test_plan_revisions_waiting_on_the_operator_are_rows(
         "was already revised 2 times under this plan version"
     )
     assert escalated["command"] == (
-        f"agent-parley plan approve {looped['id']} --repo {root} or "
-        f"agent-parley plan reject {looped['id']} --reason TEXT --repo {root}"
+        f"agent-parley plan approve {looped['id']} {at(root)} or "
+        f"agent-parley plan reject {looped['id']} --reason TEXT {at(root)}"
     )
     [pending] = rows(bridge, problems.PROPOSED)
     assert pending["count"] == 1
-    assert pending["command"] == f"agent-parley plan proposals --repo {root}"
+    assert pending["command"] == f"agent-parley plan proposals {at(root)}"
     bridge.plan_revision(repo, "reject", waiting["id"], reason="not needed")
     bridge.plan_revision(repo, "approve", looped["id"])
     assert not rows(bridge, problems.ESCALATED)
     assert not rows(bridge, problems.PROPOSED)
+
+
+ORPHANED = [
+    {
+        "issue": 42,
+        "overdue": False,
+        "overdue_seconds": 0,
+        "orphaned": True,
+        "orphan_recorded_seconds": 7200,
+    }
+]
+
+LIVE = {"state": supervision.IDLE, "process_alive": True, "age_seconds": 900}
+GONE = {
+    "state": supervision.STOPPED,
+    "process_alive": False,
+    "age_seconds": 900,
+}
+
+
+def orphaned_lane(availability, monkeypatch, condition, dirty=()):
+    """Derives one quiet lane's rows of one condition, all claims orphaned."""
+    monkeypatch.setattr(supervision, "dirty_paths", lambda lane: list(dirty))
+    return [
+        row
+        for row in problems._lane_rows(
+            lane_record(claims=ORPHANED, availability=availability),
+            {"lane": "/lane", "branch": "work"},
+            "/root",
+            {**supervision.DEFAULTS, "wake": False},
+            600,
+            time.time(),
+        )
+        if row["condition"] == condition
+    ]
+
+
+def test_a_live_lane_with_orphan_markers_is_never_offered_retirement(
+    monkeypatch,
+):
+    assert not orphaned_lane(LIVE, monkeypatch, problems.READY)
+    [row] = orphaned_lane(GONE, monkeypatch, problems.READY)
+    assert cited(row["command"]) == [["participant", "retire"]]
+    assert "retire" in declared()["participant"]
+
+
+def test_a_live_quiet_lane_with_edits_is_not_reported_as_abandoned(
+    monkeypatch,
+):
+    assert not orphaned_lane(LIVE, monkeypatch, problems.DIRTY, ["a.txt"])
+    [row] = orphaned_lane(GONE, monkeypatch, problems.DIRTY, ["a.txt"])
+    assert row["count"] == 1
+
+
+def test_a_lane_quiet_for_days_follows_a_lane_quiet_for_minutes(
+    bridge, repo, paired
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude", updated=time.time() - 3 * 86400)
+    alive(directory, "codex", updated=time.time() - 400)
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    bridge.issue(paired["lanes"]["codex"], "claim", "43")
+    found = rows(bridge, problems.INACTIVE)
+    assert [row["participant"] for row in found] == ["codex", "claude"]
+
+
+def test_rows_older_than_a_day_follow_todays_under_a_heading():
+    fresh = problems._row(problems.OVERDUE, "late", "x y", 900, "claude")
+    old = problems._row(problems.BOUNCE, "bounced", "x y", 200000, "codex")
+    listed = problems.lines([fresh, old])
+    assert listed[1] == problems.STALE_HEADING
+    assert "claude" in listed[0] and "codex" in listed[2]
+    assert problems.STALE_HEADING not in problems.lines([fresh])

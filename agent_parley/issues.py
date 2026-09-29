@@ -221,6 +221,32 @@ def closed(record: dict) -> bool:
     )
 
 
+def deadline_notice(record: dict) -> dict:
+    """Returns the deadline notice a record still stands behind.
+
+    A notice names the holder that owned the claim when it breached. It is
+    frozen text, so once that holder releases, completes or loses the claim,
+    or the issue closes on the forge, replaying it would tell the lane to
+    pause for work it no longer holds. Readers therefore see a notice only
+    while its holder still owns an open claim, which also silences notices
+    older ledgers kept after ownership ended.
+
+    Args:
+        record: Published ledger record for one issue, or an empty mapping.
+
+    Returns:
+        The recorded notice, or an empty mapping when it no longer applies.
+    """
+    notice = record.get("deadline_notice") or {}
+    if (
+        notice.get("holder")
+        and notice["holder"] == record.get("owner")
+        and not closed(record)
+    ):
+        return notice
+    return {}
+
+
 def unresolved_completion(record: dict) -> dict:
     """Derives the unresolved-completion escalation a claim reads as.
 
@@ -477,7 +503,10 @@ def unclaimed(state: dict) -> list[str]:
     An issue is unclaimed when the ledger records neither an owner nor a
     pending offer for it, and unblocked when it waits on nothing. The ledger
     records no completion, so an issue that waits on anything is left out
-    rather than guessed to be ready.
+    rather than guessed to be ready. A released claim whose issue closed on
+    the forge carries ``ended_on_forge`` and is left out too, as
+    ``lifecycle.actionable`` leaves it out, so finished work is never offered
+    as the next thing to claim; claiming it again clears the mark.
 
     The order puts first the issues that other owned issues wait on, because
     finishing one of those releases a peer, and falls back to the issue number
@@ -498,6 +527,7 @@ def unclaimed(state: dict) -> list[str]:
             if not record.get("owner")
             and not record.get("offer")
             and not record.get("blocked_by")
+            and not record.get("ended_on_forge")
             and lifecycle.state(record)["authorized"]
             and lifecycle.state(record)["state"] != lifecycle.COMPLETE
         ),
@@ -594,7 +624,9 @@ def change(
             from the arguments a key is compared against.
 
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, retry, or lock checks
@@ -649,22 +681,6 @@ def change(
     except BridgeError as exc:
         _refuse(directory, scope, fingerprint, str(exc))
         raise
-
-
-def _drop_offer(directory: Path, record: dict) -> None:
-    """Removes the attachments of an offer that is leaving the record.
-
-    A declined or cancelled offer takes its spilled summary and its attached
-    diff with it, so an answered handoff leaves no unreferenced body behind.
-
-    Args:
-        directory: Private state directory for the common repository.
-        record: Ledger record whose pending offer is being cleared.
-    """
-    offer = record.get("offer") or {}
-    for field in ("attachment", "diff"):
-        if offer.get(field):
-            attachments.remove(directory, str(offer[field]))
 
 
 def _clear_recovery(record: dict) -> dict:
@@ -742,7 +758,7 @@ def _taken(
     if (
         takeover.get("claim_id") != record.get("claim_id")
         or takeover.get("orphan_id") != orphan.get("id")
-        or not takeover.get("checkpoint")
+        or not (takeover.get("checkpoint") or orphan.get("capture_failed"))
     ):
         raise Transient(
             f"Issue #{issue} recovery evidence changed; inspect and retry."
@@ -898,7 +914,8 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                 continue
             record["offer"] = _operator_offer(request, number, budgets)
             record["request"] = None
-            record["history"].append(
+            lifecycle.append_history(
+                record,
                 {
                     "action": "grant",
                     "actor": "supervisor",
@@ -908,7 +925,7 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                     "request": None,
                     "offer_id": request["id"],
                     "claim_id": record.get("claim_id"),
-                }
+                },
             )
             granted.append(number)
         if granted:
@@ -1133,8 +1150,15 @@ def _change(
     claim changes rather than derived when a lane is woken, because only the
     transition knows which generation stopped mattering and why.
 
+    A plain claim of an unowned issue with a pending offer is refused, naming
+    the recipient. Ownership of offered work moves only on the recipient's
+    acceptance, so a claim cannot silently drop the offer, its summary and
+    its attached diff.
+
     Returns:
-        The persisted issue record, including transition history.
+        The persisted issue record, including its capped transition history.
+        A replayed call returns the record without history, since a served
+        retry keeps a shallow copy to hold the ledger's size down.
 
     Raises:
         BridgeError: If validation, ownership, offer, or lock checks fail.
@@ -1187,6 +1211,16 @@ def _change(
                 raise BridgeError(
                     f"Issue #{issue} has no orphaned owner to take it from; "
                     "claim it without --take-orphaned."
+                )
+            elif record and (pending := record.get("offer")):
+                recipient = pending["to"]
+                raise BridgeError(
+                    f"Issue #{issue} is offered to you; accept it with "
+                    f"issue accept {issue} --offer-id {pending['id']}."
+                    if recipient == agent
+                    else f"Issue #{issue} is offered to {recipient}; "
+                    f"{recipient} answers the offer, or the operator "
+                    "withdraws it with issue assign --unassign, first."
                 )
             if not record or record["owner"] != agent:
                 _within_cap(state["issues"], agent, cap)
@@ -1280,11 +1314,13 @@ def _change(
                     )
                     lifecycle.claimed(record, record["claim_id"])
                     cleared = _clear_recovery(record)
+                    if ended := record.pop("ended_on_forge", None):
+                        cleared["ended_on_forge"] = ended
                     if offer.get("attachment"):
                         record["attachment"] = offer["attachment"]
                     record["handoff"] = inherited
                 else:
-                    _drop_offer(directory, record)
+                    lifecycle.drop_offer(directory, record)
                 record["offer"] = None
             else:
                 if record["owner"] != agent and not operating:
@@ -1336,7 +1372,7 @@ def _change(
                 elif action == "cancel":
                     if not record["offer"]:
                         raise BridgeError("No handoff is pending.")
-                    _drop_offer(directory, record)
+                    lifecycle.drop_offer(directory, record)
                     record["offer"] = None
                 elif action == "release":
                     retired = str(record.get("claim_id") or "")
@@ -1346,6 +1382,7 @@ def _change(
                     record.pop("attachment", None)
                     inherited = record.pop("handoff", None) or {}
                     attachments.remove(directory, inherited.get("diff", ""))
+                    lifecycle.drop_offer(directory, record)
                     record.update(
                         owner=None, offer=None, request=None, deadline=None
                     )
@@ -1358,9 +1395,7 @@ def _change(
                             f"Issue #{blocker} is not in the issue ledger; "
                             "block only on recorded work."
                         )
-                    if blocker in waiting or (
-                        lifecycle.state(known)["state"] == lifecycle.COMPLETE
-                    ):
+                    if blocker in waiting or lifecycle.satisfied(known):
                         return record
                     if lifecycle.reaches(state["issues"], blocker, issue):
                         raise BridgeError(
@@ -1398,10 +1433,20 @@ def _change(
             history["taken"] = dict(record["taken"])
         if cleared:
             history["cleared"] = cleared
-        record["history"].append(history)
+        lifecycle.append_history(record, history)
         state["issues"][issue] = record
         if scope:
-            retries.remember(state, scope, fingerprint, retries.SERVED, record)
+            retries.remember(
+                state,
+                scope,
+                fingerprint,
+                retries.SERVED,
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "history"
+                },
+            )
         state["revision"] += 1
         write_json(directory / "issues.json", state)
     if retired:
@@ -1588,7 +1633,11 @@ def describe(state: dict, liveness: dict[str, str] | None = None) -> str:
             line += "; waits on " + ", ".join(
                 f"#{blocker} ({holder['owner']})"
                 if (holder := state["issues"].get(blocker, {})).get("owner")
-                else f"#{blocker} (unclaimed)"
+                else (
+                    f"#{blocker} (ended on forge, clears next poll)"
+                    if holder.get("ended_on_forge")
+                    else f"#{blocker} (unclaimed)"
+                )
                 for blocker in waiting
             )
         if offer := record["offer"]:
@@ -1699,4 +1748,53 @@ def exact_claim(directory: Path, name: str, issue: str = "") -> dict:
         return {"issue": None, "claim_id": None}
     else:
         number = next(iter(owned))
+    return {"issue": int(number), "claim_id": owned[number].get("claim_id")}
+
+
+def merge_claim(directory: Path, name: str, issue: str = "") -> dict:
+    """Selects the one claim a lane merge integrates.
+
+    A lane may hold several claims when `max_claims_per_lane` allows it.
+    Without an explicit issue, the merge takes the only claim whose work is
+    reported ready or awaits integration recovery, and refuses only when
+    several are, so a lane holding one ready claim beside unfinished ones
+    stays mergeable.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant that owns the lane.
+        issue: Explicit issue selection, or empty to infer it.
+
+    Returns:
+        Issue number and claim identifier, or empty fields when no claim is
+        held and none was requested.
+
+    Raises:
+        BridgeError: If the selection is not currently owned, or if several
+            owned claims are ready and none was named.
+    """
+    owned = {
+        number: record
+        for number, record in snapshot(directory)["issues"].items()
+        if record["owner"] == name
+    }
+    if issue or len(owned) < 2:
+        return exact_claim(directory, name, issue)
+    ready = sorted(
+        (
+            number
+            for number, record in owned.items()
+            if lifecycle.state(record)["state"]
+            in (lifecycle.READY, lifecycle.RECOVERY)
+        ),
+        key=int,
+    )
+    if len(ready) != 1:
+        listed = ", ".join(f"#{number}" for number in ready)
+        raise BridgeError(
+            f"{name} owns multiple issues and "
+            + (f"{listed} are ready" if ready else "none is ready")
+            + "; name one with --issue."
+        )
+    number = ready[0]
     return {"issue": int(number), "claim_id": owned[number].get("claim_id")}

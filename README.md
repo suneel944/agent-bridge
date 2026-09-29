@@ -202,7 +202,9 @@ A lane is reclaimed only when it is idle, holds no claim, has nothing
 uncommitted or unpushed, and its pull request merged or its branch is gone.
 Every kept lane is reported with the reason. A worktree no lane made is never
 touched, and uncommitted work is removed only with `--force`, after a recovery
-checkpoint.
+checkpoint. A quiet lane-made worktree whose unpushed commits already landed
+through another branch is removed without `--force`, its commits bundled into
+a recovery checkpoint first.
 
 A lane that crashed, hung or lost its host comes back with one command:
 
@@ -283,12 +285,15 @@ Agent Parley can forward the moments that need you to a Telegram bot or an
 email address. Outbound only: no command arrives over the channel, and a
 permission prompt is still answered only in your terminal.
 
-Nine changes notify, and nothing else: a handoff offered to a lane, a lane
+Ten changes notify, and nothing else: a handoff offered to a lane, a lane
 blocked on a permission prompt, a lane held by a native dialog, a lane idle
 with no claim past `stalled_after`, issues waiting on an idle claim, an issue
 that is not converging, the enforced run budget running out, a lane run that
-finished, and a hook refusal. An unchanged situation sends nothing further.
-Sending never blocks a hook or tool call; a failed send is logged and dropped.
+finished, a hook refusal, and the inbound status path locking after repeated
+wrong passcodes. An unchanged situation sends nothing further.
+Sending never blocks a hook or tool call. A failed send is logged as a lane
+event, and it and a send cut short by a hook exiting are sent again the next
+time the situation is observed.
 
 Configuration is environment variables only; no token is written into
 coordination state.
@@ -394,7 +399,7 @@ on what evidence" must be recorded, not remembered.
 | --- | --- |
 | [Running lanes](https://github.com/suneel944/agent-parley/blob/main/docs/lanes.md) | Launching, steering, pausing, merging, unattended integration, pull requests, gates and approvals. |
 | [Coordination](https://github.com/suneel944/agent-parley/blob/main/docs/coordination.md) | Claims, handoffs, reservations, mail, hooks, deadlines, budgets and history. |
-| [Monitoring](https://github.com/suneel944/agent-parley/blob/main/docs/monitoring.md) | `status`, `top`, `problems`, `metrics`, `watch` and the three presence states. |
+| [Monitoring](https://github.com/suneel944/agent-parley/blob/main/docs/monitoring.md) | `status`, `top`, `problems`, `metrics`, `watch` and the four presence states. |
 | [Providers](https://github.com/suneel944/agent-parley/blob/main/docs/providers.md) | Which native CLI drives a lane, adapters, accounts and credential profiles. |
 | [Accounts](https://github.com/suneel944/agent-parley/blob/main/docs/providers.md#accounts) | Provider, account and participant; a second account of one provider, end to end. |
 | [Commands](https://github.com/suneel944/agent-parley/blob/main/docs/commands.md) | The whole command surface, the MCP tools and the `--json` contract. |
@@ -405,8 +410,7 @@ on what evidence" must be recorded, not remembered.
 
 Run `make check` before opening a PR: formatting, lint, typing, documentation
 rules, package builds and tests. A minor or major release also needs
-`tests/test_fault_acceptance.py` passing on the release commit and a live
-acceptance record in `docs/acceptance/<version>.json`.
+`tests/test_fault_acceptance.py` passing on the release commit.
 
 [Contributing](https://github.com/suneel944/agent-parley/blob/main/CONTRIBUTING.md) ·
 [Architecture](https://github.com/suneel944/agent-parley/blob/main/docs/architecture.md) ·

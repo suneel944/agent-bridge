@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -257,6 +258,49 @@ def test_a_jsonc_only_configuration_is_refused_with_the_fix(bridge, tmp_path):
             bridge.hooks("lane", tmp_path),
             str(home),
         )
+
+
+PLUGIN_RUN = """
+const { AgentParley } = await import(process.argv[1]);
+const hooks = await AgentParley({ client: {}, directory: "/lane" });
+await hooks.event({
+  event: { type: "session.created", properties: { info: { id: "s1" } } },
+});
+await hooks["tool.execute.before"](
+  { sessionID: "s1", tool: "bash" }, { args: {} }
+);
+const result = { title: "", output: "done", metadata: {} };
+await hooks["tool.execute.after"]({ sessionID: "s1", tool: "bash" }, result);
+const message = { parts: [] };
+await hooks["chat.message"]({ sessionID: "s1" }, message);
+console.log(JSON.stringify({ result: result.output, parts: message.parts }));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_context_from_every_event_reaches_the_session(tmp_path):
+    counter = tmp_path / "count"
+    reply = (
+        "import json, pathlib, sys; json.load(sys.stdin); "
+        f"p = pathlib.Path({str(counter)!r}); "
+        "n = int(p.read_text()) + 1 if p.exists() else 1; "
+        "p.write_text(str(n)); print(json.dumps({'context': f'Message {n}'}))"
+    )
+    plugin = tmp_path / "agent-parley.mjs"
+    plugin.write_text(
+        opencode.PLUGIN.replace(
+            "__COMMAND__", json.dumps([sys.executable, "-c", reply])
+        )
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", PLUGIN_RUN, plugin.as_uri()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    shown = json.loads(result.stdout)
+    assert shown["result"] == "done\n\nMessage 1\n\nMessage 2\n\nMessage 3"
+    assert shown["parts"] == [{"type": "text", "text": "Message 4"}]
 
 
 def test_plugin_events_and_tool_names_reach_the_shared_parser():
