@@ -290,8 +290,8 @@ def test_a_released_claim_stops_reminding_its_former_holder(
         },
     )
     escalated(bridge, claimed, monkeypatch)
-    everywhere = {"wake": True, "delivery": True, "listing": True}
-    assert owed(bridge, paired, claimed, monkeypatch) == everywhere
+    escalated_only = {"wake": False, "delivery": True, "listing": True}
+    assert owed(bridge, paired, claimed, monkeypatch) == escalated_only
     bridge.issue(claimed, "release", "1")
     supervision.poll(bridge.home, claimed.parent)
     ended = record(claimed)
