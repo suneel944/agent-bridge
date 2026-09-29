@@ -5291,6 +5291,7 @@ def _poll(home: Path, directory: Path) -> None:
         config,
         observations,
         read_at,
+        directory,
     )
     stage("lane accounting", account_lanes, home, directory, manifest)
     stage("run budget", budgets.account, home, directory, manifest)
@@ -5478,6 +5479,7 @@ def settle_lanes(
     config: dict,
     observations: dict[str, dict],
     read_at: float | None = None,
+    directory: Path | None = None,
 ) -> None:
     """Records this poll's liveness sample of every lane in its state.
 
@@ -5489,7 +5491,9 @@ def settle_lanes(
     reading of the activity file older than a hook it already applied can
     never override that hook. A lane that moved after the reading began,
     such as one launched while the poll waited for the store, keeps its
-    newer state until the next poll reads it.
+    newer state until the next poll reads it. A lane whose client lacks a
+    `roster.WATCHED_HOOKS` event is recorded from its dialog watcher
+    instead of the sample while `watched_dialog` sees a parked dialog.
 
     Args:
         home: Private bridge state root.
@@ -5498,9 +5502,33 @@ def settle_lanes(
         observations: Presence reading per participant.
         read_at: Unix time the readings began, or None to apply them
             regardless of the lanes' later transitions.
+        directory: Private project state directory, or None to skip reading
+            the dialog watcher of lanes `watched_dialog` covers.
     """
     with store.connect(home, write=True) as db:
-        for name in manifest["participants"]:
+        for name, participant in manifest["participants"].items():
+            seen = (
+                None
+                if directory is None
+                else watched_dialog(
+                    home,
+                    directory,
+                    participant,
+                    name,
+                    lanes.read(db, manifest["root"], name),
+                    observations[name],
+                )
+            )
+            if seen is not None:
+                lanes.transition(
+                    db,
+                    manifest["root"],
+                    name,
+                    lanes.BLOCKED,
+                    cause=seen[0],
+                    evidence=f"dialog: {seen[1]}"[: lanes.MAX_EVIDENCE],
+                )
+                continue
             lanes.sample(
                 db,
                 manifest["root"],
@@ -5509,6 +5537,74 @@ def settle_lanes(
                 dead_after=config["stalled_after"],
                 read_at=read_at,
             )
+
+
+def hook_gaps(home: Path, participant: dict) -> list[str]:
+    """Names the lifecycle hooks a lane's native client cannot raise.
+
+    Args:
+        home: Private bridge state root.
+        participant: The lane's manifest entry.
+
+    Returns:
+        The events `roster.unavailable_hooks` names for the adapter of the
+        lane's provider, or an empty list when that provider is no longer
+        defined, so no gap is claimed for a client nothing can identify.
+    """
+    try:
+        adapter = roster.provider(home, participant["provider"])["adapter"]
+    except (BridgeError, KeyError):
+        return []
+    return roster.unavailable_hooks(adapter)
+
+
+def watched_dialog(
+    home: Path,
+    directory: Path,
+    participant: dict,
+    name: str,
+    record: dict | None,
+    observed: dict,
+) -> tuple[str, str] | None:
+    """Reads the dialog watcher of a lane no hook reports as blocked.
+
+    An adapter missing any of `roster.WATCHED_HOOKS` raises no hook when
+    its client stops on a prompt or ends its turn, so the liveness sample
+    alone cannot tell an approval prompt from any other quiet screen. While
+    such a lane is recorded idle or blocked and its process is alive, the
+    poll reads the dialog the launcher's watcher published and records the
+    lane blocked under that dialog's own cause, with the watcher as its
+    source, so status and problems show it inferred and the prompt still
+    reaches the operator. A lane of a fully hooked client, or one with no
+    parked dialog, is left to the liveness sample.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        participant: The lane's manifest entry.
+        name: Participant that owns the lane.
+        record: The lane's current state record, or None.
+        observed: This poll's presence reading of the lane.
+
+    Returns:
+        The blocked cause and the watcher's label, or None when the watcher
+        is not read or shows nothing to record.
+    """
+    if (
+        record is None
+        or record["state"] not in (lanes.IDLE, lanes.BLOCKED)
+        or observed.get("process_alive") is not True
+        or not set(hook_gaps(home, participant)) & set(roster.WATCHED_HOOKS)
+    ):
+        return None
+    from agent_parley import checkpoints
+
+    state = checkpoints.activity(directory, name)
+    if not dialogs.parked(state):
+        return None
+    held = state.get("dialog")
+    label = str(state.get("activity", "")).removeprefix(dialogs.MARKER)
+    return dialogs.lane_cause(held if isinstance(held, dict) else {}), label
 
 
 def account_lanes(home: Path, directory: Path, manifest: dict) -> None:

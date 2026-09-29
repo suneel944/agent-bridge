@@ -38,6 +38,12 @@ UNAVAILABLE_HOOKS: dict[str, tuple[str, ...]] = {
 }
 REQUIRED_HOOKS = ("SessionStart", "PreToolUse", "Stop")
 DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop")
+WATCHED_HOOKS = ("PermissionRequest", "Stop")
+"""Events whose absence leaves a lane's blocked or idle state to the watcher.
+
+An adapter missing any of these has the supervision poll read its dialog
+watcher every poll, because no hook will report the prompt or the turn end.
+"""
 HOOK_DELIVERY = "hooks"
 POLLED_DELIVERY = "polled"
 IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9_-]{0,38}")

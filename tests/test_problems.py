@@ -17,6 +17,7 @@ from agent_parley import (
     dashboard,
     dialogs,
     issues,
+    lanes,
     problems,
     protocol,
     store,
@@ -1327,3 +1328,118 @@ def test_rows_older_than_a_day_follow_todays_under_a_heading():
     assert listed[1] == problems.STALE_HEADING
     assert "claude" in listed[0] and "codex" in listed[2]
     assert problems.STALE_HEADING not in problems.lines([fresh])
+
+
+@pytest.mark.parametrize("provider", ["gemini", "amp"])
+def test_a_watcher_inferred_block_is_marked_and_still_asks_the_operator(
+    bridge, repo, served, provider
+):
+    manifest = bridge.add_participant(repo, "helper", provider)
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "helper",
+        activity="dialog: native tool permission prompt",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    store.initialize(bridge.home)
+    with store.connect(bridge.home, write=True) as db:
+        lanes.transition(
+            db, manifest["root"], "helper", lanes.IDLE, evidence="Stop: idle"
+        )
+    config = supervision.configuration(bridge.home, manifest)
+    readings = {
+        name: supervision.presence(directory, name, config["inactive_after"])
+        for name in manifest["participants"]
+    }
+    supervision.settle_lanes(
+        bridge.home, manifest, config, readings, directory=directory
+    )
+    [lane] = [
+        record
+        for record in bridge.status_snapshot()["projects"][0]["participants"]
+        if record["participant"] == "helper"
+    ]
+    assert lane["condition"]["state"] == lanes.BLOCKED
+    assert lane["condition"]["cause"] == lanes.APPROVAL
+    assert lane["provenance"] == {
+        "source": "dialog watcher",
+        "inferred": True,
+        "gap": ["PermissionRequest"],
+    }
+    note = "inferred by dialog watcher, no PermissionRequest hook"
+    assert lane["session"].endswith(note)
+    [row] = rows(bridge, problems.APPROVAL)
+    assert row["participant"] == "helper"
+    assert row["detail"] == (
+        f"the client is waiting for approval of Bash ({note})"
+    )
+
+
+def test_a_hooked_client_is_left_to_its_hooks_and_shows_no_inference(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "claude",
+        activity="waiting for approval: Bash",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    store.initialize(bridge.home)
+    with store.connect(bridge.home, write=True) as db:
+        lanes.transition(
+            db,
+            paired["root"],
+            "claude",
+            lanes.BLOCKED,
+            cause=lanes.APPROVAL,
+            evidence="PermissionRequest: approval",
+        )
+    watched = supervision.watched_dialog(
+        bridge.home,
+        directory,
+        paired["participants"]["claude"],
+        "claude",
+        {"state": lanes.BLOCKED},
+        {"process_alive": True},
+    )
+    assert watched is None
+    [lane] = [
+        record
+        for record in bridge.status_snapshot()["projects"][0]["participants"]
+        if record["participant"] == "claude"
+    ]
+    assert lane["provenance"] == {
+        "source": "hook",
+        "inferred": False,
+        "gap": [],
+    }
+    [row] = rows(bridge, problems.APPROVAL)
+    assert row["detail"] == "the client is waiting for approval of Bash"
+
+
+def test_only_a_hook_the_client_lacks_is_named_as_the_gap():
+    idle = {"state": lanes.IDLE, "cause": "", "evidence": "liveness: idle"}
+    assert lanes.provenance(idle, ["Stop"])["gap"] == ["Stop"]
+    assert lanes.provenance(idle, [])["gap"] == []
+    working = {**idle, "state": lanes.WORKING}
+    assert lanes.provenance(working, ["UserPromptSubmit"])["gap"] == []
+    held = {
+        "state": lanes.BLOCKED,
+        "cause": lanes.DIALOG,
+        "evidence": "dialog: native directory trust prompt",
+    }
+    assert lanes.provenance(held, ["PermissionRequest"])["gap"] == []
+    assert lanes.inference(lanes.provenance(held, [])) == (
+        "inferred by dialog watcher"
+    )
+    assert lanes.provenance(None) is None
