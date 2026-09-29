@@ -2,6 +2,34 @@
 
 ## Install and upgrade
 
+One command installs everything on Linux, macOS and WSL2:
+
+```sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
+```
+
+`install.sh` installs uv through its official installer only when uv is
+missing, with `UV_NO_MODIFY_PATH=1` so no shell startup file is edited. It then
+runs `uv tool install agent-parley`, or `uv tool upgrade agent-parley` when the
+tool is already installed, followed by `agent-parley plugins install` and
+`agent-parley doctor`, and prints the next command. It never uses sudo. When
+uv's directory is not on PATH it prints the exact `export PATH=...` line to add.
+Re-running it upgrades in place. Native Windows is refused with the WSL2
+pointer described under [Platforms](#platforms). Each release attaches
+`install.sh` and lists its SHA-256 in `SHA256SUMS`, so it can be checked before
+it runs:
+
+```sh
+curl -LsSfO https://github.com/suneel944/agent-parley/releases/latest/download/install.sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/SHA256SUMS | grep ' install.sh$' | shasum -a 256 -c -
+sh install.sh
+```
+
+`agent-parley plugins install` is the plugin step on its own: it adds the
+marketplace and plugin to each of `claude` and `codex` found on PATH, skipping
+what their listings already hold, and `agent-parley plugins status` reports
+that state without writing. The manual steps follow.
+
 Installing needs no clone. `uv tool install agent-parley` takes the published
 distribution from PyPI. `uv tool install git+https://github.com/suneel944/agent-parley`
 tracks the default branch instead, and a release wheel URL pins an exact
