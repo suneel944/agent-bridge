@@ -335,18 +335,25 @@ running service is long polling Telegram.
 
 ## Asking for status from the chat
 
-The same Telegram bot answers one question only: `status`, with the filters
-`agent-parley status` takes. No claim, handoff, wake, approval or free text
-crosses the channel. The service long-polls the Bot API, so no port is opened
-and no webhook is registered.
+The same Telegram bot takes two things back: `status`, with the filters
+`agent-parley status` takes, and answers to decisions. Tap a decision's
+button, send `decide ID OPTION [NOTE]`, or reply to a one-decision message
+with the option and a note. The answer is recorded once, the message is
+edited to say who chose what and when, and the waiting lane gets it as mail
+that wakes it. A second answer is refused with the first one's name. An
+irreversible option needs a confirming tap. A note reaches the lane quoted,
+never as an instruction, and nothing is typed into a session. The service
+long-polls the Bot API, so no port is opened and no webhook is registered.
 
-Every message starts with a passcode, and both the passcode and the chat
-identifier must match:
+Every typed message starts with a passcode, and both the passcode and the
+chat identifier must match. A button tap is accepted only from the
+configured chat and only for an open decision this state root issued:
 
 ```
 hunter2-and-then-some status --pending
 hunter2-and-then-some status codex
 hunter2-and-then-some status --provider claude --issue 14
+hunter2-and-then-some decide 3f9c2a1b7e40 decline wait for the rebase
 ```
 
 | Variable | Meaning |

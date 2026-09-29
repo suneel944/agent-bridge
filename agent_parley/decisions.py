@@ -46,6 +46,7 @@ BACKOFF_CEILING = 3600.0
 LEASE_SECONDS = 60.0
 KEPT_SETTLED = 200
 CALLBACK_PREFIX = "d"
+CONFIRMED = "y"
 MAX_TEXT_BYTES = 1024
 
 
@@ -209,6 +210,7 @@ def open_or_refresh(
                 "attempts": 0,
                 "retry_at": stamp,
                 "error": "",
+                "note": "",
             }
             records[name] = record
         _write(directory, records)
@@ -226,6 +228,30 @@ def get(directory: Path, name: str) -> dict:
         The record, or an empty mapping when no decision has the identifier.
     """
     return dict(_read(directory).get(name) or {})
+
+
+def find(home: Path, name: str) -> tuple[Path, dict]:
+    """Locates one decision among every project of the state root.
+
+    A button tap or a chat reply carries only the decision identifier, so
+    the project it belongs to is read from whichever project directory
+    holds it.
+
+    Args:
+        home: Private bridge state root.
+        name: Decision identifier.
+
+    Returns:
+        The project state directory and the record.
+
+    Raises:
+        BridgeError: If no project holds a decision with the identifier.
+    """
+    for path in sorted((home / "projects").glob(f"*/{RECORD_NAME}")):
+        record = get(path.parent, name)
+        if record:
+            return path.parent, record
+    raise BridgeError(f"No decision {name}.")
 
 
 def list_open(directory: Path, now: float = 0.0) -> list[dict]:
@@ -250,21 +276,57 @@ def list_open(directory: Path, now: float = 0.0) -> list[dict]:
     )
 
 
+def refusal(record: Mapping[str, object], option: str, now: float) -> str:
+    """Says why one option cannot answer one decision.
+
+    Args:
+        record: Decision record.
+        option: The chosen option.
+        now: Unix time to judge expiry by.
+
+    Returns:
+        The refusal, naming who answered first when the decision was already
+        answered, or an empty string when the option can answer it.
+    """
+    name = record.get("id")
+    state = record.get("state")
+    if state == ANSWERED:
+        return (
+            f"Decision {name} was already answered {record.get('answer')} "
+            f"by {record.get('answered_by')}."
+        )
+    if state == OPEN and float(str(record.get("expires", now))) < now:
+        state = EXPIRED
+    if state != OPEN:
+        return f"Decision {name} is already {state}."
+    offered = options(record)
+    if option not in offered:
+        return f"Decision {name} offers {', '.join(offered)}; not {option!r}."
+    return ""
+
+
 def answer(
     directory: Path,
     name: str,
     option: str,
     answered_by: str,
     now: float = 0.0,
+    note: str = "",
 ) -> dict:
     """Records the operator's answer to one open decision.
+
+    The check and the write run under the project's decision lock, so of two
+    answers racing on one decision the first is recorded and the second is
+    refused with who answered first.
 
     Args:
         directory: Private project state directory.
         name: Decision identifier.
         option: The chosen option, exactly as offered.
-        answered_by: Who answered, such as ``telegram`` or ``cli``.
+        answered_by: Who answered, such as ``telegram:42`` or ``cli``.
         now: Unix time; the clock when zero.
+        note: Free text the operator attached, stored as a quotation only;
+            when empty, a note `hold` kept is attached instead.
 
     Returns:
         The answered record.
@@ -280,23 +342,38 @@ def answer(
         record = records.get(name)
         if not record:
             raise BridgeError(f"No decision {name}.")
-        if record.get("state") != OPEN:
-            raise BridgeError(
-                f"Decision {name} is already {record.get('state')}."
-            )
-        offered = options(record)
-        if option not in offered:
-            raise BridgeError(
-                f"Decision {name} offers {', '.join(offered)}; not {option!r}."
-            )
+        if refused := refusal(record, option, stamp):
+            raise BridgeError(refused)
         record.update(
             state=ANSWERED,
             answer=option,
             answered_by=answered_by,
+            note=_clipped(note) or str(record.get("note", "")),
             settled=stamp,
         )
         _write(directory, records)
     return dict(record)
+
+
+def hold(directory: Path, name: str, note: str) -> None:
+    """Keeps the note an unconfirmed irreversible answer arrived with.
+
+    The confirming tap carries only the option, so the note typed with the
+    first answer is kept on the open record and attached when the answer is
+    confirmed.
+
+    Args:
+        directory: Private project state directory.
+        name: Decision identifier.
+        note: Free text the operator attached.
+    """
+    with lock(directory / LOCK_NAME, timeout=5):
+        records = _read(directory)
+        record = records.get(name)
+        if not record or record.get("state") != OPEN:
+            return
+        record["note"] = _clipped(note)
+        _write(directory, records)
 
 
 def close(directory: Path, name: str, now: float = 0.0) -> bool:
@@ -336,17 +413,44 @@ def options(record: Mapping[str, object]) -> list[str]:
     return [str(option) for option in offered]
 
 
-def callback(name: str, index: int) -> str:
+def callback(name: str, index: int, confirmed: bool = False) -> str:
     """Encodes the Telegram callback payload for one option.
 
     Args:
         name: Decision identifier.
         index: Position of the option in the record's options.
+        confirmed: Whether this is the second tap an irreversible option
+            asks for.
 
     Returns:
         A payload well inside Telegram's 64-byte limit.
     """
-    return f"{CALLBACK_PREFIX}:{name}:{index}"
+    suffix = f":{CONFIRMED}" if confirmed else ""
+    return f"{CALLBACK_PREFIX}:{name}:{index}{suffix}"
+
+
+def tapped(data: str) -> tuple[str, int, bool]:
+    """Decodes a callback payload `callback` encoded.
+
+    Args:
+        data: The ``callback_data`` a button tap carried.
+
+    Returns:
+        The decision identifier, the option index and whether the tap
+        confirms an irreversible option.
+
+    Raises:
+        BridgeError: If the payload is not one this module encodes.
+    """
+    parts = data.split(":")
+    if (
+        len(parts) not in (3, 4)
+        or parts[0] != CALLBACK_PREFIX
+        or not parts[2].isdigit()
+        or (len(parts) == 4 and parts[3] != CONFIRMED)
+    ):
+        raise BridgeError("Not a decision button.")
+    return parts[1], int(parts[2]), len(parts) == 4
 
 
 def keyboard(records: Sequence[Mapping[str, object]]) -> dict:
@@ -400,7 +504,7 @@ def _block(record: Mapping[str, object]) -> str:
             for option in options(record)
         )
     )
-    lines.append(f"reply: {record['id']} <option>")
+    lines.append(f"reply: decide {record['id']} <option> [note]")
     return "\n".join(lines)
 
 
