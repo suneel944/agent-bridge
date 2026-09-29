@@ -2574,7 +2574,7 @@ def announce_idle(
     Returns:
         The lanes a notification was started for.
     """
-    if not idle or not notify.enabled():
+    if not idle or not notify.enabled(directory.parent.parent):
         return []
     started = []
     try:

@@ -1085,11 +1085,43 @@ def terminal_width() -> int | None:
     return max(1, shutil.get_terminal_size().columns)
 
 
-def inbound_status() -> dict:
-    """Describes inbound status without loading its transport when disabled."""
-    if not os.environ.get("AGENT_PARLEY_INBOUND", "").strip():
+def inbound_status(home: Path | None = None) -> dict:
+    """Describes inbound status without loading its transport when disabled.
+
+    Args:
+        home: Private state root whose stored notification settings apply,
+            or None to read the process environment alone.
+
+    Returns:
+        Whether the reader was asked for and the fault, if any, stopping it.
+    """
+    values = notify.environment(home)
+    if not values.get("AGENT_PARLEY_INBOUND", "").strip():
         return {"enabled": False, "fault": ""}
-    return inbound.reported()
+    return inbound.reported(values)
+
+
+def notification_line(outbound: dict, received: dict) -> str:
+    """Says whether outbound and inbound notification are active, and why not.
+
+    Args:
+        outbound: Reading from `notify.reported`.
+        received: Reading from `inbound_status`.
+
+    Returns:
+        One ``Notify:`` line for status and ``up``.
+    """
+    if outbound["fault"]:
+        sent = f"outbound off: {outbound['fault']}"
+    else:
+        sent = "outbound on (" + ", ".join(outbound["transports"]) + ")"
+    if received["fault"]:
+        read = f"inbound off: {received['fault']}"
+    elif received["enabled"]:
+        read = "inbound on"
+    else:
+        read = "inbound off: AGENT_PARLEY_INBOUND is not set"
+    return f"Notify: {sent}; {read}"
 
 
 def add_selector(
@@ -3443,7 +3475,69 @@ def notification_report(report: dict) -> str:
         + ("sent" if item["ok"] else f"failed: {item['error']}")
         for item in report["results"]
     ]
+    received = report.get("inbound") or {}
+    if received.get("fault"):
+        lines.append(f"  inbound: off: {received['fault']}")
+    elif received.get("polling"):
+        lines.append("  inbound: the service is long polling Telegram")
+    elif received.get("enabled"):
+        lines.append(
+            "  inbound: configured but not running; restart the service: "
+            "agent-parley down && agent-parley up"
+        )
     return "\n".join(lines)
+
+
+def secret(prompt: str) -> str:
+    """Reads one secret without echo, or one line of piped standard input.
+
+    Args:
+        prompt: Text shown on a terminal before the hidden input.
+
+    Returns:
+        The secret with surrounding whitespace removed.
+    """
+    import getpass
+
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt).strip()
+    return sys.stdin.readline().strip()
+
+
+def secret_settings(chat: str, answering: bool) -> dict[str, str]:
+    """Reads the notification secrets without placing them in argv.
+
+    A terminal is prompted without echo; otherwise each secret is one line
+    of standard input, the bot token first and the inbound passcode second.
+
+    Args:
+        chat: Telegram chat id the notifications go to.
+        answering: Whether to read and store the inbound passcode as well.
+
+    Returns:
+        The settings to store, keyed by environment variable name.
+
+    Raises:
+        BridgeError: If the token is empty or the passcode is too short.
+    """
+    token = secret("Telegram bot token: ")
+    if not token:
+        raise BridgeError("The Telegram bot token is empty; nothing stored.")
+    values = {
+        "AGENT_PARLEY_NOTIFY": "telegram",
+        "AGENT_PARLEY_TELEGRAM_CHAT": chat.strip(),
+        "AGENT_PARLEY_TELEGRAM_TOKEN": token,
+    }
+    if answering:
+        passcode = secret("Inbound passcode: ")
+        if len(passcode) < inbound.MINIMUM_PASSCODE:
+            raise BridgeError(
+                "The inbound passcode must be at least "
+                f"{inbound.MINIMUM_PASSCODE} characters; nothing stored."
+            )
+        values["AGENT_PARLEY_INBOUND"] = "telegram"
+        values["AGENT_PARLEY_INBOUND_PASSCODE"] = passcode
+    return values
 
 
 def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
@@ -4222,17 +4316,36 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     notifying = commands.add_parser(
         "notify",
         help=(
-            "Verify the outbound notification transports configured in the "
-            "environment; exit 1 when one of them refuses the message."
+            "Store the notification settings, or verify the configured "
+            "transports; exit 1 when one of them refuses the message."
         ),
     )
     notices = notifying.add_subparsers(dest="action", required=True)
     probing = notices.add_parser(
         "test",
-        help="Send one test message on each configured transport.",
+        help=(
+            "Send one test message on each configured transport and say "
+            "whether the service is reading inbound queries."
+        ),
     )
     probing.add_argument("--repo", type=Path, default=Path.cwd())
     probing.add_argument("--json", action="store_true", help=JSON_HELP)
+    storing = notices.add_parser(
+        "setup",
+        help=(
+            "Store the Telegram chat and bot token in the state root, "
+            "owner-only; the token is read from a prompt or standard input."
+        ),
+    )
+    storing.add_argument("--chat", required=True, help="Telegram chat id.")
+    storing.add_argument(
+        "--inbound",
+        action="store_true",
+        help=(
+            "Also answer status queries from the chat; the passcode is read "
+            "after the token."
+        ),
+    )
     planning = commands.add_parser(
         "plan", help="Apply, compare or show the recorded work-order plan."
     )
@@ -4950,7 +5063,11 @@ def main() -> int:
                     },
                 )
                 if args.json
-                else f"Coordination server ready at {bridge.url}/mcp/"
+                else f"Coordination server ready at {bridge.url}/mcp/\n"
+                + notification_line(
+                    notify.reported(notify.environment(bridge.home)),
+                    inbound_status(bridge.home),
+                )
             )
         elif args.command == "down":
             bridge.down()
@@ -5318,8 +5435,31 @@ def main() -> int:
                 else "\n".join(reclaim.lines(swept + made))
                 or "No lane to reclaim."
             )
+        elif args.command == "notify" and args.action == "setup":
+            path = notify.store(
+                bridge.home, secret_settings(args.chat, args.inbound)
+            )
+            print(
+                f"Notification settings stored in {path}.\n"
+                + notification_line(
+                    notify.reported(notify.environment(bridge.home)),
+                    inbound_status(bridge.home),
+                )
+            )
+            if args.inbound:
+                print(
+                    "A running service reads inbound settings at start: "
+                    "agent-parley down && agent-parley up"
+                )
         elif args.command == "notify":
-            probed = notify.probe(args.repo.resolve().name)
+            probed = notify.probe(args.repo.resolve().name, bridge.home)
+            received = inbound_status(bridge.home)
+            probed["inbound"] = {
+                **received,
+                "polling": received["enabled"]
+                and not received["fault"]
+                and inbound.polling(bridge.home),
+            }
             print(
                 views.render("notify", probed)
                 if getattr(args, "json", False)

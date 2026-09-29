@@ -523,11 +523,12 @@ def announce(
     """Offers one recorded decision to the outbound notifier.
 
     The decision is already recorded when this runs, so notification can
-    only report it and never change it. The environment is read before the
+    only report it and never change it. The environment, and the presence of
+    the settings `notify setup` stores in the state root, are read before the
     notifier is imported: a lane with no transport configured keeps the hook
-    import small, which is why the variable name is repeated here rather
-    than reached through the notifier. A notifier failure is discarded for
-    the same reason a log failure is.
+    import small, which is why the variable and file names are repeated here
+    rather than reached through the notifier. A notifier failure is discarded
+    for the same reason a log failure is.
 
     Args:
         directory: Common project state directory.
@@ -541,7 +542,10 @@ def announce(
     Returns:
         The notification's name once a send has started, or an empty string.
     """
-    if not os.environ.get("AGENT_PARLEY_NOTIFY", "").strip():
+    if not (
+        os.environ.get("AGENT_PARLEY_NOTIFY", "").strip()
+        or (directory.parent.parent / "notify.json").is_file()
+    ):
         return ""
     from agent_parley import notify
 

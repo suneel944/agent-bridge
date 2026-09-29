@@ -2220,8 +2220,23 @@ never seen, and a profile is the supported way to say the same thing.
 The service and the launcher can forward the coordination changes an absent
 operator waits on to a Telegram bot, an email address, or both. Delivery is
 outbound only: no command arrives over the channel, and a native permission
-prompt is still answered only in the lane's terminal. Configuration is entirely
-environment variables; no token or password is written into coordination state.
+prompt is still answered only in the lane's terminal. Settings come from the
+environment or from `notify.json` in the state directory, which
+`agent-parley notify setup` writes owner-only. No token or password is written
+into coordination state or copied into a lane's environment.
+
+```sh
+agent-parley notify setup --chat 123456789
+agent-parley notify setup --chat 123456789 --inbound
+```
+
+`notify setup` reads the Telegram bot token, and with `--inbound` the status
+passcode, from a hidden prompt, or from standard input when it is not a
+terminal. It never takes a secret as an argument and never prints one. A
+variable set in the environment overrides the stored value for that process.
+The running service reads inbound settings at start, so restart it after
+storing them. `status`, `doctor` and `up` print one line saying whether
+outbound and inbound are on and, when off, why.
 
 | Variable | Meaning |
 | --- | --- |
