@@ -83,6 +83,8 @@ STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
 BLOCKED_ESCALATE_AFTER = 1800.0
+KEY_HOLD_DEADLINE = 900.0
+KEY_HOLDS = "key-holds.json"
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
 UNREADABLE = "unknown; activity record unreadable"
@@ -4090,6 +4092,168 @@ def _quiesced(marker: dict, name: str, record: dict) -> bool:
     )
 
 
+def key_hold(directory: Path, name: str) -> dict:
+    """Reads the release deadline a lane holding a refused key was given.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant that holds the key.
+
+    Returns:
+        The recorded hold with its `since` and `deadline` instants and the
+        `refused` lanes, or an empty mapping when the lane has none or the
+        record cannot be read.
+    """
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        held = json.loads((directory / KEY_HOLDS).read_text()).get(name)
+        if isinstance(held, dict):
+            return held
+    return {}
+
+
+def refused_keys(
+    home: Path, directory: Path, manifest: dict, observations: dict
+) -> None:
+    """Gives a quiet lane holding a key refused to a peer a deadline.
+
+    A lane that refused a peer a key and then went quiet used to be woken on
+    every poll with nothing asked of it, and a claim-bound lease has no
+    expiry while its claim lives, so the peer could wait indefinitely. The
+    first poll that sees such a holder quiet records a deadline
+    `KEY_HOLD_DEADLINE` seconds ahead and tells the holder once to release
+    the key, hand the work over or tell the refused lanes why it keeps it.
+    Activity does not move the deadline. Once it passes, the operator is
+    notified through `key_hold` and every refused lane is told once that the
+    operator decides. The record is dropped when no refusal stands against
+    the holder, after a release or a lost lease. Nothing is released,
+    revoked or locked here; reservations stay advisory.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        observations: Presence reading per participant for this poll.
+    """
+    root = manifest["root"]
+    named = {
+        entry["display"]: name
+        for name, entry in manifest["participants"].items()
+    }
+    try:
+        refused = store.refused_holders(home, root)
+    except (BridgeError, OSError, sqlite3.Error):
+        return
+    now = time.time()
+    path = directory / KEY_HOLDS
+    with lock(directory / "key-holds.lock", timeout=1):
+        try:
+            recorded = json.loads(path.read_text())
+        except (OSError, ValueError):
+            recorded = {}
+        if not isinstance(recorded, dict):
+            recorded = {}
+        holds: dict[str, dict] = {}
+        for display, peers in refused.items():
+            name = named.get(display)
+            if name is None:
+                continue
+            current = recorded.get(name) or {}
+            state = (observations.get(name) or {}).get("state")
+            if not current and state == ACTIVE:
+                continue
+            since = float(current.get("since") or now)
+            hold = {
+                "since": since,
+                "deadline": since + KEY_HOLD_DEADLINE,
+                "refused": peers,
+                "told": list(current.get("told") or []),
+            }
+            _tell_key_hold(home, directory, manifest, name, hold, now)
+            holds[name] = hold
+        if holds != recorded:
+            write_json(path, holds)
+
+
+def _tell_key_hold(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    hold: dict,
+    now: float,
+) -> None:
+    """Sends what a key hold owes: its deadline, then the operator decision.
+
+    Every message is sent once and recorded in the hold's `told` list. The
+    operator notification is offered on every poll past the deadline, since
+    `notify.deliver` sends one situation once and retries an unsent one.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant that holds the refused key.
+        hold: The hold being recorded; its `told` list is extended in place.
+        now: Unix time the deadline is compared against.
+    """
+    root = manifest["root"]
+    display = manifest["participants"][name]["display"]
+    peers = ", ".join(hold["refused"])
+    due = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(hold["deadline"]))
+    key = f"key-hold:{display}:{int(hold['since'])}"
+    told = hold["told"]
+    if display not in told:
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            store.speak(
+                home,
+                root,
+                display,
+                f"Release by {due} a key refused to {peers}",
+                f"You hold a reserved key refused to {peers} and are not "
+                f"active. By {due}, release it, hand the work over with an "
+                f"offer, or tell {peers} why you keep it. After that the "
+                "operator decides. Reservations are advisory; nothing is "
+                "released for you.",
+                key,
+            )
+            told.append(display)
+    if now < hold["deadline"]:
+        return
+    try:
+        notify.deliver(
+            directory,
+            name,
+            notify.Event.KEY_HOLD,
+            {
+                "repo": root,
+                "since": int(hold["since"]),
+                "detail": (
+                    f"holds a key refused to {peers} past its release "
+                    f"deadline of {due}; tell it to release or let the "
+                    "refused lanes wait"
+                ),
+            },
+        )
+    except (BridgeError, OSError) as exc:
+        issues.note_supervision_error(directory, f"Notification: {exc}")
+    for peer in hold["refused"]:
+        if peer in told:
+            continue
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            store.speak(
+                home,
+                root,
+                peer,
+                f"{display} kept a key refused to you past its deadline",
+                f"{display} was asked to release, hand over or explain by "
+                f"{due} the key it refused you, and still holds it. The "
+                f"operator decides now. Work on something else or ask "
+                f"{display} directly meanwhile; the key stays advisory.",
+                f"{key}:{peer}",
+            )
+            told.append(peer)
+
+
 def orphans(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     """Marks a dead lane's claims as orphaned and tells the able lanes once.
 
@@ -5780,6 +5944,7 @@ def _remind(
     )
     stage("dead mail", dead_mail, home, directory, manifest)
     stage("orphans", orphans, home, directory, manifest, config)
+    stage("refused keys", refused_keys, home, directory, manifest, observations)
     stage("responses", observe_responses, home, directory, manifest)
     stage(
         "completion escalations",

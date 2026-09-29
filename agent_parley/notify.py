@@ -64,6 +64,7 @@ class Event(StrEnum):
     RUN_BUDGET_EXHAUSTED = "run_budget_exhausted"
     LANE_BLOCKED = "lane_blocked"
     ORPHAN_DECISION = "orphan_decision"
+    KEY_HOLD = "key_hold"
 
 
 TITLES: dict[str, str] = {
@@ -79,6 +80,7 @@ TITLES: dict[str, str] = {
     Event.RUN_BUDGET_EXHAUSTED: "The enforced run budget is exhausted",
     Event.LANE_BLOCKED: "A lane is still blocked past the escalation bound",
     Event.ORPHAN_DECISION: "A dead lane's claims wait on your decision",
+    Event.KEY_HOLD: "A lane kept a key refused to a peer past its deadline",
 }
 
 KEY_FIELDS: dict[str, tuple[str, ...]] = {
@@ -94,6 +96,7 @@ KEY_FIELDS: dict[str, tuple[str, ...]] = {
     Event.RUN_BUDGET_EXHAUSTED: ("since",),
     Event.LANE_BLOCKED: ("since",),
     Event.ORPHAN_DECISION: ("since", "issue"),
+    Event.KEY_HOLD: ("since",),
 }
 
 ACKNOWLEDGE = (("acknowledge",), decisions.REVERSIBLE)
