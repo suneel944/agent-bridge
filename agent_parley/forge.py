@@ -384,10 +384,10 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
 
     One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests
     with their head commit, the checks reported on it, the latest review of
-    each reviewer, whether the forge can merge it and the issues it closes.
-    The caller decides which lane a pull request belongs to and what changed
-    since its last reading. Only the GitHub forge opens pull requests, so
-    every other forge reports None.
+    each reviewer, whether the forge can merge it, the issues it closes and
+    the files it changes. The caller decides which lane a pull request
+    belongs to and what changed since its last reading. Only the GitHub forge
+    opens pull requests, so every other forge reports None.
 
     Args:
         repo: Repository or assigned worktree that selects the forge project.
@@ -397,10 +397,10 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         head commit, the checks verdict (`pending`, `green`, `red`, or
         `none` when nothing reported), the sorted names of failing checks,
         each unfinished check with its state and start time, the latest
-        reviews as author, state and submission time, the merge
-        state the forge reports and the bare numbers of the issues it
-        closes. None when the forge is unavailable or the response cannot
-        be read.
+        reviews as author, state and submission time, the merge state the
+        forge reports, the bare numbers of the issues it closes and the
+        sorted repository paths it changes. None when the forge is
+        unavailable or the response cannot be read.
     """
     if _implementation(repo) != "github":
         return None
@@ -420,7 +420,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
             str(MAX_PULL_REQUESTS),
             "--json",
             "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
-            "latestReviews,closingIssuesReferences",
+            "latestReviews,closingIssuesReferences,files",
         ],
         15,
     )
@@ -456,6 +456,13 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
                         for entry in record.get("closingIssuesReferences") or []
                         if entry.get("number")
                     ],
+                    "files": sorted(
+                        {
+                            str(entry["path"])
+                            for entry in record.get("files") or []
+                            if entry.get("path")
+                        }
+                    ),
                 }
             )
     except (ValueError, TypeError, AttributeError, KeyError):

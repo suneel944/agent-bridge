@@ -100,7 +100,20 @@ exclusive reservation a peer holds (`reserved_path`, whose text says
 reservations are advisory), and an offer to this lane that expires unanswered
 within 120 seconds (`offer_expiring`, which names the accept and decline
 commands). A call that only reads, and Agent Parley's own commands, are never
-refused for coordination. A Stop is blocked once while an issue or work notice
+refused for coordination.
+
+Overlap is shown before the work, not found as a merge conflict after it.
+A write to a file a peer reserves, even shared, or that a peer's open pull
+request changes, carries a notice naming that reservation or pull request and
+the issues it closes, and each lane named receives mail saying who is editing
+the file. A write to a file this lane has not reserved carries a reminder to
+reserve it. A `gh issue create` whose title or body names lane files a peer
+reserves or a peer's open pull request changes, or whose title shares subject
+words with a peer's live claim, is refused once (`filing_overlap`) with those
+findings, so the lane links or joins that work; running the same command again
+files it. Each finding is shown to a lane once. Pull request files come from
+supervision's last forge poll, so the hook never reaches the network. Nothing
+here locks a file or refuses an edit: reservations stay advisory. A Stop is blocked once while an issue or work notice
 is waiting, so the lane reads it before the turn ends.
 
 Enforcement is recorded, not discarded. Every hook decision carries an
