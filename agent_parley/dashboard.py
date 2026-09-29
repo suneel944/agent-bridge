@@ -405,8 +405,11 @@ def _row(
         mail = {}
     branch = _branch(Path(participant["lane"]), context["branches"])
     condition = context.get("conditions", {}).get(agent)
+    inferred = lanes.inference(
+        lanes.provenance(condition, supervision.hook_gaps(home, participant))
+    )
     liveness = (
-        lanes.describe(condition)
+        lanes.describe(condition) + (f"; {inferred}" if inferred else "")
         if condition
         else participant_liveness(directory, agent, context["inactive_after"])
     )

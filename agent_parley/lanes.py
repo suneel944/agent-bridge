@@ -30,6 +30,7 @@ import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from agent_parley.state import BridgeError, lock
@@ -71,6 +72,8 @@ HOOK_STATES = {
     "Stop": IDLE,
     "SessionEnd": STOPPED,
 }
+INFERENCES = {"dialog": "dialog watcher", "liveness": "liveness"}
+"""Evidence sources that infer a lane state, with the name views print."""
 MAX_EVIDENCE = 200
 MAX_EVENTS = 2000
 SPOOL = "lane-evidence.jsonl"
@@ -1078,3 +1081,71 @@ def describe(record: dict, now: float | None = None) -> str:
         else (record["state"])
     )
     return f"{named} {held}"
+
+
+def provenance(
+    record: dict | None, unavailable: Iterable[str] = ()
+) -> dict | None:
+    """Names what put a lane in its recorded state and the hook it lacked.
+
+    Every observation reaches a record with its source as the evidence
+    prefix: `apply` writes the hook event, `dialog` for the terminal
+    watcher or `launch` for a launch deadline, and `sample` writes
+    `liveness`. A state the watcher or the liveness sample set is inferred,
+    because no hook of the native client confirmed it. The gap is the hook
+    events that would have confirmed that state when the lane's adapter
+    raises none of them, so a gap is only named where the client truly has
+    no hook for it, never for a state no hook of any client reports.
+
+    Args:
+        record: Lane state record as `read` returns it, or None.
+        unavailable: Hook events the lane's adapter cannot raise, as
+            `roster.unavailable_hooks` names them.
+
+    Returns:
+        The `source` (`hook`, a name in `INFERENCES`, or `supervision`),
+        whether the state is `inferred`, and the `gap` of hook events behind
+        an inferred state, or None when the lane has no record.
+    """
+    if record is None:
+        return None
+    prefix = str(record["evidence"]).partition(": ")[0]
+    inferred = prefix in INFERENCES
+    confirming = [
+        event
+        for event, state in HOOK_STATES.items()
+        if state == record["state"]
+        and (state != BLOCKED or record["cause"] == APPROVAL)
+    ]
+    missing = set(unavailable)
+    return {
+        "source": (
+            "hook"
+            if prefix in HOOK_STATES
+            else INFERENCES.get(prefix, "supervision")
+        ),
+        "inferred": inferred,
+        "gap": (
+            confirming
+            if inferred and confirming and missing.issuperset(confirming)
+            else []
+        ),
+    }
+
+
+def inference(seen: dict | None) -> str:
+    """Words an inferred lane state for the operator views.
+
+    Args:
+        seen: Provenance as `provenance` returns it, or None.
+
+    Returns:
+        Text such as ``inferred by dialog watcher, no PermissionRequest
+        hook``, or an empty string for a hook-confirmed or unrecorded state.
+    """
+    if not seen or not seen["inferred"]:
+        return ""
+    note = f"inferred by {seen['source']}"
+    if seen["gap"]:
+        note += f", no {'/'.join(seen['gap'])} hook"
+    return note

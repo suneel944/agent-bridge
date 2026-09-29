@@ -31,6 +31,7 @@ from agent_parley import (
     budgets,
     dialogs,
     issues,
+    lanes,
     merges,
     plan,
     recovery,
@@ -161,6 +162,21 @@ def _blocked(record: dict) -> str:
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _inferred(record: dict) -> str:
+    """Words how a lane's recorded state was inferred, for a row's detail.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        A clause naming the watcher or liveness inference and the hook the
+        lane's client lacks, starting with a separator, or an empty string
+        when a hook confirmed the state.
+    """
+    note = lanes.inference(record.get("provenance"))
+    return f" ({note})" if note else ""
 
 
 def _answer(name: str, repo: str, record: dict, text: str) -> str:
@@ -628,9 +644,12 @@ def _lane_rows(
         because a prompt the operator is about to answer needs no row. A
         native dialog the launcher escalated is reported at once by name,
         with the options it offers, because nothing will answer it but the
-        operator. A quiet lane that refused a peer a key it still holds is
-        reported with the lanes it refused and how long it has been quiet,
-        because the refused lane saw the refusal and nobody else did. A
+        operator. A row about the lane's state says when the dialog watcher
+        or the liveness sample inferred that state and names the hook the
+        lane's client lacks, because no hook confirmed it. A quiet lane
+        that refused a peer a key it still holds is reported with the lanes
+        it refused and how long it has been quiet, because the refused lane
+        saw the refusal and nobody else did. A
         second client sending hooks under the lane's identity is named with
         its process while it lasts, because its events are ignored. A quiet
         lane is inactive only while it owes work, meaning a claim it has not
@@ -689,7 +708,8 @@ def _lane_rows(
             rows.append(
                 _row(
                     APPROVAL,
-                    f"the client is waiting for approval of {tool}",
+                    f"the client is waiting for approval of {tool}"
+                    + _inferred(record),
                     _answer(
                         name,
                         repo,
@@ -710,7 +730,7 @@ def _lane_rows(
         rows.append(
             _row(
                 HELD,
-                f"the client is held by {shown}",
+                f"the client is held by {shown}" + _inferred(record),
                 _answer(
                     name,
                     repo,
@@ -743,7 +763,7 @@ def _lane_rows(
         rows.append(
             _row(
                 STALLED,
-                supervision.stall_marker(idle),
+                supervision.stall_marker(idle) + _inferred(record),
                 command,
                 int(idle["age_seconds"]),
                 name,
@@ -763,7 +783,8 @@ def _lane_rows(
         rows.append(
             _row(
                 INACTIVE,
-                "alive but no native activity past the inactive threshold",
+                "alive but no native activity past the inactive threshold"
+                + _inferred(record),
                 command,
                 availability["age_seconds"],
                 name,

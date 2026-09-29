@@ -614,12 +614,18 @@ class StatusMixin(BridgeCore):
                 wake = lanes.read_wake(db, data["root"], agent)
         except (sqlite3.Error, BridgeError, OSError, ValueError):
             condition, accounts, wake = None, {}, {}
+        provenance = lanes.provenance(
+            condition, supervision.hook_gaps(self.home, participant)
+        )
         if condition:
             observed = supervision.recorded_presence(condition, observed)
             observed["evidence"] = condition["evidence"]
             age = observed["age_seconds"]
-            liveness = lanes.describe(condition) + (
-                f"; event {age}s ago" if age is not None else ""
+            inferred = lanes.inference(provenance)
+            liveness = (
+                lanes.describe(condition)
+                + (f"; event {age}s ago" if age is not None else "")
+                + (f"; {inferred}" if inferred else "")
             )
         else:
             liveness = participant_liveness(
@@ -635,6 +641,7 @@ class StatusMixin(BridgeCore):
             "credential": participant["credential"],
             "session": liveness,
             "condition": lanes.view(condition),
+            "provenance": provenance,
             "accounting": (
                 lanes.summary(accounts[agent]) if agent in accounts else None
             ),
