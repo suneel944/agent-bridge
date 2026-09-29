@@ -3082,6 +3082,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "version",
             "plugins",
             "completion",
+            "demo",
         ),
     ),
 )
@@ -3575,6 +3576,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Print the installed version and the state directory in use.",
     )
     released.add_argument("--json", action="store_true", help=JSON_HELP)
+    commands.add_parser(
+        "demo",
+        help=(
+            "Run the coordination story with stub lanes in a throwaway "
+            "sandbox; no native CLI, model or network."
+        ),
+    )
     starting = commands.add_parser(
         "up", help="Start the local coordination server in the background."
     )
@@ -5113,6 +5121,10 @@ def main() -> int:
         outcome, succeeded = plugins.install()
         print("\n".join(outcome))
         return 0 if succeeded else 1
+    if args.command == "demo":
+        from agent_parley import demo
+
+        return demo.main()
     try:
         bridge = Bridge(args.home)
         if args.command == "up":

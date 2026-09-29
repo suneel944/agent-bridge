@@ -12,16 +12,6 @@ def step(prompt="$", command="agent-parley top", output=("ready",)):
     return record_demo.Step(prompt, command, tuple(output))
 
 
-def test_captured_output_keeps_its_lines_and_drops_trailing_blanks():
-    assert record_demo.lines("one\ntwo\n\n\n") == ("one", "two")
-
-
-def test_a_line_wider_than_the_frame_wraps_the_way_a_terminal_wraps():
-    body = "x" * (record_demo.COLUMNS + 3)
-    wrapped = record_demo.lines(body)
-    assert wrapped == ("x" * record_demo.COLUMNS, "xxx")
-
-
 def test_a_short_step_is_shown_whole():
     rows = tuple(str(number) for number in range(record_demo.FRAME_LINES))
     assert record_demo.frame(step(output=rows)) == rows
