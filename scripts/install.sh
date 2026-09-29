@@ -7,8 +7,10 @@
 # tool, runs `agent-parley plugins install` and `agent-parley doctor`, then
 # prints the next command. It never uses sudo and never edits a shell startup
 # file: when a directory must join PATH, it prints the line to add. Re-running
-# upgrades in place. Every step runs from main, called on the last line, so a
-# download cut short by the pipe runs nothing.
+# upgrades in place. AGENT_PARLEY_SPEC replaces the package spec, such as a
+# wheel path, and is reinstalled with --force on every run. Every step runs
+# from main, called on the last line, so a download cut short by the pipe runs
+# nothing.
 
 set -eu
 
@@ -63,7 +65,11 @@ if ! command -v uv >/dev/null 2>&1; then
     fi
 fi
 
-if uv tool list 2>/dev/null | grep -q '^agent-parley '; then
+spec="${AGENT_PARLEY_SPEC:-agent-parley}"
+if [ "$spec" != agent-parley ]; then
+    say "Installing agent-parley from $spec"
+    uv tool install --force "$spec"
+elif uv tool list 2>/dev/null | grep -q '^agent-parley '; then
     say "Upgrading agent-parley"
     uv tool upgrade agent-parley
 else

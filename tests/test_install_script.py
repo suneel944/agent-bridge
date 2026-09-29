@@ -14,7 +14,8 @@ printf 'uv %s\\n' "$*" >> "$STUB_LOG"
 case "$*" in
     "tool list")
         [ -f "$STUB_STATE/installed" ] && printf 'agent-parley v0\\n' ;;
-    "tool install agent-parley") touch "$STUB_STATE/installed" ;;
+    "tool install agent-parley" | "tool install --force "*)
+        touch "$STUB_STATE/installed" ;;
     "tool dir --bin") printf '%s\\n' "$STUB_BIN" ;;
 esac
 exit 0
@@ -49,10 +50,10 @@ def machine(tmp_path):
         "STUB_BIN": str(binary),
     }
 
-    def install():
+    def install(**extra):
         return subprocess.run(
             ["sh", str(SCRIPT)],
-            env=environment,
+            env=environment | extra,
             capture_output=True,
             text=True,
             timeout=60,
@@ -88,6 +89,23 @@ def test_install_then_rerun_upgrades_in_place(machine):
     assert calls().count("agent-parley plugins install") == 2
     assert "export PATH" not in first.stdout + second.stdout
     assert list(home.iterdir()) == []
+
+
+def test_a_spec_override_force_installs_on_every_run(machine, tmp_path):
+    install, calls, binary, _ = machine
+    stub(binary, "uv", UV)
+    wheel = str(tmp_path / "dist" / "agent_parley-0-py3-none-any.whl")
+    for _ in range(2):
+        result = install(AGENT_PARLEY_SPEC=wheel)
+        assert result.returncode == 0, result.stderr
+        assert f"Installing agent-parley from {wheel}" in result.stdout
+    assert calls().count(f"uv tool install --force {wheel}") == 2
+    assert not any(
+        call in ("uv tool list", "uv tool install agent-parley")
+        or call.startswith("uv tool upgrade")
+        for call in calls()
+    )
+    assert calls().count("agent-parley plugins install") == 2
 
 
 def test_missing_uv_uses_the_official_installer_without_rc_edits(machine):

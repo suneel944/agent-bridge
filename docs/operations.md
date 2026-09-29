@@ -14,7 +14,10 @@ runs `uv tool install agent-parley`, or `uv tool upgrade agent-parley` when the
 tool is already installed, followed by `agent-parley plugins install` and
 `agent-parley doctor`, and prints the next command. It never uses sudo. When
 uv's directory is not on PATH it prints the exact `export PATH=...` line to add.
-Re-running it upgrades in place. Native Windows is refused with the WSL2
+Re-running it upgrades in place. Setting `AGENT_PARLEY_SPEC` to another package
+spec, such as a built wheel path, installs that instead with
+`uv tool install --force`, on every run; CI uses it to install the code under
+test in a clean home on Ubuntu and macOS. Native Windows is refused with the WSL2
 pointer described under [Platforms](#platforms). Each release attaches
 `install.sh` and lists its SHA-256 in `SHA256SUMS`, so it can be checked before
 it runs:
