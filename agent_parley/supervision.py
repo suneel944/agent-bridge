@@ -2782,7 +2782,8 @@ def completion_escalations(
     marker is an observation the operator acts on. Nothing moves here: the
     issue keeps its owner, its offer and its reservations, no peer gains any
     power over another lane's claim, and only an explicit operator resolution
-    ends the claim.
+    ends the claim, unless `end_merged_claims` already ended it on the
+    forge's evidence of a merged pull request.
 
     A holder that answers before the threshold clears its own escalation,
     because the reminder it answered is no longer unanswered.
@@ -2847,6 +2848,56 @@ def completion_escalations(
         if changed:
             ledger["revision"] += 1
             write_json(directory / "issues.json", ledger)
+
+
+def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
+    """Ends each claim a merged pull request closed on the forge.
+
+    A holder that stops before filing its completion would otherwise keep
+    the claim until the operator runs `issue resolve`, while every capacity
+    and load decision reads the stale row. The forge's own reading settles
+    it: when the issue closed inside the current ownership generation
+    through a merged pull request naming its merge commit, and no other lane
+    landed that pull request, the claim is ended as complete through
+    `lifecycle.resolve`. The transition is the service's own, recorded with
+    actor `supervisor` and the forge evidence, never as the lane's. A
+    closed, unmerged pull request, a lane branch reading without the
+    issue's closing pull request, or work another lane landed still goes
+    through reminders and the operator.
+
+    Args:
+        directory: Private project state directory.
+        ended: This poll's forge observations from `completed_claims`.
+
+    Returns:
+        Issue numbers whose claims were ended.
+    """
+    resolved = []
+    for number, seen in ended.items():
+        commit = str(seen.get("commit") or "")
+        if (
+            seen.get("state") != "MERGED"
+            or not seen.get("claim_id")
+            or seen.get("landed_by")
+            or not lifecycle.COMMIT.fullmatch(commit)
+        ):
+            continue
+        with contextlib.suppress(BridgeError):
+            lifecycle.resolve(
+                directory,
+                number,
+                evidence={
+                    key: value
+                    for key, value in seen.items()
+                    if key != "claim_id"
+                },
+                outcome="complete",
+                actor="supervisor",
+                reason="merged pull request closed the issue on the forge",
+                claim_id=str(seen["claim_id"]),
+            )
+            resolved.append(number)
+    return resolved
 
 
 def deadline_notices(directory: Path, manifest: dict) -> None:
@@ -4164,8 +4215,9 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
         One observation per ended issue number: the branch the work landed
         from, the pull request state, the instant it was observed and, when
         the forge named one, the closing pull request's number, URL and merge
-        commit. `landed_by` names another lane whose lane branch carried the
-        closing pull request, or whose worktree alone checked out the
+        commit with the claim it was read for. `landed_by` names another
+        lane whose lane branch carried the closing pull request, or whose
+        worktree alone checked out the
         per-issue branch it came from.
     """
     root = Path(manifest["root"])
@@ -4209,6 +4261,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "pull_request": reading["pull_request"],
                 "url": reading["url"],
                 "commit": reading["commit"],
+                "claim_id": record.get("claim_id"),
             }
             landed = lanes.get(reading["branch"])
             if not landed and reading["branch"]:
@@ -5305,6 +5358,7 @@ def _remind(
         ),
     )
     ended = read[0] if read else {}
+    stage("forge completions", end_merged_claims, directory, ended)
     closed = set(ended)
     stage(
         "reminders",
