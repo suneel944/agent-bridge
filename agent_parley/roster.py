@@ -1042,6 +1042,11 @@ def normalize(manifest: dict) -> dict:
         "approval": approval_steps(manifest.get("approval") or []),
         "pull_request": pull_request_policy(manifest.get("pull_request", {})),
         "integration": manifest.get("integration", {}),
+        **(
+            {"timeouts": manifest["timeouts"]}
+            if manifest.get("timeouts")
+            else {}
+        ),
         "supervision": project,
         "participants": participants,
     }
