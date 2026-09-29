@@ -97,7 +97,7 @@ def test_due_decisions_go_out_as_one_digest_with_a_row_each(tmp_path, sent):
     assert report["sent"] == [first["id"], second["id"]]
     assert len(sent) == 1
     assert sent[0]["subject"] == "Agent Parley: 2 decisions are waiting"
-    assert f"reply: {first['id']} <option>" in sent[0]["body"]
+    assert f"reply: decide {first['id']} <option>" in sent[0]["body"]
     assert "accept (recommended)" in sent[0]["body"]
     rows = sent[0]["markup"]["inline_keyboard"]
     assert [button["callback_data"] for button in rows[0]] == [

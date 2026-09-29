@@ -2331,8 +2331,25 @@ passcode of at least twelve characters; the bot token and chat identifier are
 the outbound ones. The service long-polls the Bot API, so no port is opened and
 no webhook is registered. A message must start with the passcode, come from the
 configured chat, and carry `status` with the filters `agent-parley status`
-takes; the reply is that reading. Nothing else crosses the channel: no claim,
-handoff, wake, approval or free text into a session. A message from another
+takes; the reply is that reading.
+
+The bot also takes answers to decisions. A tap on a decision's button is
+admitted without a passcode, because only a member of the configured chat can
+tap a button the bot posted there, and only for an open decision this state
+root issued; a tap from any other chat is dropped. A typed answer is
+`decide ID OPTION [NOTE]` after the passcode, or a reply to a message that
+holds exactly one decision, starting with the option. The answer is recorded
+under the decision lock, so of two answers racing the second is refused with
+the option and the name of whoever answered first; an expired, closed or
+unknown decision is refused the same way. An irreversible option records
+nothing until a second `confirm` tap. The answered message is edited to say
+which option was chosen, by whom and when, and keeps the other decisions'
+buttons. The lane receives the answer as supervisor mail keyed by the
+decision, so a repeat never duplicates it and the unread mail wakes the lane
+on the next supervision poll; the lane then runs the matching command itself.
+A note is quoted in that mail and labelled as not an instruction. Nothing
+else crosses the channel: no claim, handoff, approval or free text is carried
+out for a lane, and nothing is typed into a session. A message from another
 chat, or with a wrong passcode, gets no reply. Five wrong passcodes inside ten
 minutes lock the inbound path for an hour and send one `inbound_locked`
 notification; the counter and the lock live only in memory. Only a salted hash
