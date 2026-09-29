@@ -80,6 +80,7 @@ STOPPED = "stopped"
 STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
+BLOCKED_ESCALATE_AFTER = 1800.0
 WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
 UNREADABLE = "unknown; activity record unreadable"
@@ -5858,6 +5859,68 @@ def _defer_wake(
         )
 
 
+def _escalate_blocked(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    recorded: dict | None,
+    cause: str,
+) -> None:
+    """Escalates a lane recorded blocked for longer than the bound, once.
+
+    A blocked lane is deferred without spending a wake attempt, so the
+    attempt bound never escalates it. The time the lane has been recorded
+    blocked is the bound instead: past `BLOCKED_ESCALATE_AFTER` the lane's
+    wake record gains `escalated_at`, when it has one, and the owner is
+    notified. The notification is keyed on when the block began, so a lane
+    that stays blocked is reported once and a later block is reported again.
+    A misconfigured transport is recorded as a supervision error rather
+    than ending the sweep.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant that owns the lane.
+        recorded: The lane's state record, None when it has none yet.
+        cause: The blocking cause the wake was deferred under.
+    """
+    recorded = recorded or {}
+    since = recorded.get("since")
+    if (
+        recorded.get("state") != lanes.BLOCKED
+        or not _instant(since)
+        or time.time() - float(since) < BLOCKED_ESCALATE_AFTER
+    ):
+        return
+    root = manifest["root"]
+    with lock(directory / f"{name}-wake.lock"):
+        record = wake_record(home, root, name, directory)
+        if record.get("result") and not record.get("escalated_at"):
+            record.update(escalated_at=time.time())
+            store_wake(home, directory, root, name, record)
+    try:
+        notify.deliver(
+            directory,
+            name,
+            notify.Event.LANE_BLOCKED,
+            {
+                "repo": root,
+                "provider": str(
+                    manifest["participants"][name].get("provider", "")
+                ),
+                "since": str(since),
+                "detail": (
+                    f"{cause} for {int(time.time() - float(since))}s, past "
+                    f"the {int(BLOCKED_ESCALATE_AFTER)}s escalation bound"
+                ),
+            },
+        )
+    except (BridgeError, OSError) as exc:
+        issues.note_supervision_error(directory, f"Notification: {exc}")
+
+
 def _mail_digest(rows: list) -> list[str]:
     """Reduces outstanding mail to the latest message of each live thread.
 
@@ -6002,7 +6065,10 @@ def wake(
     lane state record. A cause that is
     still in force parks the lane with that cause and the time its next attempt
     is due, and spends nothing, so the budget is not consumed while nothing
-    could have answered. When the cause clears, the next attempt is due one
+    could have answered. A lane recorded blocked past
+    `BLOCKED_ESCALATE_AFTER` is escalated once by `_escalate_blocked`
+    instead, because its deferred wakes never reach the attempt bound. When
+    the cause clears, the next attempt is due one
     doubling window after the last one, or at the provider reset the capacity
     observation named, whichever is later. A lane that has actually spent its
     whole budget is recorded as exhausted and escalated once, and waking then
@@ -6091,6 +6157,7 @@ def wake(
     blocked, ready_at = _wake_block(directory, name, observed, parked, window)
     if blocked:
         _defer_wake(home, directory, root, name, blocked, ready_at, window)
+        _escalate_blocked(home, directory, manifest, name, recorded, blocked)
         return
     if observed["process_alive"] and (
         observed["age_seconds"] is None
