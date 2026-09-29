@@ -17,6 +17,8 @@ import json
 import re
 from typing import TYPE_CHECKING
 
+from agent_parley import __version__
+
 if TYPE_CHECKING:
     from agent_parley.demo import Recorder
 
@@ -49,7 +51,7 @@ def opening(recorder: Recorder) -> None:
         recorder: Harness collecting the steps.
     """
     recorder.chapter(
-        "AGENT PARLEY 0.13.0",
+        f"AGENT PARLEY {__version__}",
         "Many coding agents. One repository.",
         "Claims, advisory reservations, handoffs, plans, budgets",
         "and unattended integration, for claude and codex side by side.",
