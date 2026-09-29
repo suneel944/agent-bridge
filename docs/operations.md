@@ -2289,6 +2289,7 @@ These events notify, and nothing else:
 | `idle_blocker` | Other issues wait on a claim held by an idle lane. |
 | `non_convergence` | An issue is escalated as not converging. |
 | `run_budget_exhausted` | The enforced [run budget](#enforcing-a-run-budget) runs out. |
+| `orphan_decision` | A dead lane spent its wake budget while holding orphaned claims; names the live peer that fits, or none, and moves nothing. |
 | `run_finished` | A lane run finished. |
 | `hook_refusal` | A lifecycle hook refused a branch switch or detected branch drift. |
 | `inbound_locked` | Inbound status queries were locked after repeated wrong passcodes. |
