@@ -72,6 +72,7 @@ def asset_names(version: str) -> set[str]:
         f"agent-parley-plugins-{version}.zip",
         f"agent-parley-{version}-codex-skills.zip",
         "requirements.txt",
+        "install.sh",
         "CHANGELOG.md",
         "RELEASE_NOTES.md",
     }

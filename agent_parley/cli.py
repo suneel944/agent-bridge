@@ -3073,6 +3073,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "state",
             "gc",
             "version",
+            "plugins",
             "completion",
         ),
     ),
@@ -4249,6 +4250,22 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Report launcher, plugin and store versions and their fit.",
     )
     checking.add_argument("--json", action="store_true", help=JSON_HELP)
+    plugging = commands.add_parser(
+        "plugins",
+        help="Add the plugin to each supported native CLI on PATH.",
+    )
+    plugin_actions = plugging.add_subparsers(dest="action", required=True)
+    plugin_actions.add_parser(
+        "install",
+        help=(
+            "Add the marketplace and plugin to claude and codex where "
+            "missing, refreshing what is already present."
+        ),
+    )
+    plugin_actions.add_parser(
+        "status",
+        help="Report whether each supported CLI has the plugin; writes none.",
+    )
     triaging = commands.add_parser(
         "problems",
         help=(
@@ -5079,6 +5096,15 @@ def main() -> int:
             else f"agent-parley {installed}\nState: {home}"
         )
         return 0
+    if args.command == "plugins":
+        from agent_parley import plugins
+
+        if args.action == "status":
+            print("\n".join(plugins.status()))
+            return 0
+        outcome, succeeded = plugins.install()
+        print("\n".join(outcome))
+        return 0 if succeeded else 1
     try:
         bridge = Bridge(args.home)
         if args.command == "up":
