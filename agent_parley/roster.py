@@ -728,7 +728,8 @@ def provider(home: Path, name: str) -> dict:
     if entry is None:
         raise BridgeError(
             f"Unknown provider {name!r}. Run `agent-parley provider list` or "
-            "define it with `agent-parley provider add`."
+            "define it with `agent-parley provider add`.",
+            next_command="agent-parley provider list",
         )
     return entry
 
@@ -832,7 +833,8 @@ def credential(home: Path, name: str) -> dict:
     if entry is None:
         raise BridgeError(
             f"Unknown credential profile {name!r}. Define it with "
-            "`agent-parley credentials add`."
+            "`agent-parley credentials add`.",
+            next_command=f"agent-parley credentials add {shlex.quote(name)}",
         )
     return entry
 
@@ -1335,7 +1337,8 @@ def read(directory: Path) -> dict:
     if not path.exists():
         raise BridgeError(
             "This repository has no bridge project yet; run agent-parley run "
-            "or agent-parley setup first."
+            "or agent-parley setup first.",
+            next_command="agent-parley setup .",
         )
     return normalize(json.loads(path.read_text()))
 
@@ -1357,7 +1360,8 @@ def resolve(manifest: dict, lane: Path) -> str:
         if Path(participant["lane"]) == lane:
             return name
     raise BridgeError(
-        "Run this from an assigned agent worktree, not the main checkout."
+        "Run this from an assigned agent worktree, not the main checkout.",
+        next_command="agent-parley participant list",
     )
 
 

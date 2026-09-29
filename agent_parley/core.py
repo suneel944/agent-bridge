@@ -13,6 +13,7 @@ moved method reads. This module never imports `cli` at import time, because
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -41,7 +42,8 @@ class BridgeCore:
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.home.stat().st_mode & 0o077:
             raise BridgeError(
-                f"State directory must be private: chmod 700 {self.home}"
+                f"State directory must be private: chmod 700 {self.home}",
+                next_command=f"chmod 700 {shlex.quote(str(self.home))}",
             )
         path = self.home / "config.json"
         if not path.exists():
@@ -166,14 +168,16 @@ class BridgeCore:
                     raise BridgeError(
                         "A service from an older installation is running. "
                         "Stop it with the command that started it before "
-                        "upgrading; existing sessions are preserved."
+                        "upgrading; existing sessions are preserved.",
+                        next_command=f"kill {int(record['pid'])}",
                     )
             running = self.server_process()
             if running:
                 if not self.ready():
                     raise BridgeError(
                         "Server is running but unhealthy. "
-                        f"Inspect {self.home}/server.log"
+                        f"Inspect {self.home}/server.log",
+                        next_command="agent-parley down",
                     )
                 store.initialize(self.home)
                 return
@@ -231,7 +235,9 @@ class BridgeCore:
             write_json(published, failed)
             raise BridgeError(
                 "Coordination server failed to start. "
-                f"Inspect {self.home}/server.log"
+                f"Inspect {self.home}/server.log",
+                next_command="tail -n 50 "
+                + shlex.quote(str(self.home / "server.log")),
             )
 
     def down(self) -> None:
@@ -355,7 +361,10 @@ class BridgeCore:
                     continue
                 actual = lane_branch(Path(participant["lane"]))
                 if actual != participant["branch"]:
-                    raise BridgeError(drift(name, participant, actual))
+                    raise BridgeError(
+                        drift(name, participant, actual),
+                        next_command=f"agent-parley participant restore {name}",
+                    )
             return data
         if not preserve:
             return roster.read(directory)
@@ -538,7 +547,8 @@ class BridgeCore:
         if participant is None:
             raise BridgeError(
                 f"{name} is not a participant in this project; "
-                "run agent-parley participant list."
+                "run agent-parley participant list.",
+                next_command="agent-parley participant list",
             )
         return directory, data, participant
 

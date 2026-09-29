@@ -93,7 +93,8 @@ def preserve_pending(root: Path) -> str | None:
     if git(root, "status", "--porcelain"):
         raise BridgeError(
             f"The checkout at {root} still holds changes that Git cannot "
-            "stash. Commit or preserve them first; worktrees start at HEAD."
+            "stash. Commit or preserve them first; worktrees start at HEAD.",
+            next_command=f"git -C {shlex.quote(str(root))} status --short",
         )
     entry = git(root, "rev-parse", "refs/stash")
     return (
@@ -122,6 +123,24 @@ def drift(name: str, participant: dict, actual: str) -> str:
         f"`agent-parley participant retire {name}` to drop the lane. "
         "Both preserve committed and uncommitted work; neither discards."
     )
+
+
+def commit_all(lane: Path) -> str:
+    """Builds the command that commits every pending change in a lane.
+
+    A lane branch is private to its participant, so a work-in-progress
+    commit there keeps the changes on the branch the lane already owns.
+    Untracked files are staged too, because a commit of tracked files alone
+    leaves the checkout dirty and the refusal would repeat.
+
+    Args:
+        lane: Worktree holding the pending changes.
+
+    Returns:
+        A shell command line that stages and commits everything pending.
+    """
+    quoted = shlex.quote(str(lane))
+    return f"git -C {quoted} add -A && git -C {quoted} commit -m wip"
 
 
 def verify_base(

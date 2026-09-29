@@ -1212,7 +1212,12 @@ def _change(
                             f"issue claim {issue} --take-orphaned."
                             if orphan
                             else ""
-                        )
+                        ),
+                        next_command=(
+                            f"agent-parley issue claim {issue} --take-orphaned"
+                            if orphan
+                            else f"agent-parley issue request {issue}"
+                        ),
                     )
             elif take_orphaned:
                 raise BridgeError(
@@ -1227,7 +1232,13 @@ def _change(
                     if recipient == agent
                     else f"Issue #{issue} is offered to {recipient}; "
                     f"{recipient} answers the offer, or the operator "
-                    "withdraws it with issue assign --unassign, first."
+                    "withdraws it with issue assign --unassign, first.",
+                    next_command=(
+                        f"agent-parley issue accept {issue} "
+                        f"--offer-id {pending['id']}"
+                        if recipient == agent
+                        else f"agent-parley issue show {issue}"
+                    ),
                 )
             if not record or record["owner"] != agent:
                 _within_cap(state["issues"], agent, cap)

@@ -975,7 +975,10 @@ def probe(root: str, home: Path | None = None) -> dict:
     """
     config = settings(environment(home))
     if not config["transports"]:
-        raise BridgeError(UNCONFIGURED)
+        raise BridgeError(
+            UNCONFIGURED,
+            next_command="agent-parley notify setup --chat CHAT_ID",
+        )
     subject, body = compose(
         "test",
         {

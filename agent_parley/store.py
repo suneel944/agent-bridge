@@ -26,6 +26,7 @@ from agent_parley.roster import OPERATOR
 from agent_parley.state import BridgeError, lock
 
 DATABASE = "bridge.sqlite3"
+MISSING = "No coordination store yet; run agent-parley up."
 SCHEMA_VERSION = 12
 SCHEMA_ABSENT = "absent"
 SCHEMA_BEHIND = "needs migration"
@@ -229,6 +230,16 @@ class Transaction(sqlite3.Connection):
         """Opens the connection with nothing to undo yet."""
         super().__init__(*args, **kwargs)
         self.undo: list[Callable[[], None]] = []
+
+
+def missing() -> BridgeError:
+    """Builds the refusal for a read or write before any store exists.
+
+    Returns:
+        The refusal, naming ``agent-parley up`` as the command that creates
+        the store.
+    """
+    return BridgeError(MISSING, next_command="agent-parley up")
 
 
 @contextlib.contextmanager
@@ -3854,7 +3865,7 @@ def read_thread(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _thread(db, actor, {"thread_id": thread, "after_id": after})
@@ -3878,7 +3889,7 @@ def read_message(home: Path, root: str, name: str, message_id: int) -> dict:
             the message is not one this participant sent or received.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         row = db.execute(
@@ -3918,7 +3929,7 @@ def search_messages(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _search(db, actor, {"query": query, "limit": limit})
@@ -3951,7 +3962,7 @@ def search_decisions(
         BridgeError: If no store exists or the reader is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _decisions(
@@ -4038,7 +4049,7 @@ def list_messages(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         bounded = _number(limit, "limit", 1, MAX_SEARCH_HITS)
@@ -5071,7 +5082,7 @@ def transfer_reservations(
     if not keys:
         return []
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     wanted = sorted(set(keys))
     moved: list[str] = []
     with connect(home, write=True) as db:
@@ -5139,7 +5150,7 @@ def transfer_claim_reservations(
     if not source_claim:
         return []
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     moved: list[str] = []
     with connect(home, write=True) as db:
         holder = _identify(db, root, source)
@@ -5225,7 +5236,7 @@ def release_reservations(home: Path, root: str, name: str) -> list[str]:
         BridgeError: If no store exists or the identity is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home, write=True) as db:
         holder = _identify(db, root, name)
         released = [
@@ -5294,7 +5305,7 @@ def renew_reservations(home: Path, root: str, name: str) -> dict:
         BridgeError: If no store exists or the identity is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     claim = held_claim(home, root, name)
     with connect(home, write=True) as db:
         holder = _identify(db, root, name)

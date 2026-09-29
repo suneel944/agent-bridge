@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         supervision,
         terminal,
         views,
+        worktrees,
     )
     from agent_parley import attachments as attachments
     from agent_parley import delivery as delivery
@@ -119,7 +120,7 @@ if TYPE_CHECKING:
     )
     from agent_parley.worktrees import preserve_pending as preserve_pending
 
-from agent_parley import BridgeError
+from agent_parley import BridgeError, refusal
 from agent_parley.claims import ClaimsMixin
 from agent_parley.integration import IntegrationMixin
 from agent_parley.launch import LaunchMixin
@@ -2161,7 +2162,8 @@ class Bridge(
             if git(lane, "status", "--porcelain"):
                 raise BridgeError(
                     f"{name} has uncommitted changes on {actual}. Commit or "
-                    "preserve them first; restore never discards work."
+                    "preserve them first; restore never discards work.",
+                    next_command=worktrees.commit_all(lane),
                 )
             unmerged = git(lane, "log", "--oneline", f"{branch}..HEAD")
             if unmerged:
@@ -2222,7 +2224,8 @@ class Bridge(
                     if git(lane, "status", "--porcelain"):
                         raise BridgeError(
                             f"{name} has uncommitted changes. Commit or "
-                            "preserve them first; retire never discards work."
+                            "preserve them first; retire never discards work.",
+                            next_command=worktrees.commit_all(lane),
                         )
                     kept = [
                         path
@@ -2513,13 +2516,17 @@ class Bridge(
                 raise BridgeError(
                     f"{name} still has a live session. Run `agent-parley "
                     f"participant stop {name}` first; a restart never runs "
-                    "two clients in one worktree."
+                    "two clients in one worktree.",
+                    next_command=f"agent-parley participant stop {name}",
                 )
             self.stop(repo, name)
         lane = Path(participant["lane"])
         actual = current_branch(lane)
         if actual != participant["branch"]:
-            raise BridgeError(drift(name, participant, actual))
+            raise BridgeError(
+                drift(name, participant, actual),
+                next_command=f"agent-parley participant restore {name}",
+            )
         opening = task or terminal.PROMPT
         if git(lane, "status", "--porcelain"):
             saved = recovery.capture(directory, data, name)
@@ -3399,7 +3406,8 @@ def lane_reading(bridge: Bridge, repo: Path, name: str) -> tuple[dict, dict]:
     if name not in data["participants"]:
         raise BridgeError(
             f"No participant named {name!r} in {data['root']}; run "
-            "agent-parley participant list."
+            "agent-parley participant list.",
+            next_command="agent-parley participant list",
         )
     for project in bridge.status_snapshot()["projects"]:
         if project["root"] != data["root"]:
@@ -5023,7 +5031,7 @@ def _plain_status() -> int:
             Selection(project=bridge.project_at(Path.cwd())), terminal_width()
         )
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f"agent-parley: {exc}", file=sys.stderr)
+        print(f"agent-parley: {refusal(exc)}", file=sys.stderr)
         return 1
     return 0
 
@@ -6031,7 +6039,7 @@ def main() -> int:
         sqlite3.Error,
         subprocess.TimeoutExpired,
     ) as exc:
-        print(f"agent-parley: {_error_message(exc)}", file=sys.stderr)
+        print(f"agent-parley: {_refusal_lines(exc)}", file=sys.stderr)
         if getattr(args, "json", False):
             print(_error_document(exc))
         return 1
@@ -6056,6 +6064,25 @@ def _error_message(exc: Exception) -> str:
             "the project while this one ran. Rerun it."
         )
     return str(exc)
+
+
+def _refusal_lines(exc: Exception) -> str:
+    """Words one runtime failure as the human refusal on standard error.
+
+    The message comes first, and a failure that names its resolving command
+    ends on a ``next:`` line carrying it, in the shape `refusal` gives every
+    refusal. The ``--json`` error document keeps the message alone, so its
+    fields are unchanged.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The message, followed by a ``next:`` line when the failure has one.
+    """
+    if isinstance(exc, KeyError):
+        return _error_message(exc)
+    return refusal(exc)
 
 
 def _error_document(exc: Exception) -> str:
