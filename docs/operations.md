@@ -2296,8 +2296,23 @@ These events notify, and nothing else:
 
 Each event is sent once per situation: a digest of the fields that identify it
 is kept per lane in private state, so an unchanged situation sends nothing
-further. Sending never blocks a hook or a tool call; a failed send is recorded
-in the lane's event log and dropped, and nothing is queued for a retry.
+further. Sending never blocks a hook or a tool call.
+
+Every situation that waits on the operator is also recorded as a decision in
+`decisions.json` in the project's private state directory. A decision has a
+stable twelve-character identifier, the options that answer it with one marked
+recommended, whether acting on it can be undone, and an expiry a day out that
+each repeat observation extends; one situation holds exactly one open decision.
+The operator problems `problems` reports, such as a dirty worktree, an
+unresolved completion or a second session, open decisions as well, and a
+decision closes when its problem clears. Delivery is durable: a decision is
+marked sent only after every transport accepted it, and a refused or abandoned
+send is retried on the next supervision poll with a backoff that doubles from
+30 seconds to an hour, so a hook that exits before its send finishes still
+reaches the operator. Decisions due together go out as one digest; on Telegram
+it carries one row of buttons per decision, and every transport shows the text
+reply each takes. Decisions are recorded only while notifications are on, and
+a record holds no credential.
 
 The same Telegram bot can answer status queries. Set
 `AGENT_PARLEY_INBOUND=telegram` and `AGENT_PARLEY_INBOUND_PASSCODE` to a

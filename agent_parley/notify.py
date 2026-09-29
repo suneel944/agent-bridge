@@ -18,12 +18,13 @@ import hashlib
 import json
 import os
 import threading
+import time
 from collections.abc import Callable, Mapping
 from email.message import EmailMessage
 from enum import StrEnum
 from pathlib import Path
 
-from agent_parley import checkpoints
+from agent_parley import checkpoints, decisions
 from agent_parley.state import BridgeError, lock, write_json
 
 MAX_MESSAGE_BYTES = 1536
@@ -95,6 +96,26 @@ KEY_FIELDS: dict[str, tuple[str, ...]] = {
     Event.ORPHAN_DECISION: ("since", "issue"),
 }
 
+ACKNOWLEDGE = (("acknowledge",), decisions.REVERSIBLE)
+
+ANSWERS: dict[str, tuple[tuple[str, ...], str]] = {
+    Event.HANDOFF_OFFERED: (("accept", "decline"), decisions.REVERSIBLE),
+    Event.PERMISSION_PROMPT: (("deny", "allow"), decisions.IRREVERSIBLE),
+    Event.LANE_IDLE: (("wake", "retire", "leave"), decisions.REVERSIBLE),
+    Event.RUN_FINISHED: (("acknowledge",), decisions.REVERSIBLE),
+    Event.HOOK_REFUSAL: (("acknowledge",), decisions.REVERSIBLE),
+    Event.INBOUND_LOCKED: (("acknowledge",), decisions.REVERSIBLE),
+    Event.NATIVE_DIALOG: (("acknowledge",), decisions.REVERSIBLE),
+    Event.IDLE_BLOCKER: (("wake", "release", "leave"), decisions.REVERSIBLE),
+    Event.NON_CONVERGENCE: (("acknowledge",), decisions.REVERSIBLE),
+    Event.RUN_BUDGET_EXHAUSTED: (("stop", "raise"), decisions.REVERSIBLE),
+    Event.ORPHAN_DECISION: (
+        ("give to peer", "fresh lane", "retry"),
+        decisions.REVERSIBLE,
+    ),
+    Event.LANE_BLOCKED: ACKNOWLEDGE,
+}
+
 REFUSALS = frozenset({"branch_drift", "branch_switch"})
 
 BODY_FIELDS = (
@@ -111,6 +132,25 @@ BODY_FIELDS = (
 _THREADS: list[threading.Thread] = []
 _THREADS_LOCK = threading.Lock()
 _SENDING: set[tuple[str, str, str, str]] = set()
+_PROBLEMS: dict = {"at": float("-inf"), "rows": []}
+
+PROBLEM_INTERVAL = 60.0
+PROBLEM_CONDITIONS = frozenset(
+    {
+        "unresolved completion",
+        "awaiting acknowledgement",
+        "bounced share",
+        "shares to a retired lane",
+        "dirty worktree",
+        "holding a refused key",
+        "second session",
+        "recovery refused",
+        "integration unverified",
+        "wake attention",
+        "waiting on approval",
+        "held by a native dialog",
+    }
+)
 
 
 def stored(home: Path) -> dict[str, str]:
@@ -452,7 +492,9 @@ def telegram(config: dict, subject: str, body: str) -> None:
     """Posts one message to the Telegram Bot API.
 
     Args:
-        config: Resolved notification configuration.
+        config: Resolved notification configuration. A ``markup`` entry, as
+            a decision digest carries, is sent as the message's inline
+            keyboard.
         subject: Subject line, sent as the message's first line.
         body: Message body.
 
@@ -461,11 +503,13 @@ def telegram(config: dict, subject: str, body: str) -> None:
             API answers with a status other than 200.
         OSError: If the request cannot be completed.
     """
-    call(
-        config,
-        "sendMessage",
-        {"chat_id": config["telegram"]["chat"], "text": f"{subject}\n\n{body}"},
-    )
+    fields = {
+        "chat_id": config["telegram"]["chat"],
+        "text": f"{subject}\n\n{body}",
+    }
+    if config.get("markup"):
+        fields["reply_markup"] = json.dumps(config["markup"])
+    call(config, "sendMessage", fields)
 
 
 def email(config: dict, subject: str, body: str) -> None:
@@ -601,13 +645,19 @@ def _report(
     config: dict,
     text: tuple[str, str],
     sending: tuple[str, str, str, str],
+    decision: str = "",
 ) -> None:
-    """Sends one composed message and records its outcome.
+    """Sends one situation and records its outcome.
 
-    Every transport that failed is recorded as a lane event. The situation
-    is marked notified only when every transport accepted the message, so a
+    A situation recorded as a decision is sent by flushing every decision
+    due, so a burst observed together reaches the operator as one digest
+    with a button row per decision; the composed text is sent directly only
+    when no decision could be recorded. Every transport that failed is
+    recorded as a lane event. The situation is marked notified only once its
+    decision was sent, or every transport accepted the direct message, so a
     failed send, and a send abandoned when its process exited, is attempted
-    again the next time the situation is observed.
+    again the next time the situation is observed or, for a decision, by
+    the next supervision poll.
 
     Args:
         directory: Private project state directory.
@@ -615,10 +665,17 @@ def _report(
         config: Resolved notification configuration.
         text: The composed subject and body.
         sending: Key of this send among the process's sends in flight.
+        decision: Identifier of the decision recording the situation, or
+            empty when none was recorded.
     """
     try:
         failed = False
-        for result in send(config, text[0], text[1]):
+        results = (
+            decisions.flush(directory, config)["results"]
+            if decision
+            else send(config, text[0], text[1])
+        )
+        for result in results:
             if result["ok"]:
                 continue
             failed = True
@@ -631,11 +688,58 @@ def _report(
                 "notifying",
                 f"{result['transport']}: {result['error']}",
             )
+        if decision:
+            failed = not decisions.get(directory, decision).get("sent")
         if not failed:
             _mark(directory, agent, Event(sending[2]), sending[3])
     finally:
         with _THREADS_LOCK:
             _SENDING.discard(sending)
+
+
+def _decide(
+    directory: Path,
+    agent: str,
+    event: Event,
+    fields: Mapping[str, object],
+    body: str,
+    digest: str,
+) -> str:
+    """Records one situation as the decision the operator is asked for.
+
+    An event with no answers of its own in `ANSWERS` offers
+    `ACKNOWLEDGE`, so a new event never fails the notification it raises.
+
+    Args:
+        directory: Private project state directory.
+        agent: Lane the situation belongs to.
+        event: Notification the situation raised.
+        fields: Situation fields; ``root`` or ``repo`` names the project.
+        body: The composed notification body, its title line first.
+        digest: The situation digest `_pending` returned.
+
+    Returns:
+        The decision identifier, or an empty string when the record could
+        not be written, in which case the message is sent directly.
+    """
+    options, reversibility = ANSWERS.get(event, ACKNOWLEDGE)
+    title, _, detail = body.partition("\n")
+    try:
+        record = decisions.open_or_refresh(
+            directory,
+            project=str(fields.get("root") or fields.get("repo") or ""),
+            lane=agent,
+            kind=event.value,
+            key=digest,
+            question=title,
+            detail=detail,
+            options=options,
+            issue=str(fields.get("issue", "")),
+            reversibility=reversibility,
+        )
+    except (OSError, BridgeError):
+        return ""
+    return record["id"]
 
 
 def deliver(
@@ -676,18 +780,30 @@ def deliver(
     if not digest:
         return ""
     sending = (str(directory), agent, event.value, digest)
+    with _THREADS_LOCK:
+        if sending in _SENDING:
+            return ""
+        _SENDING.add(sending)
+    if not _pending(directory, agent, event, fields):
+        with _THREADS_LOCK:
+            _SENDING.discard(sending)
+        return ""
     text = compose(
         event.value, {**dict(fields), "lane": agent, "event": event.value}
     )
     thread = threading.Thread(
         target=_report,
-        args=(directory, agent, config, text, sending),
+        args=(
+            directory,
+            agent,
+            config,
+            text,
+            sending,
+            _decide(directory, agent, event, fields, text[1], digest),
+        ),
         daemon=True,
     )
     with _THREADS_LOCK:
-        if sending in _SENDING:
-            return ""
-        _SENDING.add(sending)
         _THREADS.append(thread)
     thread.start()
     return event.value
@@ -723,6 +839,93 @@ def observe(
     if chosen is None:
         return ""
     return deliver(directory, agent, chosen, situation)
+
+
+def flush_decisions(directory: Path) -> dict:
+    """Sends every decision whose delivery is due, as the supervisor polls.
+
+    A decision a hook recorded just before exiting, or one whose last send
+    was refused, reaches the operator here within one poll.
+
+    Args:
+        directory: Private project state directory.
+
+    Returns:
+        What `decisions.flush` reported, or an empty report when no
+        transport is configured.
+    """
+    values = environment(directory.parent.parent)
+    if not values.get("AGENT_PARLEY_NOTIFY", "").strip():
+        return {"sent": [], "results": []}
+    return decisions.flush(directory, settings(values))
+
+
+def problem_decisions(
+    home: Path, directory: Path, root: str, now: float = 0.0
+) -> list[str]:
+    """Keeps one decision open for each operator problem of one project.
+
+    The problem rows `status` and `problems` print are the one derivation of
+    what waits on the operator, so this reads them rather than repeating
+    their rules. A row younger than a day whose condition is in
+    `PROBLEM_CONDITIONS` opens or refreshes a decision naming the command
+    that clears it; a decision whose row is gone is closed. The rows cover
+    every project, so one derivation is shared by every project polled
+    within `PROBLEM_INTERVAL` seconds instead of being repeated per project.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        root: Canonical project root the rows are matched on.
+        now: Unix time; the clock when zero.
+
+    Returns:
+        The identifiers of the decisions held open, empty when no transport
+        is configured.
+    """
+    if not enabled(home):
+        return []
+    from agent_parley import problems
+    from agent_parley.cli import Bridge
+
+    stamp = now or time.time()
+    with _THREADS_LOCK:
+        stale = stamp - _PROBLEMS["at"] >= PROBLEM_INTERVAL
+    if stale:
+        rows = Bridge(home).problems()
+        with _THREADS_LOCK:
+            _PROBLEMS.update(at=stamp, rows=rows)
+    with _THREADS_LOCK:
+        rows = list(_PROBLEMS["rows"])
+    kept = []
+    for row in rows:
+        if (
+            row.get("project") != root
+            or row.get("actor") != problems.BY_OPERATOR
+            or row.get("condition") not in PROBLEM_CONDITIONS
+            or (row.get("seconds") or 0) >= problems.STALE_AFTER
+        ):
+            continue
+        record = decisions.open_or_refresh(
+            directory,
+            project=root,
+            lane=str(row.get("participant", "")),
+            kind=str(row["condition"]),
+            key=str(row["condition"]),
+            question=f"Operator needed: {row['condition']}",
+            detail=f"{row.get('detail', '')}\nremedy: {row.get('command', '')}",
+            options=("acknowledge",),
+            now=stamp,
+        )
+        kept.append(record["id"])
+    for record in decisions.list_open(directory, stamp):
+        if (
+            record.get("kind") in PROBLEM_CONDITIONS
+            and record.get("project") == root
+            and record["id"] not in kept
+        ):
+            decisions.close(directory, record["id"], stamp)
+    return kept
 
 
 def drain(timeout: float = JOIN_SECONDS) -> int:

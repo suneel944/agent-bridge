@@ -253,7 +253,8 @@ def test_the_same_situation_notifies_once(tmp_path, fake):
         offer_context(offer="def456"),
     )
     notify.drain()
-    assert len(fake) == 2
+    bodies = "\n".join(body for _, body in fake)
+    assert bodies.count("\ndecision: ") == 2
     marker = json.loads((tmp_path / "codex-notify.json").read_text())
     assert set(marker) == {"handoff_offered"}
 
