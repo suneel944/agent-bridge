@@ -10,7 +10,8 @@ listed in an explicit project policy, and never on an agent's own authority.
 
 | Module | Responsibility |
 | --- | --- |
-| `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, and hands every other invocation to `cli` unchanged |
+| `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, prints the start-here screen for a bare invocation, and hands every other invocation to `cli` unchanged |
+| `start` | The read-only start-here screen: Git checkout and cleanliness, registration from the recorded manifests, native CLIs on PATH with their plugin records, the recorded service's liveness, and the next commands for that state |
 | `cli` | Argument parsing and dispatch, plus the `Bridge` command object that joins the command groups below and keeps lane restore, pause, stop, restart, retirement, reclaim and pull requests |
 | `core` | Base of the `Bridge` command object: the private state root and its configuration, the mail server's start, stop and readiness, the project manifest and the participant lanes it records |
 | `settings` | The per-project settings commands: verification and initialization commands, approval policy, branch naming, issue tracker, declared resources, lane budgets and the limits of the enforced run budget (`budget enforce`) |

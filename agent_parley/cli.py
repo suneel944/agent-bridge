@@ -3088,6 +3088,17 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+START_HERE: tuple[str, tuple[str, ...]] = (
+    "Start here",
+    ("run", "status", "top", "problems", "demo", "doctor"),
+)
+"""Leading root-help group of the commands a new operator reaches first.
+
+Its commands stay listed in their own groups too, and a name this build does
+not declare is skipped, so the group can name a command before it lands.
+"""
+
+
 class Absorbed:
     """Accepts a command's declarations without building a parser for them.
 
@@ -3191,7 +3202,12 @@ def command_help(index: CommandIndex) -> str:
     """
     width = max(len(name) for name in index.summaries) + 2
     listed: set[str] = set()
-    blocks = []
+    blocks = [
+        (
+            START_HERE[0],
+            [name for name in START_HERE[1] if name in index.summaries],
+        )
+    ]
     for title, names in COMMAND_GROUPS:
         members = [name for name in names if name in index.summaries]
         listed.update(members)
@@ -5081,6 +5097,10 @@ def main() -> int:
         return _plain_status()
     if sys.argv[1:] == ["title"]:
         return _title()
+    if not sys.argv[1:]:
+        from agent_parley import start
+
+        return start.show()
     typed = selected_command(sys.argv[1:])
     parser, commands = root_parser(typed)
     if typed is not None and typed not in commands.declared:
@@ -5091,8 +5111,9 @@ def main() -> int:
         print(protocol.launcher_version())
         return 0
     if args.command is None:
-        parser.print_help()
-        return 0
+        from agent_parley import start
+
+        return start.show(home)
     if args.command == "completion":
         print(completion.script(parser, args.shell), end="")
         return 0
