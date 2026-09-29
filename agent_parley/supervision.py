@@ -3845,6 +3845,71 @@ def orphan_marker(numbers: list[str], keys: list[str]) -> str:
     )
 
 
+def orphan_decision(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    config: dict,
+    name: str,
+    since: float,
+) -> None:
+    """Asks the operator where a dead lane's claims go once wakes are spent.
+
+    A spent wake budget used to leave the orphaned claims with the dead lane
+    and the remedy with whichever peer chose to take them, so a claim could
+    stay orphaned indefinitely. Moving a claim after the budget is spent is
+    the operator's call, so nothing moves here: the operator is sent one
+    decision per exhaustion that names the claims, the live peer that fits
+    them or the absence of one, and the commands for each choice.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+        name: Participant whose wake budget is spent.
+        since: Unix time the budget was recorded as spent.
+    """
+    numbers = sorted(
+        (
+            number
+            for number, record in issues.snapshot(directory)["issues"].items()
+            if record.get("owner") == name
+            and (record.get("orphan") or {}).get("owner") == name
+        ),
+        key=int,
+    )
+    if not numbers:
+        return
+    root = manifest["root"]
+    listed = ", ".join(f"#{number}" for number in numbers)
+    take = "agent-parley issue claim NUMBER --take-orphaned"
+    peer = _overdue_peer(home, directory, manifest, config, {}, name)
+    choice = (
+        f"{peer} is live and fits: agent-parley say {peer} "
+        f'"take {listed} with {take}" --repo {root}'
+        if peer
+        else "no live peer fits: start a fresh lane with agent-parley run "
+        f"NAME --repo {root} and have it take them with {take}"
+    )
+    with contextlib.suppress(BridgeError, OSError):
+        notify.deliver(
+            directory,
+            name,
+            notify.Event.ORPHAN_DECISION,
+            {
+                "repo": root,
+                "since": int(since),
+                "issue": listed,
+                "detail": (
+                    f"{name} stayed dead after {WORK_WAKE_ATTEMPTS} wakes; "
+                    f"{choice}; or retry agent-parley run {name} --resume "
+                    f"--repo {root}. Nothing moves until you act."
+                ),
+            },
+        )
+
+
 def _dead(observed: dict, after: float) -> bool:
     """Reports whether a lane is gone rather than merely quiet.
 
@@ -6129,7 +6194,8 @@ def wake(
     backs off rather than stopping: the doubling continues to one hour and
     stays hourly, so a lane is never parked forever and never re-prompted
     every window either. An exhausted lane's claims are also eligible for the
-    overdue-claim transition in `overdue_claims`.
+    overdue-claim transition in `overdue_claims`, and its orphaned claims
+    become one operator decision through `orphan_decision`.
 
     A durable retryable capacity observation is itself a backlog reason, so a
     lane whose client stopped on a transient provider error resumes on this
@@ -6306,6 +6372,9 @@ def wake(
             if not record.get("exhausted_at"):
                 record.update(exhausted_at=time.time())
                 store_wake(home, directory, root, name, record)
+            orphan_decision(
+                home, directory, manifest, config, name, record["exhausted_at"]
+            )
             if work_offer and dispatch.get("state") != "escalated":
                 result = _work_escalation(
                     work_offer, attempts, str(record.get("result", ""))

@@ -1564,6 +1564,46 @@ def test_bare_stops_escalate_and_a_commit_resets_the_budget(
     assert record["attempts"] == 1 and record["exhausted_at"] is None
 
 
+def test_a_spent_budget_asks_the_operator_about_orphaned_claims(
+    bridge, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "1")
+    with state.lock(directory / "issues.lock"):
+        ledger = issues.snapshot(directory)
+        ledger["issues"]["1"]["orphan"] = {"id": "x", "owner": "codex"}
+        write_json(directory / "issues.json", ledger)
+    idle_lane(directory, "codex", 1000)
+    send(bridge, actors["claude"], "codex")
+    monkeypatch.setattr(terminal, "request", lambda *args: "accepted")
+    sent = []
+    monkeypatch.setattr(
+        supervision.notify,
+        "deliver",
+        lambda directory, agent, event, fields: sent.append(
+            (agent, event, dict(fields))
+        ),
+    )
+    config = {**supervision.DEFAULTS, "inactive_after": 1}
+    observed = supervision.presence(directory, "codex", 1)
+    for _ in range(supervision.WORK_WAKE_ATTEMPTS):
+        supervision.wake(
+            bridge.home, directory, paired, "codex", observed, config
+        )
+        record = rewake(bridge, paired, directory, "codex", at=0)
+    assert record["exhausted_at"] and not sent
+    supervision.wake(bridge.home, directory, paired, "codex", observed, config)
+    agent, event, fields = sent[0]
+    assert (agent, event) == ("codex", supervision.notify.Event.ORPHAN_DECISION)
+    assert fields["issue"] == "#1"
+    assert fields["since"] == int(record["exhausted_at"])
+    assert "--take-orphaned" in fields["detail"]
+    assert fields["detail"].endswith("Nothing moves until you act.")
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "codex"
+
+
 def test_a_recovery_burst_queues_one_capture_with_merged_evidence(
     bridge, monkeypatch
 ):
