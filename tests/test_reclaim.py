@@ -759,6 +759,90 @@ def test_force_removes_a_dirty_lane_worktree_after_a_checkpoint(
     )
 
 
+def test_a_worktree_whose_commits_landed_elsewhere_is_bundled_then_removed(
+    bridge, repo, idle, tmp_path
+):
+    path = made(repo, tmp_path, "codex-pr-20")
+    (path / "landed.txt").write_text("landed\n")
+    commit(path, "Sub-task work")
+    head = git(path, "rev-parse", "HEAD").strip()
+    (repo / "landed.txt").write_text("landed\n")
+    commit(repo, "Same work through another branch")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    row = worktree_of(swept, path)
+    assert row["reason"] == reclaim.ABSORBED
+    assert row["removed"] is True
+    assert not path.exists()
+    assert "codex-pr-20" in branches(repo)
+    folder = idle["directory"] / "recovery"
+    record = json.loads((folder / f"{row['checkpoint']}.json").read_text())
+    bundle = folder / record["artifact"]["reference"]
+    git(
+        repo,
+        "fetch",
+        "--no-write-fetch-head",
+        str(bundle),
+        record["worktree_commit"],
+    )
+    assert git(repo, "cat-file", "-t", head).strip() == "commit"
+
+
+def test_a_worktree_whose_commits_differ_from_the_base_is_kept(
+    bridge, repo, idle, tmp_path
+):
+    path = made(repo, tmp_path, "codex-pr-21")
+    (path / "landed.txt").write_text("mine\n")
+    commit(path, "Sub-task work")
+    (repo / "landed.txt").write_text("theirs\n")
+    commit(repo, "Different work through another branch")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    assert worktree_of(swept, path)["reason"] == reclaim.UNPUSHED
+    assert path.exists()
+
+
+def test_prune_removes_retired_lane_files_and_stale_wake_logs(
+    bridge, repo, idle
+):
+    directory = idle["directory"]
+    retirement.mark(directory, "codex", time.time())
+    doomed = [f"codex{end}" for end in reclaim.RETIRED_FILES]
+    kept = ["codex-identity.json", "codex-capacity.json", "codex-wake.json"]
+    for name in [*doomed, *kept, "claude-wake.log", "claude-work.json"]:
+        (directory / name).write_text("{}")
+    stale = directory / "old-wake.log"
+    stale.write_text("old\n")
+    aged(stale, reclaim.WAKE_LOG_RETENTION + 60)
+    manifest = roster.read(directory)
+
+    removed = reclaim.prune(directory, manifest, time.time())
+
+    assert sorted(removed) == sorted([*doomed, "old-wake.log"])
+    for name in [*kept, "claude-wake.log", "claude-work.json"]:
+        assert (directory / name).exists()
+    for name in doomed:
+        assert not (directory / name).exists()
+
+
+def test_prune_keeps_the_files_of_a_retired_lane_still_running(
+    bridge, repo, idle, monkeypatch
+):
+    directory = idle["directory"]
+    retirement.mark(directory, "codex", time.time())
+    (directory / "codex-work.json").write_text("{}")
+    monkeypatch.setattr(reclaim, "_busy", lambda directory, name: True)
+
+    removed = reclaim.prune(directory, roster.read(directory), time.time())
+
+    assert removed == []
+    assert (directory / "codex-work.json").exists()
+
+
 def test_reclaim_dry_run_lists_removals_with_sizes(
     bridge, repo, idle, tmp_path, monkeypatch, capsys
 ):

@@ -1781,3 +1781,25 @@ def test_idle_leads_read_mail_the_next_issue_and_a_stalled_peer(
         )
         is None
     )
+
+
+def work_record(session, observed_at, offer=None):
+    """Builds one work publication with a session check and a reading."""
+    return {
+        "fit": session is not False,
+        "checks": {"session": session},
+        "capacity": {"state": "available", "observed_at": observed_at},
+        "offer": offer,
+    }
+
+
+def test_a_dead_lane_is_not_rewritten_for_a_peer_capacity_reading():
+    previous = work_record(False, 100.0)
+
+    assert not supervision._work_changed(previous, work_record(False, 200.0))
+    assert supervision._work_changed(
+        previous, work_record(False, 200.0, {"id": "a"})
+    )
+    assert supervision._work_changed(
+        work_record(True, 100.0), work_record(True, 200.0)
+    )
