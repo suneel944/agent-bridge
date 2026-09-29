@@ -494,6 +494,21 @@ def test_a_wake_refusal_names_its_reason_and_an_actor_who_can_clear_it(
     assert "complete or stop the session" not in row["command"]
 
 
+def test_a_withheld_resume_names_the_missing_approval_opt_in(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude")
+    refuse(bridge, directory, "claude", supervision.OPT_IN_MISSING)
+    [row] = rows(bridge, problems.WAKE)
+    assert row["detail"].startswith("setup gap")
+    assert row["actor"] == problems.BY_OPERATOR
+    assert row["command"] == (
+        f"{supervision.OPT_IN_REMEDY}: agent-parley run claude --resume "
+        f"{at(paired['root'])}"
+    )
+
+
 def test_a_lane_that_cannot_read_mail_is_never_offered_say(
     bridge, repo, paired, served
 ):

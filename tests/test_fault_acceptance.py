@@ -21,6 +21,7 @@ passes on the release commit; see `scripts/release_publish.py`.
 """
 
 import errno
+import json
 import shlex
 import subprocess
 import sys
@@ -273,6 +274,10 @@ def scenario(bridge, repo, paired, monkeypatch):
         git(path, "config", "user.email", "test@example.com")
     bridge.verification(repo, f"{shlex.quote(sys.executable)} -c pass")
     bridge.approval_policy(repo, ["merge"])
+    manifest_path = bridge.project(repo)[1] / "project.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.setdefault("supervision", {})[dialogs.PRE_APPROVE] = True
+    write_json(manifest_path, manifest)
     store.initialize(bridge.home)
     for participant in paired["participants"].values():
         store.register(bridge.home, paired["root"], participant["display"])

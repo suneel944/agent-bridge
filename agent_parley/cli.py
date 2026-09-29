@@ -5446,9 +5446,14 @@ def main() -> int:
                     "a lane selector."
                 )
             if args.action == "add":
-                bridge.add_participant(
+                added = bridge.add_participant(
                     repository, args.name, args.provider, args.credentials
                 )
+                if supervision.opt_in_missing(bridge.home, added, args.name):
+                    print(
+                        supervision.OPT_IN_WARNING.format(name=args.name),
+                        file=sys.stderr,
+                    )
             elif args.action == "restore":
                 print(bridge.restore(repository, args.name))
             elif args.action == "retire":

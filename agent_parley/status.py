@@ -255,9 +255,17 @@ class StatusMixin(BridgeCore):
             also names
             the kernel release, the WSL generation or ``none``, and whether
             ``pidfd_open`` is available, so a platform gap is read here
-            before a lane is started.
+            before a lane is started. The `approvals` component names each
+            lane `supervision.opt_in_missing` reports as a setup gap; it is
+            the operator's choice, so it leaves the set consistent.
         """
-        from agent_parley.cli import json, process, protocol, store
+        from agent_parley.cli import (
+            json,
+            process,
+            protocol,
+            store,
+            supervision,
+        )
 
         components = [
             {
@@ -332,6 +340,27 @@ class StatusMixin(BridgeCore):
                     protocol.RESTORE_ROOT + ", ".join(gone) if gone else ""
                 ),
                 "compatible": not gone,
+            }
+        )
+        unapproved = sorted(
+            f"{manifest['root']} {name}"
+            for manifest in manifests
+            if manifest.get("root")
+            for name in manifest.get("participants") or {}
+            if supervision.opt_in_missing(self.home, manifest, name)
+        )
+        components.append(
+            {
+                "component": "approvals",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": protocol.SETUP_GAP if unapproved else protocol.OK,
+                "remedy": (
+                    supervision.OPT_IN_REMEDY + ": " + ", ".join(unapproved)
+                    if unapproved
+                    else ""
+                ),
+                "compatible": True,
             }
         )
         return {

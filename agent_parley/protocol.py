@@ -60,6 +60,7 @@ MISMATCH = "mismatch"
 STALE = "stale"
 STOPPED = "not running"
 ROOT_GONE = "root gone"
+SETUP_GAP = "setup gap"
 RESTORE_ROOT = (
     "These projects name a root checkout that no longer exists; restore "
     "it, or remove the project's state folder once nothing in it is "
@@ -201,7 +202,9 @@ def render(reported: dict) -> str:
         accept is printed in upper case, so an operator scanning the report
         sees which line to read. No path inside a credential profile and no
         credential is printed. One platform line names the kernel release,
-        the WSL generation and whether ``pidfd_open`` is available.
+        the WSL generation and whether ``pidfd_open`` is available. A setup
+        gap does not make the set inconsistent, so its remedy follows the
+        verdict on a line of its own.
     """
     lines = []
     for component in reported["components"]:
@@ -221,6 +224,11 @@ def render(reported: dict) -> str:
         f"pidfd_open {pidfd}"
     )
     lines.append(verdict(reported["components"]))
+    lines.extend(
+        f"{component['component']}: {component['remedy']}"
+        for component in reported["components"]
+        if component["state"] == SETUP_GAP
+    )
     return "\n".join(lines)
 
 
