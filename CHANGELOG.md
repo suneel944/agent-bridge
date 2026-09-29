@@ -296,7 +296,7 @@
   listing assets; it does not introduce a new runtime feature.
   ([#34](https://github.com/suneel944/agent-parley/pull/34))
 
-## [0.1.0] - 2026-09-10
+## [0.1.0] - 2026-09-09
 
 ### Features
 

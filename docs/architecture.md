@@ -33,12 +33,12 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `issues` | Claim and handoff state transitions, and resolution of the claim a lane holds |
 | `lifecycle` | Execution state an issue's owner still owes, stored in the issue ledger so an ownership transition and its claim generation publish together, and the dependency settlement completion triggers |
 | `recovery` | Capture and restore of an abandoned claim's work as recovery checkpoints, operator-authorized takeover, and the persisted capacity recovery candidates |
-| `lanes` | The one authoritative state record of each lane in the store (`starting`, `working`, `idle`, `blocked` with its cause, `stopped`, `dead`, `reclaimed`), its closed transition table, and the event every accepted or refused transition appends; the per-lane files are evidence it reads, never a second answer. Hooks (`checkpoints.record`) and the dialog watcher submit evidence to a per-project spool (`lane-evidence.jsonl`) instead of waiting on the store; each poll applies it in arrival order before its liveness sample, and keeps it for the next poll when the store is busy. A session change is a transition that records both session ids. Each poll also charges the time since the last one to idle lane-minutes and unaccountable claim-minutes by state and cause, which `status` reports. A host restart moves every recorded session's row to `stopped` with the restart named as its evidence, which `rebooted` reads to refuse a resume until a new session clears it. The wake budget (attempts, backlog, next attempt, exhaustion, escalation) lives in the same store, seeded once from a lane's published `-wake.json` on upgrade |
-| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, the reclaim sweep, a project whose root checkout is gone, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane |
+| `lanes` | The one authoritative state record of each lane in the store (`starting`, `working`, `idle`, `blocked` with its cause, `stopped`, `dead`, `reclaimed`), its closed transition table, and the event every accepted or refused transition appends; the per-lane files are evidence it reads, never a second answer. Hooks (`checkpoints.record`) and the dialog watcher submit evidence to a per-project spool (`lane-evidence.jsonl`) instead of waiting on the store; each poll applies it in arrival order before its liveness sample, and keeps it for the next poll when the store is busy. A session change is a transition that records both session ids. Each poll also charges the time since the last one to idle lane-minutes and unaccountable claim-minutes by state and cause, which `status` reports. The `accounting` events those charges append and every other lane event are each kept to the latest `MAX_EVENTS` (2000) per project, so per-poll accounting never evicts the transition history. A host restart moves every recorded session's row to `stopped` with the restart named as its evidence, which `rebooted` reads to refuse a resume until a new session clears it. The wake budget (attempts, backlog, next attempt, exhaustion, escalation) lives in the same store, seeded once from a lane's published `-wake.json` on upgrade |
+| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, the reclaim sweep, a project whose root checkout is gone, the open-issue catalog `status` reads, cached in `FORGE_ISSUES` (`forge-issues.json`) and refreshed once it is `FORGE_TTL` (300 s) old, a failed read retried no sooner than `FORGE_RETRY` (60 s) later while the last good reading is kept, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane |
 | `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends. Accounts are published per project in `convergence.json`; the thresholds are the supervision settings `convergence_repeats` (3 repeats of one failure by default) and `convergence_after` (14400 working seconds since the last milestone by default), and both responses are keyed mail, the escalation also notifying through `non_convergence` |
 | `roster` | Providers, credential profiles and project participants |
 | `retirement` | The withdrawal of one lane at its own request: the work it returns, the worktree it leaves only when Git reports it clean, and the durable retirement mark the supervisor and the operator views read |
-| `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees |
+| `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees: one holding ignored files is always kept, and a quiet one whose unpushed commits already landed through another branch is bundled into a recovery checkpoint and removed without force. Also the pruning of files retired lanes no longer need and of wake logs past their retention |
 | `policy` | Attribution rules shared by the lane hook, integration and the repository gate |
 | `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, the ready-report comment posted there, and one bounded reading of the check, review and merge state of up to `MAX_PULL_REQUESTS` (30) open pull requests on GitHub |
 | `forecast` | Bounded co-change history of the base checkout, cached per base commit, and the advisory collision forecast a reservation or claim carries |
@@ -271,17 +271,22 @@ every registered participant of the project, sender and recipient or not. Only
 that mark widens a scope: unmarked mail keeps the sender-and-recipients scope
 described above, and the upgrade that adds the column marks every stored
 message as ordinary. A decision may address no recipient, which records it
-without putting it in an inbox; an attachment a decision spills stays readable
-by its writer and its addressees alone, so the log reveals the bounded record
-and never more than the message did.
+without putting it in an inbox. An attachment a decision or a feed message
+spills is readable by every registered participant of the project and the
+operator, the same readers the log and the feed already have; any other
+attachment stays readable by its writer and its addressees alone.
 
 The addressable roster omits the operator and revoked credentials before
 applying its 32-participant limit. Sending to either is refused with an
 explanation; retained mail remains available to a re-registered participant.
 
 No coordination tool returns a participant's whole starting context. The store
-holds projects, agents, messages, recipients, reservations, the requests queued
-for them, and events, keyed by
+holds `projects`, `agents`, `messages`, `message_recipients`,
+`file_reservations`, the `reservation_requests` queued for them and the
+`reservation_refusals` recorded against them, `events`,
+`participant_presence`, `idempotent_calls`, `scheduled_deliveries`, the
+`message_search` full-text index where FTS5 is available, and the lane tables
+`lane_states`, `lane_events`, `lane_accounts` and `lane_wakes`, keyed by
 an authenticated project and lane. The issue ledger and the participant
 manifest are files in the project state directory, whose name derives from the
 repository's Git common directory, which the store never records. A served
@@ -372,14 +377,24 @@ lane whose worktree is already gone. Lane removal stays in `cli.py`, where it
 is the ordinary retirement followed by Git's own merged-branch deletion, so a
 reclaimed lane leaves the state a retired lane leaves, and the lane's state
 record moves to `reclaimed`. Worktrees lanes made for themselves are read from
-`git worktree list` and attributed to a lane by path or branch; one no lane
-made is never touched, and `reclaim.remove` takes an attributed one out only
-through `git worktree remove`, which refuses a dirty or locked worktree.
+`git worktree list` and attributed to a lane by path, when they sit inside a
+lane or directly inside the project state directory, or by branch; one no
+lane made, including one nested deeper under the state directory, is never
+touched, and `reclaim.remove` takes an attributed one out only through
+`git worktree remove`, which refuses a dirty or locked worktree. A lane-made
+worktree holding files Git ignores is always kept, because no force can
+checkpoint untracked content. A quiet lane-made worktree whose unpushed
+commits already landed in the base checkout through another branch, as a
+squash or a cherry-pick, is removed without force after a recovery bundle of
+it is written; a lane's own worktree with unpushed commits is still kept.
 `gc --apply --force` also removes one kept for uncommitted changes, unpushed
 commits or a recent change, after writing a recovery checkpoint of it.
 `supervision.py` runs that sweep from a poll no more than once every fifteen
 minutes and publishes its outcome as `reclaim.json` beside the other project
-state, which bounds the next attempt whatever the last one did. The split
+state, which bounds the next attempt whatever the last one did. The same pass
+deletes the published work, wake prompt, client configuration and wake log of
+retired lanes whose session lock is free, wake logs untouched for two days,
+and the recovery bundles no live claim can still read. The split
 keeps each decision testable without deleting anything.
 
 A project whose root checkout is gone for one supervision interval is not
@@ -622,8 +637,12 @@ file under the state root that the coordination prompt tells the lane to read
 each turn, and records the delivery through `checkpoints.record` so a polled
 lane's delivered context is counted where every other lane's is. The feed,
 owed-acknowledgement and relevance-ordered mail digest come from the same
-`checkpoints` builders, and the mail it previews is marked read as a hook
-delivery marks it. A read that
+`checkpoints` builders, but unlike a hook delivery it never marks mail read,
+because the lane may not have read the file yet. Each delivery appends a
+numbered batch with the UTC time it was written; a batch stays while any
+message it carried is unread and leaves once the lane calls
+`mark_message_read` for all of them, a batch without mail stays only until a
+newer one is written, and at most `MAX_BATCHES` (8) are kept. A read that
 fails is retried on the next interval rather than raised, because losing
 delivery must never end a native session, and delivery decides nothing: a
 missing guard still refuses the launch.
@@ -710,6 +729,10 @@ captured: it goes straight to the operator's terminal, and the refusal points
 there. Only lane initialization captures its command's output and reports the
 last twenty lines. A command that cannot run is a refusal, not a skip.
 No flag bypasses the gate, and removing it is an explicit `verify set ''`.
+`verify set`, `approval set` and `init set` are operator-only: each is refused
+from an assigned worktree or from any process holding a lane's
+`AGENT_PARLEY_TOKEN`, so a lane cannot clear a gate its own merge has to pass.
+Like `approve`, this is a command-line boundary, not an operating-system one.
 The gate reports the base checkout as it stands before the merge, which is not
 a claim about the merged result, so the same command runs again on the merge
 commit before any claim is recorded complete.
@@ -722,9 +745,10 @@ the issue and claim generation it carried, the reported source commit, the
 pre-merge base, the resulting commit and the gate command, and it keeps the
 last 400 characters of the failure. It names one of three kinds: `conflict`,
 a merge stopped before any commit with the conflict left in the working tree;
-`gate failed`, a merge commit that failed the gate or whose gate changed
-repository content; and `interrupted`, a merge commit whose gate result is
-unknown because the command crashed, timed out or the base moved while it ran.
+`gate failed`, a merge commit whose gate failed, could not run, timed out or
+changed repository content; and `interrupted`, a merge whose result is
+unknown because the merge itself failed without a conflict or the base moved
+while the gate ran.
 A crash leaves the record exactly as written, so a restart reads it back.
 
 While the record stands, no other lane is integrated: `participant merge`, the
@@ -978,9 +1002,12 @@ is refused before any edge is written when it names a malformed issue, exceeds a
 bound, or describes a cycle, so an operator never has to unpick a half-applied
 order by hand. The cycle check reads the recorded edges too, so plans applied
 in turn cannot close a cycle together, and an edge to a complete issue is
-skipped. Each supervisor poll drops an edge whose blocker is complete or no
-longer recorded, because completion reconciles dependents only once, at the
-instant it is recorded. Applying adds edges and never removes one, so an edge recorded
+skipped. Each supervisor poll drops an edge whose blocker is complete, was
+released after its issue or pull request ended on the forge, or is no longer
+recorded, because completion reconciles dependents only once, at the instant
+it is recorded, and a blocker merged or closed by hand records no completion.
+A reclaim clears that forge mark, so a reopened blocker holds its dependents
+again. Applying adds edges and never removes one, so an edge recorded
 after the apply is reported as entered by hand and a narrowed plan shows its
 dropped edges as unlisted until `issue unblock` removes them. Groups are advice
 a later offer or integration path may read; this layer only records them.
@@ -1009,8 +1036,9 @@ so no proposal can name a version the ledger has already moved past.
 
 The optional `[revisions]` table of the plan file is the operator's envelope:
 because it bounds what lanes may revise alone, only the operator applies a plan
-file, from the project base checkout outside every lane; any checkout may show
-or compare one.
+file: in a registered project `plan apply` is refused unless it runs in the
+project base checkout, outside every lane's worktree and without a lane's
+`AGENT_PARLEY_TOKEN` in its environment. Any checkout may show or compare one.
 `scope` lists the issues whose edges lanes may revise unattended, `max_changes`
 bounds the edges one automatic revision changes (default 1, at most 10) and
 `max_revisions` bounds the automatic revisions under one applied plan (default
@@ -1100,7 +1128,8 @@ acceptance is what creates the offer to the named lane. Neither path writes an
 owner, so the command line cannot take work from a lane that has not agreed to
 give it up. Reported `ready` outcomes do not establish verified completion.
 Ownership listings report each owner's session state and the age of its last
-observed checkpoint, as `active`, `idle` or `stopped`. That report is for an
+observed checkpoint, as `active`, `idle`, `stopped`, or `unknown` when no
+session process is recorded. That report is for an
 operator; outside the overdue-claim transition above, silence, an idle
 session and a stopped one all leave ownership where it is. `agent-parley top`
 renders the same state continuously, adding branch drift, denial counts and
@@ -1174,6 +1203,8 @@ signal, so macOS shutdown carries that narrow residual race and Linux does not.
 | Read telemetry wait for a busy store | 0 seconds; observation skipped |
 | Checkpoint and issue operation lock wait | Up to 1 second; 30 seconds for a served `Stop`, `SessionEnd`, `PermissionRequest` or `Notification` |
 | New message body | 4,096 UTF-8 bytes |
+| Spilled attachment | 65,536 UTF-8 bytes each; 1,048,576 bytes held per writer until its readers finish |
+| Attachment page | Up to 2,048 characters |
 | Inbox page | Up to 5 messages; bodies omitted by default |
 | Thread page | Up to 10 messages; 240-character body previews |
 | Search hits | Up to 5 messages; 240-character body previews |
@@ -1427,7 +1458,12 @@ rather than rewritten, and the backfill, the index and the schema version
 commit together, so an interrupted upgrade retries from the version it
 started at. The full-text index is an FTS5 virtual table over stored subjects
 and bodies, kept current by insert and delete triggers and built once from
-the messages already stored. Each startup checks the serving interpreter's
+the messages already stored. A body that spilled to an attachment is indexed
+whole from that attachment rather than from the slice its record keeps, and
+the upgrade to schema version 12 rebuilds the index once so earlier spilled
+messages are covered too; an attachment that is missing or unreadable leaves
+the slice indexed, and the substring fallback reads only that slice. Each
+startup checks the serving interpreter's
 FTS5 support, even at the current schema version. Without it, index creation
 is skipped and existing indexing triggers are removed so sends still work;
 searching then matches the query as a literal case-insensitive substring of a

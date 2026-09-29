@@ -31,7 +31,7 @@ that provider.
 | `delivery` | How a lane is told | Which adapters | What it cannot do |
 | --- | --- | --- | --- |
 | `hooks` | a native lifecycle event returns bounded context at a turn boundary | `claude`, `codex`, `copilot`, `gemini`, `opencode` and every preset built on them | nothing further; this is the full path |
-| `polled` | a launcher-owned thread reads the mailbox on an interval and publishes it to `STATE/PROJECT/NAME-delivery.md`, which the lane's prompt tells it to read each turn | any adapter missing `SessionStart`, `UserPromptSubmit`, `PreToolUse` or `Stop`; `amp` today | deny a tool call, hold a turn open, or guarantee the lane reads the file; budget threshold notices are not carried, and a missing required guard still refuses the launch |
+| `polled` | a launcher-owned thread reads the mailbox on an interval and publishes it to `STATE/projects/PROJECT_KEY/NAME-delivery.md`, which the lane's prompt tells it to read each turn | any adapter missing `SessionStart`, `UserPromptSubmit`, `PreToolUse` or `Stop`; `amp` today | deny a tool call, hold a turn open, or guarantee the lane reads the file; budget threshold notices are not carried, and a missing required guard still refuses the launch |
 
 `AGENT_PARLEY_DELIVERY_SECONDS` sets the interval for a polled lane, 20s by
 default. Delivery is recorded in that lane's event log like a served
@@ -167,10 +167,11 @@ agent-parley participant retire claude-2
 agent-parley run claude-2 --provider claude --credentials account-2
 ```
 
-`retire` refuses while a session is running, refuses a lane with uncommitted
-changes, and refuses a lane still holding work it reported ready until that
-work is merged or offered on, so commit or preserve the work first; it never
-discards work. Commits
+`retire` refuses while a session is running, refuses while the lane's
+checkpoint lock is busy, and refuses a lane with uncommitted changes, so commit
+or preserve the work first; it never discards work. Ignored files in the
+worktree are deleted with it only after you confirm them by name, or with
+`--yes`. Commits
 the lane made are kept on its branch, and it says so. Messages are preserved.
 The replacement lane is a fresh worktree on the next free lane branch, so it
 does not continue the retired branch: merge that branch, or branch from it with

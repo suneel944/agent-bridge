@@ -10,7 +10,7 @@ Repository installation does not imply public directory approval. The Codex
 listing went live on 2026-09-14 at
 `https://chatgpt.com/plugins/plugins_6aa7c91c25008191ad715f14756e5deb`, and
 the submission archive has been attached to every release from v0.6.0 through
-v0.12.0; each new version still needs a manual portal upload, because neither
+v0.13.0; each new version still needs a manual portal upload, because neither
 catalog offers a publishing API. The Claude submission was made on 2026-09-14
 through the Console form and was still awaiting review on 2026-09-26; a code
 search of `anthropics/claude-plugins-official` for `agent-parley` returned no
@@ -113,9 +113,10 @@ That archive is a release asset. `make release-artifacts` builds it into
 records its hash in `SHA256SUMS`, and `scripts/release_publish.py` requires it
 by name, so a release missing it fails instead of publishing. A portal upload
 therefore starts from a released artifact rather than a local build. Releases
-v0.6.0 through v0.9.1 carry the same archive, uploaded by hand after the fact.
-Neither catalog exposes a publishing API, so each new
-version still needs a manual upload through the portal. Claude mirrors pushes
+from v0.10.0 onward carry it automatically; v0.6.0 through v0.9.1 carry the
+same archive, uploaded by hand after the fact. Neither catalog exposes a
+publishing API, so each new version still needs a manual upload through the
+portal. Claude mirrors pushes
 once a listing is live; Codex does not.
 
 Both forms change over time. Re-read them at submission time and treat the
@@ -143,7 +144,8 @@ confirm the stated expectation before opening either form.
   `gh release view vVERSION --json assets`
 - Neither manifest passes `claude plugin validate --strict`; the single
   `protocol` warning is expected and the gate runs without `--strict`.
-  `uv run --locked python scripts/check_policy.py`
+  `claude plugin validate --strict plugins/agent-parley` and
+  `claude plugin validate --strict .`
 - The `coordinate` skill carries YAML frontmatter with `name` and
   `description`.
   `head -5 plugins/agent-parley/skills/coordinate/SKILL.md`
