@@ -84,6 +84,11 @@ OUTAGE_GUIDANCE = (
 )
 HOOK_PID_ENV = "AGENT_PARLEY_HOOK_PID"
 FIRST_STAGE = "start"
+OVERLAP_MEMORY = 64
+MAX_OVERLAPS = 6
+MAX_FILED_PATHS = 20
+FILING_MATCH_TERMS = 2
+ISSUE_TITLE_OPTIONS = ("-t", "--title")
 
 
 class Stages:
@@ -180,6 +185,7 @@ class Reason(StrEnum):
     COORDINATION_UNAVAILABLE = "coordination_unavailable"
     RESERVED_PATH = "reserved_path"
     OFFER_EXPIRING = "offer_expiring"
+    FILING_OVERLAP = "filing_overlap"
     CHECKPOINT_FAILED = "checkpoint_failed"
     WAKE_REQUESTED = "wake_requested"
     ATTRIBUTION_REFUSED = "attribution_refused"
@@ -1408,6 +1414,327 @@ def reserved_conflict(
         ):
             return path, held
     return None
+
+
+def peer_pull_requests(
+    directory: Path, manifest: dict, agent: str
+) -> list[dict]:
+    """Reads the other lanes' open pull requests from the last forge poll.
+
+    Supervision keeps its latest reading of every open pull request, with
+    the files each one changes, so a tool call is compared against them
+    without reaching the network. A missing or unreadable record reads as
+    no pull request.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        agent: Assigned native lane name doing the reading.
+
+    Returns:
+        Every recorded open pull request whose head is not this lane's
+        branch, each carrying ``lane``: the registered identity of the lane
+        on its head branch, or an empty string when no lane is.
+    """
+    from agent_parley import supervision
+
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    participants = manifest["participants"]
+    own = participants.get(agent, {}).get("branch") or ""
+    owners = {
+        participant["branch"]: participant.get("display", name)
+        for name, participant in participants.items()
+        if participant.get("branch")
+    }
+    return [
+        {**reading, "lane": owners.get(reading.get("branch"), "")}
+        for reading in readings
+        if isinstance(reading, dict)
+        and not (own and reading.get("branch") == own)
+    ]
+
+
+def overlaps(
+    paths: list[str],
+    held: dict[str, list[str]],
+    pulls: list[dict],
+    ledger: dict,
+) -> list[dict]:
+    """Names the peer reservations and pull requests touching some paths.
+
+    Args:
+        paths: Lane-relative paths a call writes or an issue names.
+        held: Live reservation keys per peer identity, the reading lane's
+            own identity already excluded.
+        pulls: Other lanes' open pull requests from `peer_pull_requests`.
+        ledger: Issue records by number, read for claim owners.
+
+    Returns:
+        One finding per overlap, each with a stable ``key`` the lane is
+        shown once, the ``peer`` identity to tell, empty when no lane owns
+        it, and the ``text`` naming the overlap.
+    """
+    found = []
+    for path in paths:
+        for peer, patterns in sorted(held.items()):
+            for pattern in patterns:
+                if not store.named_resource(pattern) and store.overlapping(
+                    pattern, path
+                ):
+                    found.append(
+                        {
+                            "key": f"reserved:{peer}:{pattern}:{path}",
+                            "peer": peer,
+                            "text": f"{peer} reserves {pattern}",
+                        }
+                    )
+        for pull in pulls:
+            if path not in (pull.get("files") or []):
+                continue
+            closes = [
+                f"#{number}"
+                + (
+                    f" held by {owner}"
+                    if (owner := (ledger.get(number) or {}).get("owner"))
+                    else ""
+                )
+                for number in pull.get("issues") or []
+            ]
+            lane = pull.get("lane") or ""
+            found.append(
+                {
+                    "key": f"pull:{pull.get('number')}:{path}",
+                    "peer": lane,
+                    "text": f"pull request #{pull.get('number')} "
+                    f"({pull.get('branch')}{f' by {lane}' if lane else ''}) "
+                    f"changes {path}"
+                    + (f" and closes {', '.join(closes)}" if closes else ""),
+                }
+            )
+    return found
+
+
+def named_paths(text: str, lane: Path) -> list[str]:
+    """Finds the lane files and directories a piece of text names.
+
+    Args:
+        text: Title and body of an issue about to be filed.
+        lane: Resolved lane worktree the paths resolve against.
+
+    Returns:
+        Lane-relative POSIX paths that exist in the lane, in order of first
+        mention, at most `MAX_FILED_PATHS`.
+    """
+    found: list[str] = []
+    for match in re.findall(r"[\w./-]+", text):
+        token = match.rstrip(".")
+        if "/" not in token and "." not in token:
+            continue
+        with contextlib.suppress(OSError, ValueError):
+            path = (lane / token).resolve()
+            relative = path.relative_to(lane).as_posix()
+            if relative != "." and relative not in found and path.exists():
+                found.append(relative)
+        if len(found) >= MAX_FILED_PATHS:
+            break
+    return found
+
+
+def filed_issue(payload: dict, lane: Path) -> tuple[str, list[str]] | None:
+    """Reads the issue a shell call would file on the forge, if any.
+
+    Only the command line and the body files it names are read; nothing is
+    run and the network is never consulted.
+
+    Args:
+        payload: Native ``PreToolUse`` hook payload.
+        lane: Resolved lane worktree the call runs in.
+
+    Returns:
+        The title and the lane paths the title and body name, or None when
+        the call files no issue from inside the lane.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return None
+    command = str(tool_input.get("command", tool_input.get("cmd", "")))
+    cwd = Path(payload.get("cwd", str(lane))).resolve()
+    if "issue" not in command or not cwd.is_relative_to(lane):
+        return None
+    for segment in shell_segments(command):
+        words = invoked(segment)
+        if not words or Path(words[0]).name != "gh":
+            continue
+        if words[1:3] != ["issue", "create"]:
+            continue
+        args = words[3:]
+        text = option_values(args, PULL_REQUEST_OPTIONS) + message_files(
+            cwd, option_values(args, PULL_REQUEST_FILES)
+        )
+        title = " ".join(option_values(args, ISSUE_TITLE_OPTIONS))
+        return title, named_paths("\n".join(text), lane)
+    return None
+
+
+def claimed_matches(title: str, issues: dict, agent: str) -> list[dict]:
+    """Names the peers' live claims whose titles share an issue's subject.
+
+    Args:
+        title: Title of the issue about to be filed.
+        issues: Issue ledger snapshot.
+        agent: Assigned native lane name filing the issue.
+
+    Returns:
+        Findings shaped like `overlaps` for each claim sharing at least
+        `FILING_MATCH_TERMS` title words.
+    """
+    from agent_parley import recommend
+
+    ledger = issues.get("issues") or {}
+    live: dict[str, dict] = {
+        number: {"title": item.get("title") or "", "labels": []}
+        for number, item in ledger.items()
+        if item.get("owner") and item.get("owner") != agent
+    }
+    result = recommend.match(title, live, issues, {}, recommend.MAX_SHORTLIST)
+    return [
+        {
+            "key": f"claim:{record['issue']}",
+            "peer": "",
+            "text": f"#{record['issue']} {record['title']} is held by "
+            f"{record['owner']}",
+        }
+        for record in result["matches"]
+        if record["matched"] >= FILING_MATCH_TERMS
+    ]
+
+
+def overlap_notice(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    name: str,
+    agent: str,
+    payload: dict,
+    lane: Path,
+    mail: dict,
+    issues: dict,
+    shown: list[str],
+) -> dict | None:
+    """Finds the peer work one call would duplicate before it runs.
+
+    Issues, claims, reservations and pull requests are otherwise joined
+    only by issue number, so two lanes reach one defect through two
+    numbers and meet again as a merge conflict. An issue about to be filed
+    is compared, by the files it names and the words of its title, with
+    peers' reservations, open pull requests and live claims. A file about
+    to be written is compared with peers' reservations and open pull
+    requests, each peer named is told as well, and a lane writing a path it
+    has not reserved is reminded to reserve it. Every finding is shown to a
+    lane once. Reservations stay advisory: an edit is never refused here,
+    and a filing is refused once so the lane reads the overlap first and
+    files anyway by running the same command again.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Registered identity of the lane.
+        agent: Assigned native lane name.
+        payload: Native ``PreToolUse`` hook payload.
+        lane: Resolved lane worktree the call runs in.
+        mail: Mailbox batch carrying the lane's own reservations.
+        issues: Issue ledger snapshot.
+        shown: Finding keys this lane was already shown.
+
+    Returns:
+        The notice ``text``, the finding ``keys`` it shows and whether it
+        refuses a ``filing``, or None when there is nothing new to show.
+    """
+    if exempt(payload):
+        return None
+    filed = filed_issue(payload, lane)
+    path = "" if filed else touched_path(payload, lane)
+    paths = filed[1] if filed else [path] if path else []
+    if not filed and not path:
+        return None
+    held: dict[str, list[str]] = {}
+    pulls: list[dict] = []
+    if paths:
+        held = store.active_reservations(home, manifest["root"])
+        held.pop(name, None)
+        pulls = peer_pull_requests(directory, manifest, agent)
+    found = overlaps(paths, held, pulls, issues.get("issues") or {})
+    if filed:
+        found += claimed_matches(filed[0], issues, agent)
+    fresh = [item for item in found if item["key"] not in shown]
+    fresh = fresh[:MAX_OVERLAPS]
+    if filed:
+        if not fresh:
+            return None
+        return {
+            "text": clip(
+                "Before filing this issue: "
+                + "; ".join(item["text"] for item in fresh),
+                600,
+            )
+            + "\nLink or join that work instead of filing a parallel issue. "
+            "Run the same command again to file anyway; this notice is "
+            "shown once.",
+            "keys": [item["key"] for item in fresh],
+            "filing": True,
+        }
+    reminder = f"unreserved:{path}"
+    unreserved = reminder not in shown and not any(
+        store.overlapping(pattern, path)
+        for pattern in mail.get("reserved") or []
+        if not store.named_resource(pattern)
+    )
+    lines = []
+    if fresh:
+        lines.append(
+            clip(
+                f"Before editing {path}: "
+                + "; ".join(item["text"] for item in fresh),
+                500,
+            )
+            + "\nCoordinate before continuing; each lane named was told "
+            "too. Reservations are advisory and nothing was blocked."
+        )
+    for item in fresh:
+        if not item["peer"] or item["peer"] == name:
+            continue
+        with contextlib.suppress(OSError, sqlite3.Error, BridgeError):
+            store.speak(
+                home,
+                manifest["root"],
+                item["peer"],
+                clip(f"{name} is editing {path}", 160),
+                f"{name} is about to edit {path}, where {item['text']}. "
+                "Coordinate before either of you continues. Reservations "
+                "are advisory and nothing was blocked.",
+                f"overlap:{name}:{item['key']}",
+            )
+    if unreserved:
+        lines.append(
+            f"{path} is not reserved by this lane. Reserve it with "
+            "file_reservation_paths so peers see the work before they "
+            "edit it; reservations are advisory."
+        )
+    if not lines:
+        return None
+    return {
+        "text": "\n".join(lines),
+        "keys": [item["key"] for item in fresh]
+        + ([reminder] if unreserved else []),
+        "filing": False,
+    }
 
 
 def hazard_denial(
@@ -2793,8 +3120,26 @@ def checkpoint(
                     if event == "PreToolUse"
                     else None
                 )
+                noticed = list(state.get("overlap_notices") or [])
+                overlap = (
+                    overlap_notice(
+                        home,
+                        directory,
+                        manifest,
+                        identity["name"],
+                        agent,
+                        payload,
+                        lane,
+                        mail,
+                        issues,
+                        noticed,
+                    )
+                    if event == "PreToolUse" and not danger
+                    else None
+                )
                 if (
                     messages
+                    or overlap
                     or issue_notice
                     or roster_notice
                     or work_notice
@@ -2865,6 +3210,8 @@ def checkpoint(
                         )
                     if budget_notice:
                         parts.append(clip(budgets.notice(standing), 300))
+                    if overlap:
+                        parts.append(overlap["text"])
                     parts.extend(
                         part
                         for part in (feed_notice(news), owed_notice(owed))
@@ -2907,8 +3254,24 @@ def checkpoint(
                             mail,
                             danger,
                         )
+                    elif overlap and overlap["filing"]:
+                        reason = Reason.FILING_OVERLAP
+                        output = {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": overlap["text"],
+                            }
+                        }
+                        markers["overlap_notices"] = (
+                            noticed + overlap["keys"]
+                        )[-OVERLAP_MEMORY:]
                     elif output:
                         reason = Reason.COORDINATION_PENDING
+                        if overlap:
+                            markers["overlap_notices"] = (
+                                noticed + overlap["keys"]
+                            )[-OVERLAP_MEMORY:]
                         if delivered:
                             markers["cursor"] = delivered[-1]["id"]
                             markers["read"] = {

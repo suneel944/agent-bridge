@@ -188,6 +188,7 @@ def test_the_forge_reading_reduces_checks_to_one_verdict(monkeypatch, tmp_path):
             ],
             "mergeable": "CONFLICTING",
             "closingIssuesReferences": [{"number": 4}],
+            "files": [{"path": "b.py"}, {"path": "a.py"}, {"path": "b.py"}],
         },
         {
             "number": 2,
@@ -226,6 +227,7 @@ def test_the_forge_reading_reduces_checks_to_one_verdict(monkeypatch, tmp_path):
     assert (two["checks"], two["failing"]) == ("pending", [])
     assert three["checks"] == "green" and four["checks"] == "none"
     assert four["mergeable"] == "UNKNOWN"
+    assert one["files"] == ["a.py", "b.py"] and four["files"] == []
 
 
 def test_the_forge_reading_reports_absence_instead_of_raising(
