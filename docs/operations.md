@@ -428,7 +428,7 @@ condition, that count, its age and what clears it:
 | `inactive` | A live lane published no native activity inside `inactive_after`. | Whatever the lane's state allows, from the remedy table below. |
 | `wake attention` | The service's last wake of the lane was refused because operator input is pending, the client is waiting for a native approval or the previous accepted wake produced no checkpoint, or the wake needs operator attention. | Whatever the lane's state allows, from the remedy table below. |
 | `waiting on approval` | The lane's client has waited on a native tool approval prompt for longer than `--ack-after`. | Answer the prompt in the lane's own terminal. |
-| `held by a native dialog` | The launcher escalated a native dialog it could not answer; the row names the dialog and the options it offers. | Answer the prompt in the lane's own terminal. |
+| `held by a native dialog` | The launcher escalated a native dialog it could not answer; the row names the dialog and the options it offers. | Answer its decision from the chat, or the prompt in the lane's own terminal. |
 | `second session` | Another client process is sending hooks under the lane's identity; its events are ignored. The row names its session and process. | Stop that process, or run it outside the lane's worktree. |
 | `overdue claim` | One or more held issues are past their recorded deadline. A claim whose current generation reported ready or was verified complete is never overdue. | `agent-parley issue release NUMBER` for the oldest, named in the row. |
 | `claims over cap` | A lane holds more claims than `max_claims_per_lane`, from a ledger written before every ownership path was capped or a cap lowered after the claims were taken. The count is the excess. | `agent-parley issue release NUMBER` for the highest-numbered claim, named in the row, or an offer to a peer. |
@@ -2349,14 +2349,30 @@ decision, so a repeat never duplicates it and the unread mail wakes the lane
 on the next supervision poll; the lane then runs the matching command itself.
 A note is quoted in that mail and labelled as not an instruction. Nothing
 else crosses the channel: no claim, handoff, approval or free text is carried
-out for a lane, and nothing is typed into a session. A message from another
-chat, or with a wrong passcode, gets no reply. Five wrong passcodes inside ten
+out for a lane, and nothing is typed into a session except the option key of
+a native dialog, described below. A message from another chat, or with a
+wrong passcode, gets no reply. Five wrong passcodes inside ten
 minutes lock the inbound path for an hour and send one `inbound_locked`
 notification; the counter and the lock live only in memory. Only a salted hash
 of the passcode is held, compared in constant time, and never written to state
 or logs. The reader refuses to start when the passcode is unset or too short,
 and `status` prints that fault on its `Inbound:` line and under `inbound` in
 `status --json`.
+
+A native dialog the launcher escalates, such as a tool permission prompt, a
+hook trust review or the client's question picker, is recorded as a decision
+offering the options the screen draws, less a question picker's free-text
+option, since chat text is never typed into a lane. A permission or trust
+prompt recommends its refusing option, and an option that widens a
+permission, such as switching to auto mode or not asking again, takes the
+same `confirm` tap as an irreversible one. The answer is not mailed: the
+launcher re-reads the screen on its next pass and, only while it still draws
+that same dialog, claims the answer under the decision lock and presses the
+chosen option's digit, once. A screen that changed first retires the
+decision as `stale`, so a later tap is refused and an answer already given is
+never pressed on another dialog; the new screen is asked about afresh. A
+prompt the launcher cannot read is sent as terminal-only and answered at the
+lane's terminal. Nothing is ever answered on expiry.
 
 ### Reclaiming landed lanes
 

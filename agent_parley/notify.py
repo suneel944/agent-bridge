@@ -709,12 +709,16 @@ def _decide(
 
     An event with no answers of its own in `ANSWERS` offers
     `ACKNOWLEDGE`, so a new event never fails the notification it raises.
+    A caller that already recorded the decision, such as a native dialog
+    whose options come from the screen, names it in ``decision`` and no
+    second one is opened.
 
     Args:
         directory: Private project state directory.
         agent: Lane the situation belongs to.
         event: Notification the situation raised.
-        fields: Situation fields; ``root`` or ``repo`` names the project.
+        fields: Situation fields; ``root`` or ``repo`` names the project and
+            ``decision`` names a decision already recorded.
         body: The composed notification body, its title line first.
         digest: The situation digest `_pending` returned.
 
@@ -722,6 +726,8 @@ def _decide(
         The decision identifier, or an empty string when the record could
         not be written, in which case the message is sent directly.
     """
+    if fields.get("decision"):
+        return str(fields["decision"])
     options, reversibility = ANSWERS.get(event, ACKNOWLEDGE)
     title, _, detail = body.partition("\n")
     try:

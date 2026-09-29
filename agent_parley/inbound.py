@@ -605,6 +605,10 @@ def decide(
 ) -> tuple[str, dict]:
     """Records one answer and hands it to its lane, or asks to confirm it.
 
+    An answer to a native dialog is not mailed: the lane is held by that
+    dialog and reads no mail, and its launcher types the answer once it has
+    read the screen again and found the same dialog.
+
     Args:
         home: Private bridge state root.
         name: Decision identifier.
@@ -615,7 +619,7 @@ def decide(
 
     Returns:
         `ANSWERED` with the answered record, or `CONFIRMING` with the open
-        record when the option is irreversible and not yet confirmed.
+        record when the option takes a confirmation not yet given.
 
     Raises:
         BridgeError: If the decision is unknown, no longer open, or does not
@@ -624,11 +628,13 @@ def decide(
     directory, record = decisions.find(home, name)
     if refused := decisions.refusal(record, option, time.time()):
         raise BridgeError(refused)
-    if record.get("reversibility") == decisions.IRREVERSIBLE and not confirmed:
+    if decisions.confirming(record, option) and not confirmed:
         if note:
             decisions.hold(directory, name, note)
         return CONFIRMING, record
     answered = decisions.answer(directory, name, option, answered_by, note=note)
+    if answered.get("kind") == notify.Event.NATIVE_DIALOG.value:
+        return ANSWERED, answered
     with contextlib.suppress(OSError, ValueError, BridgeError, sqlite3.Error):
         settle(home, directory, answered)
     return ANSWERED, answered

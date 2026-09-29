@@ -342,7 +342,11 @@ with the option and a note. The answer is recorded once, the message is
 edited to say who chose what and when, and the waiting lane gets it as mail
 that wakes it. A second answer is refused with the first one's name. An
 irreversible option needs a confirming tap. A note reaches the lane quoted,
-never as an instruction, and nothing is typed into a session. The service
+never as an instruction. A native prompt holding a lane, such as a tool
+permission or a question picker, arrives as a decision with the options the
+screen draws; the launcher presses the chosen option only while that same
+prompt is still on screen, and an option that widens a permission needs a
+confirming tap. No other text is typed into a session. The service
 long-polls the Bot API, so no port is opened and no webhook is registered.
 
 Every typed message starts with a passcode, and both the passcode and the
