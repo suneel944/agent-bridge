@@ -15,6 +15,12 @@ conclusive, such as an issue closed by a merged pull request from the
 current claim generation, is settled without asking at all and recorded as
 ``applied on evidence``.
 
+Each supervision poll runs `sweep` over the project's open decision records.
+`EVENTS` names the table kind each recorded notification kind settles as; a
+record whose kind it does not name is left open. A settled record is answered
+with its own recommended option by `ANSWERED_BY` and handed to its lane the
+way any other answer is.
+
 An irreversible kind never times out: a merge to the default branch, a
 release or tag, discarding uncommitted work, deleting a branch and every
 native permission prompt always wait for an answer. A kind this table does
@@ -31,10 +37,11 @@ gives an irreversible kind a timeout.
 from __future__ import annotations
 
 import shlex
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from agent_parley import metrics, notify, roster
+from agent_parley import decisions, metrics, notify, roster
 from agent_parley.state import BridgeError
 
 if TYPE_CHECKING:
@@ -51,6 +58,7 @@ APPLIED = "applied by timeout"
 CONCLUDED = "applied on evidence"
 RECORD = "default"
 WAIT = "wait for the operator"
+ANSWERED_BY = "timeout"
 
 
 class Kind(NamedTuple):
@@ -105,6 +113,12 @@ KINDS: dict[str, Kind] = {
     "native_permission": Kind(
         IRREVERSIBLE, WAIT, "", "answer a native permission prompt"
     ),
+}
+
+EVENTS: dict[str, str] = {
+    notify.Event.ORPHAN_DECISION: "orphan_claim",
+    notify.Event.PERMISSION_PROMPT: "native_permission",
+    notify.Event.NATIVE_DIALOG: "native_permission",
 }
 
 
@@ -308,6 +322,81 @@ def announce(applied: dict) -> list[dict]:
     text = line(applied)
     subject = text[: notify.MAX_SUBJECT_BYTES]
     return notify.send(notify.settings(), subject, text)
+
+
+def sweep(
+    home: Path, directory: Path, manifest: dict, now: float = 0.0
+) -> list[dict]:
+    """Answers every open reversible decision whose timeout has passed.
+
+    Only a record that `EVENTS` maps to a reversible kind, that is itself
+    recorded reversible, and that recommends one of its own options is
+    settled; every other record keeps waiting. A settled record is answered
+    with that option by `ANSWERED_BY`, handed to its lane, appended to the
+    lane's report log and announced. A record answered first by the
+    operator, or missing a field its undo command needs, is left alone.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Project manifest using the participant roster layout.
+        now: Unix time; the clock when zero.
+
+    Returns:
+        The decisions applied, as `settle` returned them.
+
+    Raises:
+        BridgeError: If the recorded policy is invalid, so no default is
+            applied until it is fixed.
+    """
+    import contextlib
+    import sqlite3
+
+    from agent_parley import inbound
+
+    stamp = now or time.time()
+    policy(manifest)
+    done = []
+    for entry in decisions.list_open(directory, stamp):
+        name = EVENTS.get(str(entry.get("kind", "")), "")
+        option = str(entry.get("recommended", ""))
+        if (
+            not name
+            or entry.get("reversibility") != decisions.REVERSIBLE
+            or option not in decisions.options(entry)
+        ):
+            continue
+        asked = float(entry.get("created", stamp))
+        question = {
+            "kind": name,
+            "asked_at": asked,
+            "fields": {
+                key: str(entry[key])
+                for key in ("issue", "lane")
+                if entry.get(key)
+            },
+            "evidence": [
+                f"decision {entry['id']} ({entry.get('question', '')}) "
+                f"unanswered for {int(stamp - asked)} seconds"
+            ],
+        }
+        try:
+            applied = settle(manifest, question, stamp)
+            if applied is None:
+                continue
+            answered = decisions.answer(
+                directory, entry["id"], option, ANSWERED_BY, now=stamp
+            )
+        except BridgeError:
+            continue
+        with contextlib.suppress(
+            OSError, ValueError, BridgeError, sqlite3.Error
+        ):
+            inbound.settle(home, directory, answered)
+        record(directory, str(entry.get("lane", "")), applied)
+        announce(applied)
+        done.append(applied)
+    return done
 
 
 def describe(manifest: dict) -> str:

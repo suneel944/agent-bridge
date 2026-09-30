@@ -33,6 +33,7 @@ from agent_parley import (
     roster,
     store,
     terminal,
+    timeouts,
 )
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
 from agent_parley.status import (
@@ -5697,6 +5698,7 @@ def _poll(home: Path, directory: Path) -> None:
         directory,
         manifest["root"],
     )
+    stage("decision timeouts", timeouts.sweep, home, directory, manifest)
     stage("decisions", notify.flush_decisions, directory)
     if failures:
         issues.note_supervision_error(directory, "; ".join(failures))

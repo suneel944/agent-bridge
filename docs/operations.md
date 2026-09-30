@@ -3272,9 +3272,18 @@ The policy is stored in `project.json` as `"timeouts": {"orphan_claim":
 cautious: a timeout under 30 minutes or over seven days, an unknown kind, or
 any timeout for an irreversible kind is refused, and a manifest holding one
 refuses every settlement until it is fixed. `set` refuses lane shells the way
-`unattended set` does. The table, the settlement and the record are the
-building blocks; the service applies them to the decision records the
-outbound and inbound notification work delivers.
+`unattended set` does.
+
+Every supervision poll sweeps the project's open decision records, the ones
+notifications deliver, before sending the due ones. A record settles only
+when its notification kind maps to a reversible table kind, it was recorded
+reversible, and it recommends one of its own options. Today a
+`orphan_decision` record settles as `orphan_claim`; `permission_prompt` and
+`native_dialog` records map to `native_permission` and always wait; any other
+record waits for an answer. A settled record is answered with its recommended
+option by `timeout`, handed to its lane like any other answer, logged and
+announced as above. A record the operator answered first, or one missing the
+issue or lane its undo command names, is left alone.
 
 ### Keeping the service across reboots
 
