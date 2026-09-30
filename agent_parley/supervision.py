@@ -46,6 +46,8 @@ from agent_parley.status import (
     FORGE_TTL,
 )
 
+DEFAULT_WAIT_CEILING = 3600
+
 DEFAULTS = {
     "interval": 30,
     "inactive_after": 300,
@@ -1230,6 +1232,71 @@ def provider_error(directory: Path, name: str) -> str:
     if published_capacity(directory, name)["state"] == "retryable":
         return lanes.PROVIDER_ERROR
     return ""
+
+
+def published_wait(directory: Path, name: str) -> dict | None:
+    """Reads one lane's last self-declared wait.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose declared wait is read.
+
+    Returns:
+        The record with its `reason`, `until` and `recorded_at`, or None when
+        the lane declared none or the record is unusable.
+    """
+    try:
+        value = json.loads((directory / f"{name}-wait.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or not value.get("reason")
+        or type(value.get("until")) not in (int, float)
+        or isinstance(value.get("until"), bool)
+    ):
+        return None
+    return value
+
+
+def record_wait(
+    directory: Path, name: str, reason: str, until: float, ceiling: float
+) -> dict:
+    """Persists a lane's self-declared wait, capped by the project ceiling.
+
+    A lane that ends its turn to wait on work it started, such as a
+    background test run, a CI watch or a subagent, reports what it waits on
+    and until when instead of reading as a bare idle lane nobody can tell
+    apart from one that is stuck. The next-check time is capped so a lane
+    cannot suppress stall detection past the project's declared ceiling.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant that declares the wait.
+        reason: Nonempty account of what the lane waits on.
+        until: Requested Unix time of its next check.
+        ceiling: Seconds past now the next-check time may extend to at most,
+            from the project's `deadlines.wait` default or
+            `DEFAULT_WAIT_CEILING`.
+
+    Returns:
+        The recorded wait, with `until` capped at the ceiling.
+
+    Raises:
+        BridgeError: If reason is empty or until is not a usable time.
+    """
+    if not reason.strip():
+        raise BridgeError("A declared wait needs a nonempty reason.")
+    if type(until) not in (int, float) or isinstance(until, bool):
+        raise BridgeError("A declared wait needs a numeric next-check time.")
+    now = time.time()
+    record = {
+        "reason": reason.strip(),
+        "until": min(float(until), now + float(ceiling)),
+        "recorded_at": now,
+    }
+    write_json(directory / f"{name}-wait.json", record)
+    return record
 
 
 def record_capacity(directory: Path, name: str, observation: dict) -> dict:
@@ -6791,6 +6858,13 @@ def _wake_block(
     its first attempt has already recorded that, so the refusal is reported
     before the cause starts sparing the budget.
 
+    A lane's own self-declared wait, published by `record_wait`, defers the
+    next attempt to its next-check time the same way, so a lane that ended
+    its turn to wait on background work it started is not woken before it
+    said it would check again. Once that time passes with no fresher wait,
+    the gate clears on its own and the lane is asked for a turn like any
+    other idle lane.
+
     A lane whose tool call a native permission layer refused waits on the
     operator's decision about it, so while `denials.waiting` finds that
     decision open the lane is blocked under `denials.CAUSE` and is not asked
@@ -6825,6 +6899,9 @@ def _wake_block(
     lane = observed.get("record") or {}
     if lane.get("state") == lanes.BLOCKED:
         return f"blocked: {lane['cause']}", 0.0
+    wait = published_wait(directory, name)
+    if wait and float(wait["until"]) > time.time():
+        return f"waiting on {wait['reason']}", float(wait["until"])
     if (
         observed["process_alive"] is False
         and not lane.get("session")

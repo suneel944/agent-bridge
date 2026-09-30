@@ -3996,10 +3996,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     run.add_argument("--json", action="store_true", help=JSON_HELP)
     report = commands.add_parser(
-        "report", help="Record a partial, blocked, or ready-for-review handoff."
+        "report",
+        help=(
+            "Record a partial, blocked, ready-for-review or waiting handoff."
+        ),
     )
     report.add_argument("--repo", type=Path, default=Path.cwd())
-    report.add_argument("--state", choices=("partial", "blocked", "ready"))
+    report.add_argument(
+        "--state", choices=("partial", "blocked", "ready", "waiting")
+    )
     report.add_argument("--summary", default="")
     records = report.add_subparsers(dest="action")
     showing_report = records.add_parser(
@@ -4060,6 +4065,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "Work units still remaining on this claim, in whatever it counts: "
             "issue families, files, subtasks. Recording the count lets the "
             "supervisor offer a split once this lane goes idle on the claim."
+        ),
+    )
+    report.add_argument(
+        "--until",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "Seconds until this lane's next check, required for "
+            "--state waiting. Capped by the project's wait deadline."
         ),
     )
     report.add_argument(
@@ -4876,6 +4891,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ("offer", "a handoff offer"),
         ("request", "a takeover request"),
         ("ack", "an acknowledgement"),
+        ("wait", "a lane's self-declared wait"),
     ):
         budget_set.add_argument(
             f"--{field}",
@@ -5403,6 +5419,8 @@ def main() -> int:
         elif args.command == "report":
             if not args.state or not args.summary:
                 parser.error("report needs --state and --summary.")
+            if args.state == "waiting" and args.until <= 0:
+                parser.error("report --state waiting needs --until SECONDS.")
             owed = bridge.report(
                 args.repo.resolve(),
                 args.state,
@@ -5413,6 +5431,7 @@ def main() -> int:
                 issue=args.issue,
                 resume_on=args.resume_on,
                 backlog=args.backlog,
+                until=args.until,
             )
             print(f"Recorded outcome: {args.state}")
             if owed:
@@ -5816,6 +5835,7 @@ def main() -> int:
                             "offer": args.offer,
                             "request": args.request,
                             "ack": args.ack,
+                            "wait": args.wait,
                             "attempts": args.attempts,
                         },
                     )

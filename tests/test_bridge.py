@@ -34,6 +34,7 @@ from agent_parley import (
     records,
     roster,
     store,
+    supervision,
 )
 from agent_parley.checkpoints import (
     MAX_EVENT_LOG_AGE,
@@ -1145,6 +1146,23 @@ def test_reports_require_remaining_work_or_verification(bridge, repo, paired):
     state = json.loads((lane.parent / "claude-activity.json").read_text())
     assert state["outcome"] == "partial"
     assert state["remaining"] == "CLI integration missing"
+
+
+def test_a_waiting_report_declares_a_wait_instead_of_a_claim_phase(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    with pytest.raises(BridgeError, match="seconds"):
+        bridge.report(lane, "waiting", "3 background jobs", "", "")
+
+    bridge.report(lane, "waiting", "3 background jobs", "", "", until=900)
+
+    directory = bridge.project(repo)[1]
+    published = supervision.published_wait(directory, "claude")
+    assert published["reason"] == "3 background jobs"
+    assert published["until"] <= time.time() + 900
+    state = json.loads((directory / "claude-activity.json").read_text())
+    assert state["outcome"] == "waiting"
 
 
 def test_liveness_follows_the_session_process_not_the_session_lock(
