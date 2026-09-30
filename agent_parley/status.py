@@ -650,7 +650,9 @@ class StatusMixin(BridgeCore):
             `current_task` is the lane's own last report or registered task,
             never the operator's last prompt, and each claim carries its
             recorded title, whether it ended on the forge, the seconds since
-            it last progressed and its cached pull request.
+            it last progressed and its cached pull request. `self_wait` names
+            an unexpired self-declared wait and its next-check time, which the
+            session text also names in place of a bare idle label.
         """
         import sqlite3
 
@@ -700,6 +702,12 @@ class StatusMixin(BridgeCore):
             configuration["stalled_after"],
         )
         idle = metrics.idle_intervals(directory, agent)
+        declared_wait = supervision.published_wait(directory, agent)
+        active_wait = (
+            declared_wait
+            if declared_wait and float(declared_wait["until"]) > time.time()
+            else None
+        )
         try:
             with store.reading(self.home, frame["db"]) as db:
                 condition = lanes.read(db, data["root"], agent)
@@ -715,7 +723,12 @@ class StatusMixin(BridgeCore):
             observed["evidence"] = condition["evidence"]
             age = observed["age_seconds"]
             inferred = lanes.inference(provenance)
-            cause = supervision.provider_error(directory, agent)
+            cause = supervision.provider_error(directory, agent) or (
+                f"waiting on {active_wait['reason']}, next check "
+                f"{views.timestamp(active_wait['until'])}"
+                if active_wait
+                else ""
+            )
             liveness = (
                 lanes.describe(
                     {**condition, "cause": cause}
@@ -834,6 +847,14 @@ class StatusMixin(BridgeCore):
                 "served_age_seconds": stalled["served_age_seconds"],
                 "silent_seconds": stalled["silent_seconds"],
                 "marker": supervision.stall_marker(stalled),
+            },
+            "self_wait": {
+                "reason": active_wait["reason"] if active_wait else "",
+                "until": (
+                    views.timestamp(active_wait["until"])
+                    if active_wait
+                    else None
+                ),
             },
             "operator_edits": list(edited),
             "base_advance_paths": list(advanced),

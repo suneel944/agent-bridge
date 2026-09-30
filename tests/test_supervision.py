@@ -934,6 +934,77 @@ def test_a_wake_blocked_by_exhausted_capacity_is_retried_at_the_reset(
     assert retried["result"] == "accepted"
 
 
+def test_a_declared_wait_defers_a_wake_until_its_next_check(
+    bridge, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "activity": "idle",
+            "updated": time.time() - 500,
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+        },
+    )
+    message = send(bridge, actors["claude"], "codex")
+    until = time.time() + 900
+    supervision.record_wait(
+        directory, "codex", "3 background jobs", until, 3600
+    )
+    calls = []
+    monkeypatch.setattr(
+        terminal, "request", lambda *args: calls.append(args) or "accepted"
+    )
+    config = {**supervision.DEFAULTS, "inactive_after": 1}
+    observed = sampled(bridge, paired, directory, "codex")
+    path = directory / "codex-wake.json"
+    rewake(
+        bridge,
+        paired,
+        directory,
+        "codex",
+        at=0,
+        backlog=[str(message["id"])],
+        attempts=1,
+        result="manual attention required",
+    )
+
+    supervision.wake(bridge.home, directory, paired, "codex", observed, config)
+
+    parked = json.loads(path.read_text())
+    assert not calls
+    assert parked["attempts"] == 1
+    assert parked["next_at"] == until
+    assert "waiting on 3 background jobs" in parked["blocked"]
+
+    supervision.record_wait(
+        directory, "codex", "3 background jobs", time.time() - 1, 3600
+    )
+
+    supervision.wake(bridge.home, directory, paired, "codex", observed, config)
+
+    retried = json.loads(path.read_text())
+    assert calls
+    assert retried["attempts"] == 2
+    assert retried["result"] == "accepted"
+
+
+def test_a_declared_wait_is_capped_by_its_project_ceiling(tmp_path):
+    now = time.time()
+
+    recorded = supervision.record_wait(
+        tmp_path, "codex", "a long benchmark", now + 7200, 600
+    )
+
+    assert recorded["until"] <= time.time() + 600
+    assert recorded["until"] < now + 7200
+    read_back = supervision.published_wait(tmp_path, "codex")
+    assert read_back["reason"] == "a long benchmark"
+    assert read_back["until"] == recorded["until"]
+
+
 def test_status_reports_the_next_wake_or_the_exhausted_budget(
     bridge, paired, capsys
 ):

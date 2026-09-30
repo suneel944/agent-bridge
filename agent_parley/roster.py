@@ -311,7 +311,7 @@ def verify_command(
     return parsed
 
 
-DEADLINE_FIELDS = ("claim", "offer", "request", "ack")
+DEADLINE_FIELDS = ("claim", "offer", "request", "ack", "wait")
 MAX_DEADLINE = 86400 * 30
 MAX_ATTEMPTS = 1000
 
@@ -327,7 +327,9 @@ def deadlines(value: dict) -> dict:
     overdue claim. A peer offer past its deadline is cancelled back to the
     lane that made it; a peer request past its deadline is never granted by
     this alone, it only becomes visible as a decision its holder or the
-    operator still owes.
+    operator still owes. The `wait` field bounds how far into the future a
+    lane's self-declared wait may set its own next-check time, so a lane
+    cannot suppress stall detection indefinitely.
 
     Args:
         value: Defaults recorded in the project manifest.

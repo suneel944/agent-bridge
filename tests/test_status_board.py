@@ -330,6 +330,29 @@ def test_the_json_document_stays_complete_and_unscoped(
     assert {"title", "last_event_seconds", "overdue", "orphaned"} <= set(claim)
 
 
+def test_json_status_shows_a_declared_wait_as_its_own_reason_and_deadline(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    directory = bridge.project(repo)[1]
+    until = time.time() + 900
+    supervision.record_wait(
+        directory, "claude", "3 background jobs", until, 3600
+    )
+    monkeypatch.chdir(repo)
+    assert run(monkeypatch, bridge, "status", "--json") == 0
+    document = json.loads(capsys.readouterr().out)
+    project = next(
+        item for item in document["projects"] if item["root"] == str(repo)
+    )
+    claude = next(
+        record
+        for record in project["participants"]
+        if record["participant"] == "claude"
+    )
+    assert claude["self_wait"]["reason"] == "3 background jobs"
+    assert claude["self_wait"]["until"]
+
+
 def claimed(bridge, repo, paired, monkeypatch):
     """Claims #42 and #43 from the checkout and returns the forge cache."""
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
