@@ -58,12 +58,18 @@ def test_control_socket_names_fit_valid_long_participants():
         (b"\x03", True, False),
         (b"abc\x15", True, False),
         (b"abc\x15new", True, True),
+        (b"a\x7f", False, False),
+        (b"ab\x08", False, True),
+        (b"\x7f", True, False),
+        (b"\x7f\x7f", False, False),
+        (b"\x01", False, False),
+        ("é\x7f".encode(), False, False),
     ],
 )
 def test_control_replies_never_hold_the_operator_line(
     entered, previous, expected
 ):
-    assert terminal.pending(entered, previous) is expected
+    assert bool(terminal.pending(entered, int(previous))) is expected
 
 
 def test_control_sequences_split_across_reads_keep_later_operator_text():
@@ -190,6 +196,44 @@ def test_attached_launcher_admits_a_wake_after_a_cursor_report():
             time.sleep(0.5)
             write_json(directory / "lane-activity.json", _idle(2))
             assert terminal.request(directory, "lane") == "busy:input"
+        finally:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.parametrize("entered", [b"\x1b", b"x\x7f"])
+def test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line(
+    entered,
+):
+    with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
+        directory = Path(temporary)
+        lane = directory / "lane"
+        lane.mkdir()
+        write_json(directory / "lane-activity.json", _idle(1))
+        script = (
+            "import sys\nprint('READY', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    print('RECEIVED:' + line.rstrip(), flush=True)\n"
+        )
+        harness = (
+            "import os, sys\nfrom pathlib import Path\n"
+            "from agent_parley.terminal import run\n"
+            "raise SystemExit(run([sys.executable, '-c', sys.argv[2]], "
+            "Path(sys.argv[1]), dict(os.environ), 'lane', attached=True))"
+        )
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execvp(
+                sys.executable,
+                [sys.executable, "-c", harness, str(lane), script],
+            )
+        try:
+            assert b"READY" in _read_until(master, b"READY")
+            os.write(master, entered)
+            time.sleep(terminal.ESCAPE_TIMEOUT + 0.5)
+            assert terminal.request(directory, "lane") == "accepted"
+            received = _read_until(master, b"RECEIVED:")
+            assert terminal.PROMPT.encode() in received.split(b"RECEIVED:")[1]
         finally:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)

@@ -286,6 +286,24 @@ def _remedy(
         )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
+    held = record.get("dialog") or {}
+    if (
+        blocked == DIALOG
+        and wake.get("result") == DIALOG
+        and held.get("name") != dialogs.PERMISSION
+        and not held.get("escalated")
+    ):
+        return (
+            _answer(
+                name,
+                repo,
+                record,
+                f"submit or clear the unsent text in {name}'s own terminal "
+                "(Enter, or Ctrl-U to clear the line); it reads no mail "
+                "until that line is empty",
+            ),
+            BY_OPERATOR,
+        )
     if blocked == DIALOG:
         return (
             _answer(

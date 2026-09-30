@@ -554,8 +554,9 @@ def test_a_paused_lane_is_resumed_rather_than_spoken_to(
         (
             problems.DIALOG,
             "operator input is pending",
-            "answer the prompt open in claude's own client; it reads no "
-            "mail until that prompt is cleared",
+            "submit or clear the unsent text in claude's own terminal "
+            "(Enter, or Ctrl-U to clear the line); it reads no mail until "
+            "that line is empty",
         ),
         (
             problems.ATTENTION,
