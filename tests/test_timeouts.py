@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import cli, metrics, notify, roster, timeouts, unattended
+from agent_parley import (
+    cli,
+    decisions,
+    metrics,
+    notify,
+    roster,
+    timeouts,
+    unattended,
+)
 from agent_parley.state import BridgeError
 
 ASKED = 1_000.0
@@ -167,6 +175,61 @@ def test_an_applied_default_is_recorded_and_announced(
         "agent-parley issue assign 42 codex"
     )
     assert sent == [timeouts.line(applied)]
+
+
+def open_decision(directory: Path, event: notify.Event) -> dict:
+    """Records one notification's decision for lane codex at `ASKED`."""
+    options, reversibility = notify.ANSWERS[event]
+    return decisions.open_or_refresh(
+        directory,
+        project="/repo",
+        lane="codex",
+        kind=event.value,
+        key=event.value,
+        question=notify.TITLES[event],
+        options=options,
+        issue="42",
+        reversibility=reversibility,
+        now=ASKED,
+    )
+
+
+def test_the_sweep_answers_only_a_due_reversible_decision(
+    tmp_path: Path, monkeypatch
+):
+    sent = []
+    monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "telegram")
+    monkeypatch.setattr(notify, "settings", lambda: {"transports": []})
+    monkeypatch.setattr(
+        notify, "send", lambda config, subject, body: sent.append(body) or []
+    )
+    orphan = open_decision(tmp_path, notify.Event.ORPHAN_DECISION)
+    prompt = open_decision(tmp_path, notify.Event.PERMISSION_PROMPT)
+    idle = open_decision(tmp_path, notify.Event.LANE_IDLE)
+    due = ASKED + timeouts.TIMEOUT_SECONDS
+
+    assert timeouts.sweep(tmp_path, tmp_path, {}, due - 1) == []
+    assert decisions.get(tmp_path, orphan["id"])["state"] == decisions.OPEN
+    asking = {timeouts.POLICY: {"orphan_claim": {timeouts.ASK: True}}}
+    assert timeouts.sweep(tmp_path, tmp_path, asking, due) == []
+
+    applied = timeouts.sweep(tmp_path, tmp_path, {}, due)
+
+    assert [entry["decision"] for entry in applied] == ["orphan_claim"]
+    answered = decisions.get(tmp_path, orphan["id"])
+    assert answered["state"] == decisions.ANSWERED
+    assert answered["answer"] == orphan["recommended"]
+    assert answered["answered_by"] == timeouts.ANSWERED_BY
+    for waiting in (prompt, idle):
+        record = decisions.get(tmp_path, waiting["id"])
+        assert record["state"] == decisions.OPEN
+    report = metrics.report_records(tmp_path, "codex")[-1]
+    assert report["outcome"] == timeouts.APPLIED
+    assert report["undo"] == "agent-parley issue assign 42 codex"
+    assert sent == [timeouts.line(applied[0])]
+    later = ASKED + timeouts.TIMEOUT_SECONDS * 10
+    assert timeouts.sweep(tmp_path, tmp_path, {}, later) == []
+    assert decisions.get(tmp_path, prompt["id"])["state"] == decisions.OPEN
 
 
 def test_the_command_line_sets_shows_and_resets_a_kind(
