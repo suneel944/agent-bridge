@@ -46,6 +46,12 @@ asset; ``--short`` writes the README's first-screen cut to
 referenced from ``README.md`` through a pinned jsdelivr URL, because the
 README is also the PyPI long description and relative image paths do not
 resolve there.
+
+``--video`` records the short tour and writes no SVG. It keeps the steps
+named in ``VIDEO``, each after its chapter card, and writes their text,
+colours and hold times to ``docs/video/frames.js`` for the launch video
+composition beside it. The composition reads only that file for terminal
+text, so the video uses the same captured frames and timing as the SVG.
 """
 
 import dataclasses
@@ -72,6 +78,18 @@ from agent_parley.demo_scenario import record, tour
 SHORT = (
     "ada claims #41 from inside its lane.",
     "grace asks for the same paths: a named collision.",
+    "grace accepts; only then does ownership move.",
+    "The dashboard: state, issues, mail, leases, denials.",
+)
+VIDEO = (
+    "ada runs on claude, in a worktree of its own.",
+    "grace runs on codex, right beside it.",
+    "Two providers, two lanes, one shared view.",
+    "ada claims #41 from inside its lane.",
+    "ada reserves the refund module.",
+    "grace asks for the same paths: a named collision.",
+    "So grace queues behind ada instead of waiting blind.",
+    "ada offers #41 to grace with a summary.",
     "grace accepts; only then does ownership move.",
     "The dashboard: state, issues, mail, leases, denials.",
 )
@@ -436,6 +454,91 @@ def hold_seconds(item: "Step | Card") -> float:
         return item.seconds
     reading = 2.4 + 0.1 * len(frame(item)) + 0.03 * len(item.caption)
     return typing_seconds(item) + min(max(reading, 3.0), 7.5)
+
+
+def cut(
+    items: Sequence[Step | Card], captions: Sequence[str]
+) -> list[Step | Card]:
+    """Selects the steps a cut shows, each chapter kept with its card.
+
+    Args:
+        items: Every card and step a recording captured, in order.
+        captions: Captions of the steps the cut shows, in recording order.
+
+    Returns:
+        The chosen steps in recording order. The card that opened a chapter
+        comes before the first chosen step of that chapter; a chapter with
+        no chosen step loses its card.
+
+    Raises:
+        RuntimeError: If the recording lost or reordered one of the
+            captions.
+    """
+    chosen: list[Step | Card] = []
+    card: Card | None = None
+    for item in items:
+        if isinstance(item, Card):
+            card = item
+        elif item.caption in captions:
+            if card is not None:
+                chosen.append(card)
+                card = None
+            chosen.append(item)
+    found = [item.caption for item in chosen if isinstance(item, Step)]
+    if found != list(captions):
+        raise RuntimeError(f"cut captions changed: {found}")
+    return chosen
+
+
+def timeline(items: Sequence[Step | Card]) -> dict[str, object]:
+    """Lays a cut on the recording's timing model for the video.
+
+    The video composition in ``docs/video`` draws exactly what this returns,
+    so a frame there holds the same clipped rows, colours and hold times as
+    the animated SVG.
+
+    Args:
+        items: Cards and steps of the cut, in order.
+
+    Returns:
+        The frame size in columns and rows, the cut's length in seconds and
+        one entry per item with its start second and hold time. A card
+        entry carries its kicker, title and lines; a step entry carries its
+        typing time, prompt, command, caption and each row `frame` shows,
+        paired with the colour `colour` gives it.
+    """
+    start = 0.0
+    entries: list[dict[str, object]] = []
+    for item in items:
+        seconds = hold_seconds(item)
+        entry: dict[str, object] = {
+            "start": round(start, 3),
+            "seconds": round(seconds, 3),
+        }
+        if isinstance(item, Card):
+            entry |= {
+                "kind": "card",
+                "kicker": item.kicker,
+                "title": item.title,
+                "lines": list(item.lines),
+            }
+        else:
+            entry |= {
+                "kind": "step",
+                "typing": round(typing_seconds(item), 3),
+                "prompt": item.prompt,
+                "command": item.command,
+                "caption": item.caption,
+                "rows": [[row, colour(row)] for row in frame(item)],
+            }
+        entries.append(entry)
+        start += seconds
+    return {
+        "columns": COLUMNS,
+        "rows": FRAME_LINES,
+        "seconds": round(start, 3),
+        "items": entries,
+    }
 
 
 def keytimes(moments: list[float], total: float) -> str:
@@ -864,7 +967,10 @@ def main() -> int:
 
     Run with ``--screenshots`` to record the static screenshots instead, or
     with ``--short`` to record the README's first-screen cut: the `tour`
-    steps whose captions `SHORT` names, written to ``demo-short.svg``.
+    steps whose captions `SHORT` names, written to ``demo-short.svg``. With
+    ``--video`` the `tour` steps whose captions `VIDEO` names, and their
+    chapter cards, are laid out by `timeline` and written to
+    ``docs/video/frames.js`` for the launch video composition.
 
     Returns:
         Zero when the recording and the asset were written.
@@ -876,12 +982,13 @@ def main() -> int:
     if "--screenshots" in sys.argv[1:]:
         return screenshots(destination)
     short = "--short" in sys.argv[1:]
+    video = "--video" in sys.argv[1:]
     with tempfile.TemporaryDirectory(prefix="agent-parley-demo-") as path:
         base = Path(path)
         home, binaries, repository = fixtures(base)
         recorder = Recorder(home, repository, environment(home, binaries, base))
         try:
-            (tour if short else record)(recorder)
+            (tour if short or video else record)(recorder)
         finally:
             recorder.close()
         places = {
@@ -891,6 +998,16 @@ def main() -> int:
             str(Path.home()): DEMO_HOME,
         }
         steps = rewritten(recorder.steps, places)
+    if video:
+        kept = cut(steps, VIDEO)
+        document = timeline(kept)
+        script = destination.parent / "video" / "frames.js"
+        script.write_text(
+            f"window.PARLEY_CUT = {json.dumps(document, indent=1)};\n"
+        )
+        seconds = document["seconds"]
+        print(f"{len(kept)} frames, {seconds}s, written to {script}")
+        return 0
     name = "demo.svg"
     if short:
         name = "demo-short.svg"

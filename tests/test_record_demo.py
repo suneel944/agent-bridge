@@ -3,6 +3,8 @@
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
+import pytest
+
 from scripts import record_demo
 
 SVG = "{http://www.w3.org/2000/svg}"
@@ -132,6 +134,47 @@ def test_the_asset_is_one_svg_showing_a_single_frame_at_a_time(tmp_path):
     ]
     assert "agent-parley up" in "".join(drawn)
     assert "file_reservation_paths" in "".join(drawn)
+
+
+def test_a_cut_keeps_each_chosen_step_after_its_chapter_card():
+    lanes = record_demo.Card("CHAPTER 1", "Parallel lanes")
+    guardrails = record_demo.Card("CHAPTER 4", "Guardrails")
+    handoffs = record_demo.Card("CHAPTER 5", "Handoffs")
+    launch = record_demo.Step("$", "agent-parley run ada", (), caption="a")
+    status = record_demo.Step("$", "agent-parley status", (), caption="b")
+    hook = record_demo.Step("ada", "PreToolUse", (), caption="c")
+    offer = record_demo.Step("$", "agent-parley issue offer", (), caption="d")
+    captured = [lanes, launch, status, guardrails, hook, handoffs, offer]
+    chosen = record_demo.cut(captured, ("a", "b", "d"))
+    assert chosen == [lanes, launch, status, handoffs, offer]
+
+
+def test_a_cut_that_lost_a_caption_is_refused():
+    captured = [record_demo.Step("$", "agent-parley up", (), caption="a")]
+    with pytest.raises(RuntimeError, match="cut captions changed"):
+        record_demo.cut(captured, ("a", "gone"))
+
+
+def test_the_video_timeline_uses_the_recording_timing_and_framing():
+    card = record_demo.Card("CHAPTER 1", "Parallel lanes", ("one",))
+    rows = tuple(f"row {number}" for number in range(40)) + ("denied",)
+    captured = record_demo.Step(
+        "$", "agent-parley top --once", rows, caption="The dashboard."
+    )
+    document = record_demo.timeline([card, captured])
+    first, second = document["items"]
+    assert first["kind"] == "card" and first["start"] == 0.0
+    assert first["lines"] == ["one"]
+    assert second["start"] == card.seconds
+    assert second["seconds"] == round(record_demo.hold_seconds(captured), 3)
+    assert second["typing"] == round(record_demo.typing_seconds(captured), 3)
+    shown = [row for row, _ in second["rows"]]
+    assert shown == list(record_demo.frame(captured))
+    assert second["rows"][-1] == ["denied", record_demo.REFUSAL]
+    assert document["seconds"] == round(
+        card.seconds + record_demo.hold_seconds(captured), 3
+    )
+    assert document["columns"] == record_demo.COLUMNS
 
 
 def test_the_committed_asset_is_the_one_the_readme_points_at():
