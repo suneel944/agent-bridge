@@ -20,6 +20,7 @@ from typing import TypeGuard, cast
 from agent_parley import (
     budgets,
     convergence,
+    decisions,
     dialogs,
     forge,
     issues,
@@ -1212,6 +1213,22 @@ def published_capacity(directory: Path, name: str) -> dict:
     if not isinstance(value, dict) or value.get("state") not in CAPACITY_STATES:
         return dict(UNKNOWN_CAPACITY)
     return {**UNKNOWN_CAPACITY, **value}
+
+
+def provider_error(directory: Path, name: str) -> str:
+    """Names the idle cause a retryable provider failure gives one lane.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose capacity observation is read.
+
+    Returns:
+        `lanes.PROVIDER_ERROR` when the lane's last durable capacity
+        observation is retryable, otherwise an empty string.
+    """
+    if published_capacity(directory, name)["state"] == "retryable":
+        return lanes.PROVIDER_ERROR
+    return ""
 
 
 def record_capacity(directory: Path, name: str, observation: dict) -> dict:
@@ -2688,6 +2705,7 @@ def reminders(
     manifest: dict,
     closed: set[str],
     landed: dict[str, str] | None = None,
+    closed_at: dict[str, float] | None = None,
 ) -> None:
     """Records idempotent reminders without releasing or transferring claims.
 
@@ -2697,6 +2715,12 @@ def reminders(
     it can still do, so it is stamped answered and leaves the lane's wake
     backlog, delivery and listing.
 
+    An explicit completion message may reach the store before this poll
+    notices the release or the forge close it answers, since the forge and
+    the store are read independently. The reminder therefore records the
+    release or the close's own instant, not this poll's, so a message
+    already sent when the reminder is written still counts.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -2705,14 +2729,9 @@ def reminders(
         landed: Another lane that landed the closing pull request, per issue
             number, named in the reminder so the owner and the operator
             reading it learn a peer finished the claim.
+        closed_at: The forge's own close or merge instant, per issue number,
+            for every issue in `closed` the forge could report one for.
     """
-    after_message_id = 0
-    home = directory.parent.parent
-    if (home / store.DATABASE).exists():
-        with store.connect(home) as db:
-            after_message_id = db.execute(
-                "SELECT coalesce(max(id),0) FROM messages"
-            ).fetchone()[0]
     with lock(directory / "issues.lock", timeout=1):
         ledger = issues.snapshot(directory)
         changed = False
@@ -2750,13 +2769,18 @@ def reminders(
             identifier = f"{number}:{history[-1]['at']}:{trigger}"
             if record.get("handoff_prompt", {}).get("id") == identifier:
                 continue
+            since = (
+                float(history[-1]["at"])
+                if released
+                else float((closed_at or {}).get(number, time.time()))
+            )
             recipients = ", ".join(waiting) or "project peers"
             record["handoff_prompt"] = {
                 "id": identifier,
                 "holder": holder,
                 "waiting": waiting,
                 "created": time.time(),
-                "after_message_id": after_message_id,
+                "since": since,
                 "trigger": trigger,
                 "text": (
                     f"Issue #{number}: {trigger}. {holder}, send an explicit "
@@ -3027,6 +3051,45 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
             write_json(directory / "issues.json", ledger)
 
 
+def expire_offers(directory: Path, manifest: dict) -> None:
+    """Cancels a peer handoff offer that outlived its deadline.
+
+    A handoff offer answers a real person, so a passed deadline never
+    accepts it on the recipient's behalf; the offer is cancelled instead,
+    returning the issue to the lane that made it, exactly as that lane's own
+    cancel would. That lane reads the cancellation in its issue history and
+    decides its next step fresh. Only an offer that recorded its own
+    deadline is touched; a project that configures no offer default, and a
+    caller that passed no `--within`, leaves the offer to run until the
+    holder or the recipient acts. An overdue claim recovering through its
+    own offer-then-release cycle is unaffected: by the time this runs its
+    offer is already gone, or about to be released regardless.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    now = time.time()
+    ledger = issues.snapshot(directory)
+    for number, record in ledger["issues"].items():
+        holder = record.get("owner")
+        offer = record.get("offer")
+        if (
+            not offer
+            or holder not in manifest["participants"]
+            or not issues.offer_state(offer, now)["overdue"]
+        ):
+            continue
+        with contextlib.suppress(BridgeError):
+            issues.change(
+                directory,
+                holder,
+                "cancel",
+                number,
+                participants=set(manifest["participants"]),
+            )
+
+
 def deadline_defaults(directory: Path, manifest: dict) -> None:
     """Gives every claim that has no deadline the project's claim default.
 
@@ -3069,7 +3132,11 @@ def tool_silence(directory: Path, name: str) -> float | None:
     `PostToolUse` never completed, so a supervisor resume that starts a
     tool and ends does not reset the silence clock. A hook call from another
     session, or a record the service wrote itself, is not the lane's work
-    and is skipped, as :func:`silence` skips it.
+    and is skipped, as :func:`silence` skips it. An open `PreToolUse` still
+    younger than `TOOL_TIMEOUT` reads as no silence at all, the same span
+    :func:`lane_state` trusts as work in flight, so a long tool call such as
+    a full test suite is never mistaken for a stopped holder while
+    `issue list` still shows it in flight.
 
     Args:
         directory: Private project state directory.
@@ -3103,7 +3170,10 @@ def tool_silence(directory: Path, name: str) -> float | None:
     counted = max(latest, pending)
     if not counted:
         return None
-    return max(0.0, time.time() - counted)
+    now = time.time()
+    if pending and now - pending <= TOOL_TIMEOUT:
+        return 0.0
+    return max(0.0, now - counted)
 
 
 def holder_silent(
@@ -4780,13 +4850,14 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
 
     Returns:
         One observation per ended issue number: the branch the work landed
-        from, the pull request state, the instant it was observed and, when
-        the forge named one, the closing pull request's number, URL and merge
-        commit with the claim it was read for, and `base` for work that
-        landed in the integration base. `landed_by` names another
-        lane whose lane branch carried the closing pull request, or whose
-        worktree alone checked out the
-        per-issue branch it came from.
+        from, the pull request state, the instant it was observed, the
+        forge's own close instant when the forge named the issue rather than
+        only the branch and, when the forge named one, the closing pull
+        request's number, URL and merge commit with the claim it was read
+        for, and `base` for work that landed in the integration base.
+        `landed_by` names another lane whose lane branch carried the closing
+        pull request, or whose worktree alone checked out the per-issue
+        branch it came from.
     """
     root = Path(manifest["root"])
     base = str(manifest.get("integration_base") or "")
@@ -4834,6 +4905,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "branch": reading["branch"] or f"issue #{number}",
                 "state": reading["state"],
                 "observed_at": time.time(),
+                "closed_at": reading["closed_at"],
                 "pull_request": reading["pull_request"],
                 "url": reading["url"],
                 "commit": reading["commit"],
@@ -5041,6 +5113,16 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     the lane. A forge that reports no check start times is never announced
     as stalled, so it behaves as before.
 
+    Each reading also counts the attempts a head has made at a red verdict,
+    incrementing once per rerun that ends red again on the same commit, so
+    `problems` can show how many times a failed check was retried. A red
+    check the forge reports as never started (`action_required` or
+    `startup_failure`) names a cause only the operator can act on; every
+    open pull request sharing one is grouped into one decision through
+    `decisions.open_or_refresh`, keyed by the check name and the forge's
+    conclusion, so the operator answers a shared cause once rather than once
+    per lane.
+
     A pull request belongs to the lane whose branch is its head, else to the
     one lane owning every claimed issue it closes, else to the lane
     `branch_lane` attributes its head branch to. One no lane can be named
@@ -5072,16 +5154,21 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     for reading in readings:
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
+        record = _checks_clock(previous, record, now)
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
         stalled = _stalled_checks(record, now, ceiling)
         if stalled:
             changes.append(stalled)
-        name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        watched = changes or record["checks"] in {"pending", "red"}
+        name = _pull_request_lane(manifest, ledger, reading) if watched else ""
+        if name:
+            record["lane"] = name
+        elif previous.get("lane"):
+            record["lane"] = str(previous["lane"])
         if stalled:
             record["stalled_at"] = now
-            record["lane"] = name
-        if not name:
+        if not changes or not name:
             continue
         body = (
             f"Pull request #{reading['number']} {reading['url']} at head "
@@ -5101,6 +5188,7 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
                 body,
                 f"pull-request:{digest}",
             )
+    _not_started_decisions(directory, manifest["root"], kept, now)
     write_json(
         path,
         {"read_at": now, "pull_requests": kept},
@@ -5130,6 +5218,44 @@ def _pending_clock(before: dict, after: dict, now: float) -> dict:
     if before.get("stalled_at"):
         record["stalled_at"] = before["stalled_at"]
         record["lane"] = str(before.get("lane") or "")
+    return record
+
+
+def _checks_clock(before: dict, after: dict, now: float) -> dict:
+    """Carries a red head's first-seen time and attempt count forward.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading, already carrying its pending clock.
+        now: Unix time of this poll.
+
+    Returns:
+        `after` unchanged unless its checks are red: then with `red_since`
+        set to when this head was first seen red on this commit, and
+        `red_attempts` counting this red verdict and every earlier one an
+        intervening pending run separated it from, on the same commit. A new
+        commit restarts both at one attempt. Both are carried through an
+        intervening non-red reading on the same commit so a rerun still in
+        flight does not lose the count.
+    """
+    record = dict(after)
+    if before.get("sha") == after["sha"]:
+        if before.get("red_since"):
+            record["red_since"] = before["red_since"]
+        if before.get("red_attempts"):
+            record["red_attempts"] = before["red_attempts"]
+    if after["checks"] != "red":
+        return record
+    if before.get("sha") != after["sha"]:
+        record["red_since"] = now
+        record["red_attempts"] = 1
+        return record
+    if before.get("checks") == "red":
+        record["red_since"] = float(record.get("red_since") or now)
+        record["red_attempts"] = int(record.get("red_attempts") or 1)
+        return record
+    record["red_since"] = now
+    record["red_attempts"] = int(record.get("red_attempts") or 0) + 1
     return record
 
 
@@ -5170,6 +5296,73 @@ def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
         "a conclusion, or cancel and re-run one still in progress past its "
         "job timeout; after one re-run it is an operator decision"
     )
+
+
+def _not_started_groups(
+    readings: dict[str, dict],
+) -> dict[tuple[str, str], list[dict]]:
+    """Groups open pull requests by a required check the forge never started.
+
+    Args:
+        readings: Every currently open pull request's kept record, keyed by
+            number.
+
+    Returns:
+        The check name and the forge's conclusion mapped to every red
+        reading that reports a check the forge never started under that
+        name and conclusion.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for reading in readings.values():
+        if reading.get("checks") != "red":
+            continue
+        for check in reading.get("failed") or []:
+            if not check.get("not_started"):
+                continue
+            key = (str(check["name"]), str(check["conclusion"]))
+            groups.setdefault(key, []).append(reading)
+    return groups
+
+
+def _not_started_decisions(
+    directory: Path, project: str, readings: dict[str, dict], now: float
+) -> None:
+    """Opens one decision per cause naming every pull request it blocks.
+
+    A required check the forge refused to start, such as a billing or
+    spending-limit refusal, names an action only the operator can take. The
+    same cause commonly blocks several open pull requests at once; grouping
+    them by the check name and the forge's own conclusion keeps the operator
+    from being asked the same cause once per lane. Each cause keeps one open
+    decision, refreshed rather than reopened while it recurs.
+
+    Args:
+        directory: Private project state directory.
+        project: Canonical project root.
+        readings: Every currently open pull request's kept record, keyed by
+            number.
+        now: Unix time of this poll.
+    """
+    for (name, conclusion), members in _not_started_groups(readings).items():
+        numbers = sorted(int(item["number"]) for item in members)
+        listed = ", ".join(f"#{number}" for number in numbers)
+        question = (
+            f"{len(numbers)} pull requests blocked: required job {name!r} "
+            f"not started, forge reports {conclusion}. Affected: {listed}"
+        )
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            decisions.open_or_refresh(
+                directory,
+                project=project,
+                lane="",
+                kind="checks_not_started",
+                key=f"{name}\x00{conclusion}",
+                question=question,
+                options=("acknowledge", "resolved"),
+                recommended="acknowledge",
+                reversibility=decisions.REVERSIBLE,
+                now=now,
+            )
 
 
 def _pull_request_changes(before: dict, after: dict) -> list[str]:
@@ -6004,7 +6197,10 @@ def account_lanes(home: Path, directory: Path, manifest: dict) -> None:
     """Charges this poll's span to every lane's idle and claim totals.
 
     Work exists for a lane when it owns an open claim or the ledger holds
-    an unclaimed, unblocked issue any lane could take.
+    an unclaimed, unblocked issue any lane could take. An idle lane whose
+    last provider-capacity observation is retryable ended its turn on a
+    provider or transport error, so its gap is charged to
+    `lanes.PROVIDER_ERROR` rather than to plain idleness.
 
     Args:
         home: Private bridge state root.
@@ -6023,6 +6219,7 @@ def account_lanes(home: Path, directory: Path, manifest: dict) -> None:
                 lanes.read(db, manifest["root"], name),
                 has_work=claimable or bool(owned.get(name)),
                 owns=bool(owned.get(name)),
+                idle_cause=provider_error(directory, name),
             )
 
 
@@ -6149,9 +6346,15 @@ def _remind(
             for number, seen in ended.items()
             if seen.get("landed_by")
         },
+        {
+            number: seen["closed_at"]
+            for number, seen in ended.items()
+            if seen.get("closed_at")
+        },
     )
     stage("deadline defaults", deadline_defaults, directory, manifest)
     stage("deadline notices", deadline_notices, directory, manifest)
+    stage("offer expiry", expire_offers, directory, manifest)
     stage(
         "acknowledgements",
         acknowledgement_deadlines,
@@ -6211,11 +6414,11 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
                     "LEFT JOIN message_recipients r ON r.message_id=m.id "
                     "LEFT JOIN agents recipient ON recipient.id=r.agent_id "
                     "WHERE p.human_key=? AND sender.name=? "
-                    "AND m.id>?",
+                    "AND m.created_ts>=datetime(?,'unixepoch')",
                     (
                         manifest["root"],
                         holder["display"],
-                        prompt.get("after_message_id", 0),
+                        prompt.get("since", prompt.get("created", 0)),
                     ),
                 ).fetchall()
                 recipients = {row["name"] for row in rows if row["name"]}
@@ -6914,9 +7117,12 @@ def wake(
     overdue-claim transition in `overdue_claims`, and its orphaned claims
     become one operator decision through `orphan_decision`.
 
-    A durable retryable capacity observation is itself a backlog reason, so a
-    lane whose client stopped on a transient provider error resumes on this
-    bounded backoff rather than on the silence budget. The reason is keyed by
+    A durable retryable capacity observation is itself a backlog reason while
+    the lane holds an actionable claim, so a lane whose client stopped on a
+    transient provider or transport error, including a server error after a
+    partial response, resumes on this bounded backoff rather than on the
+    silence budget. A lane with no actionable claim is not woken for the
+    error alone, because its turn has no work to resume. The reason is keyed by
     the observation that recorded the block, so a newer transient failure
     schedules its own attempts and a restored capacity drops the reason. An
     exhausted lane is never woken this way, because only a later success, a
@@ -7025,7 +7231,8 @@ def wake(
             (manifest["root"], participant["display"]),
         ).fetchone()[0]
     backlog = _mail_digest(pending)
-    ledger = issues.snapshot(directory)["issues"].values()
+    snapshot = issues.snapshot(directory)
+    ledger = snapshot["issues"].values()
     backlog.extend(
         record["handoff_prompt"]["id"]
         for record in ledger
@@ -7046,7 +7253,9 @@ def wake(
         == "wake"
     )
     capacity = published_capacity(directory, name)
-    if capacity["state"] == "retryable":
+    if capacity["state"] == "retryable" and lifecycle.actionable(
+        snapshot, name
+    ):
         backlog.append(f"capacity:{capacity['observation_id']}")
     with lock(directory / f"{name}-wake.lock"):
         work_item = _work_backlog(

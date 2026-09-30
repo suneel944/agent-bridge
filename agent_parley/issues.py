@@ -684,7 +684,7 @@ def change(
         title: Optional forge-supplied issue title recorded on a claim. It is
             display context, so it is excluded from the arguments a key is
             compared against and a changed title never refuses a retry.
-        within: Seconds this claim, offer or acknowledgement is expected to
+        within: Seconds this claim, offer or takeover request is expected to
             take, recorded as a deadline beside the record.
         defaults: Project deadline and attempt-budget defaults.
         carried: Structured work state an offer transfers beside its summary.
@@ -1060,19 +1060,33 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
     )
 
 
-def _request(record: dict | None, agent: str, issue: str, reason: str) -> dict:
+def _request(
+    record: dict | None,
+    agent: str,
+    issue: str,
+    reason: str,
+    within: float | None,
+    budgets: dict,
+) -> dict:
     """Records a peer's request to take over an issue another lane holds.
 
     The holder answers it like an operator request, with issue accept or
     decline and the request identifier. A holder that neither answers nor
     records progress on the claim within the project's takeover grace window
-    has the request granted by the supervisor as an offer to the peer.
+    has the request granted by the supervisor as an offer to the peer. The
+    request itself also carries a deadline, from the caller's window or the
+    project's `request` default; past it the request is not granted, since
+    only the grace window above does that, but it reads as overdue so the
+    holder or the operator sees it needs a decision.
 
     Args:
         record: Published record for this issue, or None when it has none.
         agent: Lane asking to take the issue over.
         issue: Repository issue number the request names.
         reason: Why the peer asks, travelling with the request.
+        within: Seconds the holder is expected to answer within, recorded as
+            a deadline. None takes the project default.
+        budgets: Project deadline and attempt-budget defaults.
 
     Returns:
         The record carrying the pending request.
@@ -1093,12 +1107,14 @@ def _request(record: dict | None, agent: str, issue: str, reason: str) -> dict:
         raise BridgeError(
             "An offer or request is pending on this issue; wait for its answer."
         )
+    expected = within if within is not None else budgets.get("request")
     record["request"] = {
         "id": uuid.uuid4().hex,
         "to": agent,
         "reason": reason,
         "created": time.time(),
         "source": PEER,
+        "deadline": time.time() + expected if expected else None,
     }
     return record
 
@@ -1201,7 +1217,7 @@ def _change(
         title: Optional forge-supplied issue title recorded on a claim. It is
             display context only, never ownership authority, and an absent
             title leaves any previously recorded one in place.
-        within: Seconds this claim, offer or acknowledgement is expected to
+        within: Seconds this claim, offer or takeover request is expected to
             take, recorded as a deadline beside the record. None takes the
             project default, and a project without one records no deadline.
         defaults: Project deadline and attempt-budget defaults.
@@ -1361,7 +1377,9 @@ def _change(
             record = _withdraw(record, issue)
         elif action == "request":
             _within_cap(state["issues"], agent, cap)
-            record = _request(record, agent, issue, summary.strip())
+            record = _request(
+                record, agent, issue, summary.strip(), within, budgets
+            )
         else:
             answering = action in ("accept", "decline")
             operating = action == "unblock" and agent == OPERATOR

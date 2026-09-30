@@ -411,9 +411,9 @@ class SettingsMixin(BridgeCore):
         recorded = data["deadlines"]
         if not recorded:
             return (
-                f"{root} records no deadline defaults, so a claim, an offer "
-                "or an acknowledgement carries a deadline only when it passes "
-                "--within."
+                f"{root} records no deadline defaults, so a claim, an offer, "
+                "a takeover request or an acknowledgement carries a deadline "
+                "only when it passes --within."
             )
         windows = ", ".join(
             f"{field} {int(recorded[field])}s"

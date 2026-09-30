@@ -50,6 +50,7 @@ INACTIVE = "inactive"
 OVERDUE = "overdue claim"
 OVER_CAP = "claims over cap"
 OFFER = "unanswered offer"
+REQUEST = "unanswered request"
 UNRESOLVED = "unresolved completion"
 DIVERGING = "not converging"
 ACK = "awaiting acknowledgement"
@@ -76,6 +77,8 @@ RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
 CHECKS = "checks stalled"
 CROSSING = "crossing ready"
+CHECKS_FAILED = "checks failed"
+CHECKS_REFUSED = "checks refused"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -954,6 +957,60 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
     return rows
 
 
+def _request_rows(project: dict, now: float) -> list[dict]:
+    """Groups the unanswered peer takeover requests, one row per holder.
+
+    An operator's own request carries no row here, the same way an
+    operator's own offer withdrawal is left to the operator, because it
+    still waits on that operator to withdraw or restate it. A peer request
+    is different: the peer asking has no path to force a decision, so the
+    row names the holder that owes one.
+
+    Args:
+        project: One project block from the status reading.
+        now: Unix time the request ages are measured against.
+
+    Returns:
+        One row per lane holding unanswered peer takeover requests, naming
+        the oldest request and counting the rest, exactly as unanswered
+        handoff offers are grouped by the lane that must decide.
+    """
+    repo = f"--repo {shlex.quote(str(project['root']))}"
+    waiting: dict[str, list[tuple[int, int, dict]]] = {}
+    for record in project["issues"]:
+        pending = record["request"]
+        if not pending or pending.get("source") != issues.PEER:
+            continue
+        created = _recorded(pending.get("created_at"), now)
+        waiting.setdefault(record["owner"], []).append(
+            (max(0, int(now - created)), record["issue"], pending)
+        )
+    rows = []
+    for holder, items in waiting.items():
+        items.sort(key=lambda item: -item[0])
+        age, number, pending = items[0]
+        peer = pending["to"]
+        detail = (
+            f"issue #{number} takeover asked by {peer}, unanswered by {holder}"
+            if len(items) == 1
+            else f"{len(items)} takeover requests wait on {holder}, the "
+            f"oldest issue #{number} asked by {peer}"
+        )
+        rows.append(
+            _row(
+                REQUEST,
+                detail,
+                f"agent-parley issue assign {number} --unassign {repo}",
+                age,
+                holder,
+                project["root"],
+                BY_OPERATOR,
+                len(items),
+            )
+        )
+    return rows
+
+
 def _bounce_rows(
     home: Path, directory: Path, data: dict, project: dict, config: dict
 ) -> list[dict]:
@@ -1384,6 +1441,111 @@ def _crossing_rows(project: dict, now: float) -> list[dict]:
     ]
 
 
+def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each open pull request whose head's checks ran and failed.
+
+    A check the forge never started names an operator cause and is reported
+    by `_checks_refused_rows` instead, grouped across every pull request it
+    blocks rather than once per lane.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the attempt's age is measured against.
+
+    Returns:
+        One row per open pull request whose checks are red and report at
+        least one check the forge ran and failed.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    rows = []
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        ran = [
+            check
+            for check in reading.get("failed") or []
+            if not check.get("not_started")
+        ]
+        if not ran:
+            continue
+        rows.append(
+            _row(
+                CHECKS_FAILED,
+                f"pull request #{reading.get('number')} checks failed "
+                f"(attempt {reading.get('red_attempts') or 1}): "
+                + ", ".join(
+                    f"{check['name']} {check['conclusion']}" for check in ran
+                ),
+                f"gh pr checks {reading.get('url')}, then fix and push or "
+                "re-run",
+                _age(reading.get("red_since"), now),
+                str(reading.get("lane") or ""),
+                root,
+            )
+        )
+    return rows
+
+
+def _checks_refused_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each cause blocking pull requests the forge refused to start.
+
+    Every open pull request whose head reports a required check the forge
+    never started shares one row per check name and conclusion, naming every
+    pull request it blocks, so the operator answers the cause once rather
+    than once per lane. `supervision.pull_request_wakes` opens the matching
+    decision; this row only reads the same cached reading.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the oldest occurrence's age is measured against.
+
+    Returns:
+        One row per distinct check name and forge conclusion an open pull
+        request's red head reports as never started.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        for check in reading.get("failed") or []:
+            if check.get("not_started"):
+                key = (str(check["name"]), str(check["conclusion"]))
+                groups.setdefault(key, []).append(reading)
+    rows = []
+    for (name, conclusion), members in groups.items():
+        numbers = sorted(int(item["number"]) for item in members)
+        listed = ", ".join(f"#{number}" for number in numbers)
+        rows.append(
+            _row(
+                CHECKS_REFUSED,
+                f"{len(numbers)} pull requests blocked: required job "
+                f"{name!r} not started, forge reports {conclusion}: "
+                f"{listed}",
+                "resolve at the forge (billing, spending limit or manual "
+                "approval), then re-run once",
+                max(_age(item.get("red_since"), now) for item in members),
+                project=root,
+                count=len(numbers),
+            )
+        )
+    return rows
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1450,6 +1612,7 @@ def derive(
                 )
             )
         aged.extend(_offer_rows(project, stamp))
+        aged.extend(_request_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
         aged.extend(_retired_rows(home, project))
         aged.extend(_refused_rows(directory, project["root"], stamp))
@@ -1458,6 +1621,8 @@ def derive(
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
         aged.extend(_checks_rows(directory, project["root"], stamp))
+        aged.extend(_checks_failed_rows(directory, project["root"], stamp))
+        aged.extend(_checks_refused_rows(directory, project["root"], stamp))
         aged.extend(_crossing_rows(project, stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),

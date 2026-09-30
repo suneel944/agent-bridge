@@ -46,6 +46,7 @@ FAILED_CHECKS = frozenset(
         "STARTUP_FAILURE",
     }
 )
+NOT_STARTED_CHECKS = frozenset({"ACTION_REQUIRED", "STARTUP_FAILURE"})
 PROVIDER_LABEL = "provider:"
 FORGES = ("github", "beads", "null")
 DEFAULT_FORGE = "github"
@@ -490,9 +491,10 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         One reading per open pull request: its number, URL, head branch and
         head commit, the checks verdict (`pending`, `green`, `red`, or
         `none` when nothing reported), the sorted names of failing checks,
-        each unfinished check with its state and start time, the latest
-        reviews as author, state and submission time, the merge state the
-        forge reports, the bare numbers of the issues it closes and the
+        each unfinished check with its state and start time, each failing
+        check with the forge's conclusion and whether it never started, the
+        latest reviews as author, state and submission time, the merge state
+        the forge reports, the bare numbers of the issues it closes and the
         sorted repository paths it changes. None when the forge is
         unavailable or the response cannot be read.
     """
@@ -534,6 +536,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
                     "checks": checks,
                     "failing": failing,
                     "pending": _pending(record.get("statusCheckRollup")),
+                    "failed": _failed(record.get("statusCheckRollup")),
                     "reviews": [
                         {
                             "author": str(
@@ -640,6 +643,41 @@ def _pending(rollup: list | None) -> list[dict]:
             }
         )
     return pending
+
+
+def _failed(rollup: list | None) -> list[dict]:
+    """Names each check `_checks` counts as failing, with the forge's outcome.
+
+    Args:
+        rollup: The forge's `statusCheckRollup` entries, check runs and
+            commit statuses mixed.
+
+    Returns:
+        One entry per check whose outcome `_checks` counts toward a red
+        verdict: its name, the forge's conclusion in lower case, and whether
+        the forge reports the job never started (`action_required` or
+        `startup_failure`) rather than having run and failed.
+    """
+    failed: list[dict] = []
+    for entry in rollup or []:
+        if "status" in entry:
+            if str(entry.get("status") or "").upper() != "COMPLETED":
+                continue
+            outcome = str(entry.get("conclusion") or "").upper()
+        else:
+            outcome = str(entry.get("state") or "").upper()
+        if outcome not in FAILED_CHECKS:
+            continue
+        failed.append(
+            {
+                "name": str(
+                    entry.get("name") or entry.get("context") or "unnamed"
+                ),
+                "conclusion": outcome.lower(),
+                "not_started": outcome in NOT_STARTED_CHECKS,
+            }
+        )
+    return failed
 
 
 JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)

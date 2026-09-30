@@ -356,7 +356,7 @@ def verify_command(
     return parsed
 
 
-DEADLINE_FIELDS = ("claim", "offer", "ack")
+DEADLINE_FIELDS = ("claim", "offer", "request", "ack")
 MAX_DEADLINE = 86400 * 30
 MAX_ATTEMPTS = 1000
 
@@ -364,11 +364,15 @@ MAX_ATTEMPTS = 1000
 def deadlines(value: dict) -> dict:
     """Validates the deadline and attempt-budget defaults of one project.
 
-    A default is inherited by a claim, an offer or an acknowledgement that
-    passes no explicit window, so lanes carry a budget without repeating a
-    flag. A deadline makes an overdue claim, offer or acknowledgement say
-    so; only the supervisor's overdue transition, which acts when the holder
-    has stopped working, moves an overdue claim.
+    A default is inherited by a claim, an offer, a takeover request or an
+    acknowledgement that passes no explicit window, so lanes carry a budget
+    without repeating a flag. A deadline makes an overdue claim, offer,
+    request or acknowledgement say so; only the supervisor's overdue
+    transition, which acts when the holder has stopped working, moves an
+    overdue claim. A peer offer past its deadline is cancelled back to the
+    lane that made it; a peer request past its deadline is never granted by
+    this alone, it only becomes visible as a decision its holder or the
+    operator still owes.
 
     Args:
         value: Defaults recorded in the project manifest.

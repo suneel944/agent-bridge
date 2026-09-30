@@ -326,6 +326,45 @@ def test_closed_pr_reminds_holder_and_preserves_claim(
     assert record["handoff_prompt"]["trigger"] == "pull request ended"
 
 
+def test_a_completion_message_sent_before_the_poll_saw_the_close_counts(
+    bridge, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    bridge.issue(lane, "claim", "1")
+    claimed_at = issues.snapshot(lane.parent)["issues"]["1"]["history"][-1][
+        "at"
+    ]
+    monkeypatch.setattr(
+        supervision.forge,
+        "issue_completion",
+        lambda *args: {
+            "state": "MERGED",
+            "closed_at": claimed_at,
+            "pull_request": 2,
+            "url": "https://example.invalid/pull/2",
+            "branch": "",
+            "commit": "abc123",
+        },
+    )
+    store.call(
+        bridge.home,
+        actors["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Merged #1",
+            "body_md": "Landed the fix for #1.",
+            "idempotency_key": "done-1",
+        },
+    )
+    supervision.poll(bridge.home, lane.parent)
+    record = issues.snapshot(lane.parent)["issues"]["1"]
+    assert record["handoff_prompt"]["trigger"] == "pull request ended"
+    assert record["handoff_prompt"]["responded_at"]
+    assert record["owner"] == "claude"
+
+
 def test_an_escalated_completion_reminder_stops_waking_the_holder(
     bridge, paired, monkeypatch
 ):

@@ -463,7 +463,8 @@ condition, that count, its age and what clears it:
 | `second session` | Another client process is sending hooks under the lane's identity; its events are ignored. The row names its session and process. | Stop that process, or run it outside the lane's worktree. |
 | `overdue claim` | One or more held issues are past their recorded deadline. A claim whose current generation reported ready or was verified complete is never overdue. | `agent-parley issue release NUMBER` for the oldest, named in the row. |
 | `claims over cap` | A lane holds more claims than `max_claims_per_lane`, from a ledger written before every ownership path was capped or a cap lowered after the claims were taken. The count is the excess. | `agent-parley issue release NUMBER` for the highest-numbered claim, named in the row, or an offer to a peer. |
-| `unanswered offer` | One or more handoff offers to the same lane have no answer yet. | `agent-parley issue cancel NUMBER`, or `issue assign NUMBER --unassign` for an operator offer. |
+| `unanswered offer` | One or more handoff offers to the same lane have no answer yet. Past the offer's own deadline the supervisor cancels it back to the lane that made it; this row can still show it in the gap before the next poll. | `agent-parley issue cancel NUMBER`, or `issue assign NUMBER --unassign` for an operator offer. |
+| `unanswered request` | One or more peer takeover requests wait on the same holder, past the request's own deadline. Its `takeover_grace`, not this row, decides whether it is later granted as an offer. | `agent-parley issue accept NUMBER --offer-id ID` or `issue decline`, or `issue assign NUMBER --unassign` to withdraw it. |
 | `unresolved completion` | One or more claimed issues read closed on the forge, or merged or closed on the lane branch when the forge cannot say, and their holder left `completion_reminders` reminders unanswered. | `agent-parley issue resolve NUMBER` for the oldest, named in the row, with `--release` when the pull request was closed without merging. |
 | `not converging` | A claim's repeated failing verification results outlasted the request to change approach with no verified improvement, so its convergence account escalated. One row per claim; the holder keeps it. | `agent-parley issue show NUMBER` to read the account, then hand off, reassign or redirect the lane explicitly. |
 | `awaiting acknowledgement` | Messages needing acknowledgement have waited past `--ack-after`, which defaults to `stalled_after`. | Whatever the lane's state allows, from the remedy table below. |
@@ -721,14 +722,16 @@ why a key is worth reusing for a retry and not for bookkeeping.
 
 ### Deadlines and attempt budgets
 
-A claim, a handoff offer and an acknowledgement can carry a deadline:
+A claim, a handoff offer, a takeover request and an acknowledgement can
+carry a deadline:
 
 ```sh
 agent-parley issue claim 42 --within 2h
 agent-parley issue offer 42 --to codex --summary "commit, checks" --within 30m
+agent-parley issue request 42 --summary "claude is idle" --within 30m
 agent-parley say codex "Confirm the schema change" --ack --within 15m
 agent-parley deadlines show
-agent-parley deadlines set --claim 4h --offer 30m --ack 15m --attempts 3
+agent-parley deadlines set --claim 4h --offer 30m --request 30m --ack 15m --attempts 3
 ```
 
 **An overdue claim moves only when its holder is silent.** Past its deadline
@@ -746,11 +749,11 @@ A lane that reports `blocked` on an issue it still holds spends one attempt.
 budget is another visible state with the same guarantee: what to do about it
 stays the owner's or the operator's decision.
 
-`deadlines set` records the defaults every claim, offer and acknowledgement
-inherits when it passes no `--within`, so lanes carry a budget without repeating
-a flag. Windows take the same units as `--since` (`45m`, `6h`, `7d`), and a
-project that records none gives a claim and an offer a deadline only when they
-ask for one.
+`deadlines set` records the defaults every claim, offer, takeover request and
+acknowledgement inherits when it passes no `--within`, so lanes carry a budget
+without repeating a flag. Windows take the same units as `--since` (`45m`,
+`6h`, `7d`), and a project that records none gives a claim, an offer or a
+request a deadline only when they ask for one.
 
 **Every acknowledgement request carries a deadline.** A send marked
 `ack_required` that names no window takes the project's `--ack` default, and a
@@ -2082,6 +2085,17 @@ one re-run it is an operator decision. `status` prints the pending age beside
 stalled` row until the head finishes or changes. Nothing is re-run, merged or
 bypassed automatically. A forge whose checks report no start time is never
 marked stalled.
+
+A red verdict also keeps, per head commit, the attempt count and when it was
+first seen red, incrementing once per rerun that ends red again on the same
+commit. `problems` lists one `checks failed` row per pull request naming the
+failing checks and the attempt. A required check the forge reports as never
+started (`action_required` or `startup_failure`) is different: only the
+operator can act on it, so every open pull request sharing the same check
+name and forge conclusion is grouped into one `checks refused` row naming
+every affected pull request, and one decision, opened through
+`decisions.open_or_refresh` and keyed by that check name and conclusion, so
+the operator answers the shared cause once rather than once per lane.
 
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
