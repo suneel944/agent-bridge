@@ -13,10 +13,13 @@ The skill drives the `agent-parley` command line tool, which is installed
 separately:
 
 ```sh
-uv tool install agent-parley
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
 ```
 
-`pipx install agent-parley` works as well. Launch each agent session in its
+The installer adds uv only when it is missing, runs `uv tool install
+agent-parley` and adds this plugin to each of `claude` and `codex` on PATH.
+`uv tool install agent-parley` or `pipx install agent-parley` installs the tool
+alone. Launch each agent session in its
 own terminal with `agent-parley run <participant>`, for example
 `agent-parley run claude`. The tool gives each session its own worktree and
 connects it to the local coordination server.

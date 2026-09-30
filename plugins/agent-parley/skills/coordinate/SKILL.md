@@ -146,7 +146,8 @@ integration, on every repository and with no flag that skips it.
 
 Record outcomes with `agent-parley report --state partial|blocked|ready --summary
 "result"`. Partial/blocked requires `--remaining`; ready requires `--evidence`.
-Every `issue` transition and `report` accepts `--idempotency-key KEY`; a script
+`issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`,
+`unblock` and `request`, and `report`, accept `--idempotency-key KEY`; a script
 that retries with the key it first used records one attempt, not two.
 
 Add `--backlog COUNT` whenever your claim has countable work left — families,

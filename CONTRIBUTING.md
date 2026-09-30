@@ -65,9 +65,9 @@ CI runs the complete gate independently of local hook installation.
 The `Check` workflow scopes pull requests by the paths they change;
 `scripts/ci_scope.py` holds the lists. Every pull request runs `secrets` and
 `make check` on Ubuntu with Python 3.12. Changes to `plugins/`, `scripts/`,
-`tests/`, `Makefile`, `.github/actions/`, plugin manifests,
-`.release-manifest.json`, `.gitignore` or `LICENSE` add Python 3.13, 3.14 and
-macOS. Changes to `agent_parley/`, `tests/test_wsl.py`,
+`tests/`, `Makefile`, `.github/actions/`, plugin manifests, `server.json`,
+`glama.json`, `.release-manifest.json`, `.gitignore` or `LICENSE` add Python
+3.13, 3.14 and macOS. Changes to `agent_parley/`, `tests/test_wsl.py`,
 `pyproject.toml`, `uv.lock` or `.github/workflows/check.yml` also add `wsl`.
 Documentation, templates and other workflows run only the Ubuntu 3.12 leg. A
 path no list recognises, a push to `main` and a manual run select every leg.

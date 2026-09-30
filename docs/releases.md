@@ -286,7 +286,7 @@ deployment succeeds.
 
 The GitHub bundle is the canonical artifact set. It contains exactly the wheel,
 source archive, plugin ZIP, Codex skills ZIP (`-codex-skills.zip`),
-requirements, changelog, release notes and SHA256SUMS.
+requirements, the install script, changelog, release notes and SHA256SUMS.
 The checksum manifest is uploaded last, and its digest is passed between jobs.
 Paths, duplicate entries, extra files and hash mismatches stop publication.
 An existing complete bundle is reused byte for byte, even when a subsequent

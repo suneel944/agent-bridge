@@ -108,6 +108,11 @@ and supervision neither wakes nor resumes it, so `restart` is how it comes
 back.
 None of the four releases a claim: ownership still moves only through an
 explicit release or an accepted handoff, and all four land in the event log.
+A lane left dead past `orphan_retire_after` is the one exception: the service
+returns its claims and reservations to its peers, as
+[Coordination](coordination.md#a-dead-lanes-claims-are-offered-then-returned)
+describes, but keeps the lane and its worktree, so `restart` or
+`agent-parley run NAME --resume` still brings it back.
 
 A lane whose work has landed does not need removing by hand. The service sweeps
 merged lanes that hold no work, and the worktrees lanes made, at most every 900

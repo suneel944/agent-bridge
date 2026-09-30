@@ -1109,8 +1109,8 @@ minimum. When the set does not fit, columns are dropped in this order, and
 the header names the ones that went:
 
 ```text
-PROVIDER, EVENT, BRANCH, CONTEXT, CALLS, TOKENS, UNUSED, LEASES, FIT, IDLE,
-REVIEW, ISSUES, DENIALS
+PROVIDER, EVENT, BRANCH, CONTEXT, CALLS, TOKENS, UNUSED, TASK, LEASES, FIT,
+IDLE, REVIEW, ISSUES, DENIALS
 ```
 
 `PARTICIPANT`, `STATE` and `MAIL` are never dropped; if they alone still do
@@ -1639,9 +1639,11 @@ output, on a single line, and exits 1 as it does without `--json`:
 {"schema": "agent-parley/read/v1", "kind": "error", "generated_at": "2026-09-27T10:00:00Z", "error": {"type": "bridge", "message": "No participant named nobody"}}
 ```
 
-`type` is `bridge` for a coordination refusal, `os` for a file or network
-failure, `value` for an invalid value and `timeout` for an external command
-that ran out of time. `message` is the same text the `agent-parley:` line
+`type` is `bridge` for a coordination refusal, `timeout` for an external
+command that ran out of time, `os` for a file or network failure, `missing`
+for an internal lookup that found nothing, `store` for a failure reading or
+writing coordination state, and `value` for anything else, such as an
+invalid value. `message` is the same text the `agent-parley:` line
 prints on standard error, which still appears; no traceback is printed. The
 document goes to standard output so `agent-parley ... --json | jq` reads a
 failure the same way it reads a result. A command that already wrote part of
@@ -2787,7 +2789,7 @@ left the worktree, or the decision itself failed, the prompt goes through and th
 reason reaches the agent as context on it. The same causes still deny a tool
 call.
 
-A hook payload that cannot be decided, one past 1,000,000 characters such as a
+A hook payload that cannot be decided, one past 1,000,000 bytes such as a
 `Write` of a large file or one that is not a JSON hook object, is allowed and
 recorded as `oversize_payload` or `unreadable_payload` in the lane's event log,
 because a denial would refuse the same call on every retry.
