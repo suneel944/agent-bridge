@@ -162,7 +162,10 @@ keyword counts as that claim's landed work, though the forge keeps the issue
 open until the base crosses to the default branch. The supervisor ends the
 claim as complete, `status` names the issue as landed with its pull request,
 and when no claim is held one `crossing ready` problem asks the operator to
-open the crossing pull request. That step stays the operator's.
+open the crossing pull request. That step stays the operator's. The problem
+waits for a whole reading of the forge's open issues, so it never repeats
+after the crossing closed them, and ages from the newest landing or claim
+end.
 
 ## A dead lane's claims are offered, then returned
 

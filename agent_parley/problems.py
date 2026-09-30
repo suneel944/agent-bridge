@@ -1344,7 +1344,11 @@ def _crossing_rows(project: dict, now: float) -> list[dict]:
     branch the default branch never received. Merging it there cannot be
     undone, so the row only asks: nothing opens or merges the crossing pull
     request for the operator. The row clears once a claim is held again or
-    the forge closes the landed issues.
+    the forge closes the landed issues. Without a whole reading of the
+    forge's open issues, a landed issue the crossing already closed cannot
+    be told apart, so no row is raised. The row ages from the newest
+    landing or the newest claim end, whichever is later, so the claim that
+    last stopped holding the work is what opens the decision.
 
     Args:
         project: One project of the status reading.
@@ -1355,7 +1359,7 @@ def _crossing_rows(project: dict, now: float) -> list[dict]:
     """
     integration = project.get("integration") or {}
     landed = integration.get("landed") or []
-    if not landed or integration.get("held"):
+    if not landed or integration.get("held") or not integration.get("catalog"):
         return []
     base = str(integration["base"])
     return [
@@ -1367,7 +1371,13 @@ def _crossing_rows(project: dict, now: float) -> list[dict]:
             f"gh pr create --head {shlex.quote(base)}, naming each landed "
             "issue as Closes #N in its body; review and merge it yourself, "
             "since that merge cannot be undone",
-            min(_age(item.get("at"), now) for item in landed),
+            _age(
+                max(
+                    float(integration.get("settled_at") or 0),
+                    *(float(item.get("at") or 0) for item in landed),
+                ),
+                now,
+            ),
             project=str(project["root"]),
             count=len(landed),
         )

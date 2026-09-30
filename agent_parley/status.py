@@ -1052,7 +1052,9 @@ class StatusMixin(BridgeCore):
         Returns:
             Empty when no integration base is recorded. Otherwise
             ``integration`` holding the base, the issues landed there that
-            the forge has not closed, and the issues still claimed.
+            the forge has not closed, the issues still claimed, whether
+            the forge's open issues were read whole as ``catalog``, and
+            when the newest claim ended as ``settled_at``.
         """
         from agent_parley.cli import issues
 
@@ -1067,6 +1069,8 @@ class StatusMixin(BridgeCore):
                 "landed": issues.landed(
                     ledger, base, known["issues"] if known["complete"] else None
                 ),
+                "catalog": bool(known["complete"]),
+                "settled_at": issues.settled_at(ledger),
                 "held": sorted(
                     (
                         int(number)

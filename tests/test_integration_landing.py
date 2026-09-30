@@ -114,6 +114,79 @@ def test_the_forge_reads_closing_keywords_of_pull_requests_into_the_base(
     assert forge.integration_landings(tmp_path, BASE) is None
 
 
+def catalog(directory, numbers, limit=status.FORGE_LIMIT):
+    """Caches a fresh forge reading holding the given open issues."""
+    (directory / status.FORGE_ISSUES).write_text(
+        json.dumps(
+            {
+                "issues": {number: "title" for number in numbers},
+                "read_at": time.time(),
+                "limit": limit,
+            }
+        )
+    )
+
+
+def test_keywords_github_does_not_link_are_ignored():
+    body = (
+        "Refs #9\n<!-- Closes #1 -->\n`Fixes #2`\n```\nResolves #3\n```\n"
+        "~~~text\nCloses #4\n~~~\nCloses #5"
+    )
+    assert forge.closing_numbers(body) == ["5"]
+    assert forge.closing_numbers("<!-- Closes #6") == []
+
+
+def test_a_quoted_closing_keyword_does_not_end_the_claim(
+    bridge, claimed, monkeypatch
+):
+    monkeypatch.setattr(
+        supervision.forge, "branch_completion", lambda *args: None
+    )
+    monkeypatch.setattr(
+        supervision.forge, "issue_completion", lambda *args: {"state": "OPEN"}
+    )
+    monkeypatch.setattr(forge, "_implementation", lambda repo: "github")
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    merged = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 5))
+    reply = [
+        {
+            "number": 775,
+            "url": "https://example.invalid/pull/775",
+            "headRefName": "fix/1-c2",
+            "mergeCommit": {"oid": "abcdef1234567"},
+            "mergedAt": merged,
+            "body": "<!-- Closes #1 -->\nSee `Fixes #1`.",
+        }
+    ]
+    monkeypatch.setattr(
+        forge,
+        "_run",
+        lambda args, timeout: json.dumps(reply) if "--base" in args else None,
+    )
+    supervision.poll(bridge.home, claimed.parent)
+    assert issues.snapshot(claimed.parent)["issues"]["1"]["owner"] == "claude"
+
+
+def test_a_failed_landing_read_waits_for_the_retry_window(
+    monkeypatch, tmp_path
+):
+    calls = []
+    now = [1000.0]
+    monkeypatch.setattr(supervision.time, "time", lambda: now[0])
+    monkeypatch.setattr(
+        supervision.forge,
+        "integration_landings",
+        lambda repo, base: calls.append(base),
+    )
+    assert supervision._landing_reading(tmp_path, BASE) == {}
+    now[0] += status.FORGE_RETRY - 1
+    assert supervision._landing_reading(tmp_path, BASE) == {}
+    assert len(calls) == 1
+    now[0] += 2
+    supervision._landing_reading(tmp_path, BASE)
+    assert len(calls) == 2
+
+
 def test_a_merge_into_the_base_ends_the_claim_and_names_the_pull_request(
     bridge, claimed, monkeypatch
 ):
@@ -165,6 +238,12 @@ def test_the_operator_is_asked_once_to_cross_a_fully_landed_base(
     assert not [row for row in rows if row["condition"] == problems.CROSSING]
     bridge.issue(other, "release", "2")
     rows = problems.derive(bridge.home, bridge.status_snapshot())
+    assert not [row for row in rows if row["condition"] == problems.CROSSING]
+    catalog(claimed.parent, ["1", "2"], limit=2)
+    rows = problems.derive(bridge.home, bridge.status_snapshot())
+    assert not [row for row in rows if row["condition"] == problems.CROSSING]
+    catalog(claimed.parent, ["1", "2"])
+    rows = problems.derive(bridge.home, bridge.status_snapshot())
     crossing = [row for row in rows if row["condition"] == problems.CROSSING]
     assert len(crossing) == 1
     assert crossing[0]["actor"] == problems.BY_OPERATOR
@@ -172,6 +251,33 @@ def test_the_operator_is_asked_once_to_cross_a_fully_landed_base(
     assert f"--head {BASE}" in crossing[0]["command"]
     assert problems.CROSSING in notify.PROBLEM_CONDITIONS
     assert issues.snapshot(claimed.parent)["issues"]["2"]["owner"] is None
+    catalog(claimed.parent, ["2"])
+    rows = problems.derive(bridge.home, bridge.status_snapshot())
+    assert not [row for row in rows if row["condition"] == problems.CROSSING]
+
+
+def test_the_crossing_ages_from_the_claim_that_ended_last():
+    now = 10 * problems.STALE_AFTER
+    project = {
+        "root": "/repo",
+        "integration": {
+            "base": BASE,
+            "landed": [{"issue": 1, "at": now - 3 * problems.STALE_AFTER}],
+            "held": [],
+            "catalog": True,
+            "settled_at": now - 10,
+        },
+    }
+    (row,) = problems._crossing_rows(project, now)
+    assert row["seconds"] == 10
+    ledger = {
+        "issues": {
+            "1": {"owner": None, "history": [{"action": "resolve", "at": 4}]},
+            "2": {"owner": None, "history": [{"action": "release", "at": 9}]},
+            "3": {"owner": "codex", "history": [{"action": "claim", "at": 20}]},
+        }
+    }
+    assert issues.settled_at(ledger) == 9.0
 
 
 def test_a_landed_issue_the_forge_closed_no_longer_waits_on_the_crossing():

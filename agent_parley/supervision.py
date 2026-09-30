@@ -4740,18 +4740,21 @@ def _landing_reading(root: Path, base: str) -> dict:
     """Reads the pull requests merged into an integration base, reused.
 
     One bounded forge read answers every claim at once, so it is reused for
-    `ISSUE_READING_SECONDS` like the per-issue reading. A failed reading is
-    never kept and reads as no landing.
+    `ISSUE_READING_SECONDS` like the per-issue reading. A failed reading
+    reads as no landing and is retried no sooner than `FORGE_RETRY` seconds
+    later, so a forge that is down costs one timeout per retry window
+    rather than one per poll.
     """
     key = (str(root), base)
+    now = time.time()
     kept = _landings.get(key)
-    if kept and time.time() - kept[0] < ISSUE_READING_SECONDS:
+    if kept and now < kept[0]:
         return kept[1]
     reading = forge.integration_landings(root, base)
     if reading is None:
-        _landings.pop(key, None)
+        _landings[key] = (now + FORGE_RETRY, {})
         return {}
-    _landings[key] = (time.time(), reading)
+    _landings[key] = (now + ISSUE_READING_SECONDS, reading)
     return reading
 
 

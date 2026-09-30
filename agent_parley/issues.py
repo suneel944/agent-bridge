@@ -266,6 +266,34 @@ def landed(ledger: dict, base: str, opened: dict | None) -> list[dict]:
     return found
 
 
+def settled_at(ledger: dict) -> float:
+    """Reports when the newest claim of a project ended.
+
+    A claim ends through a release, a resolution or a verified completion,
+    and each one is the last transition of its unowned record's history,
+    so the newest such transition is when the project last stopped holding
+    that work.
+
+    Args:
+        ledger: Published issue ledger.
+
+    Returns:
+        Unix seconds of the newest such ending of an unowned record, or
+        zero when none is recorded.
+    """
+    return max(
+        (
+            float(history[-1].get("at") or 0)
+            for record in ledger.get("issues", {}).values()
+            if not record.get("owner")
+            for history in [record.get("history") or []]
+            if history
+            and history[-1].get("action") in ("release", "resolve", "complete")
+        ),
+        default=0.0,
+    )
+
+
 def deadline_notice(record: dict) -> dict:
     """Returns the deadline notice a record still stands behind.
 

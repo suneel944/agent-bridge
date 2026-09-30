@@ -30,6 +30,10 @@ MAX_LANDINGS = 100
 CLOSING = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE
 )
+UNLINKED = re.compile(
+    r"<!--.*?(?:-->|\Z)|^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1|\Z)|(`+).+?\2",
+    re.DOTALL | re.MULTILINE,
+)
 TIMELINE_PAGE = 100
 TIMELINE_PAGES = 10
 FAILED_CHECKS = frozenset(
@@ -371,12 +375,28 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
                 merged
                 and home == project
                 and _epoch(merged) <= closed_at
-                and number in CLOSING.findall(source.get("body") or "")
+                and number in closing_numbers(source.get("body") or "")
             ):
                 found.append(int(source["number"]))
         return found
     except (ValueError, TypeError, AttributeError, KeyError):
         return []
+
+
+def closing_numbers(body: str) -> list[str]:
+    """Lists the issues a pull request body closes by keyword.
+
+    GitHub links a closing keyword only in rendered prose, so a keyword
+    inside an HTML comment, a fenced code block or an inline code span
+    closes nothing and is removed before the keywords are read.
+
+    Args:
+        body: Markdown body of one pull request.
+
+    Returns:
+        Bare issue numbers in the order the prose names them.
+    """
+    return CLOSING.findall(UNLINKED.sub(" ", body))
 
 
 def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
@@ -444,7 +464,7 @@ def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
                 ),
                 "base": base,
             }
-            for number in CLOSING.findall(record.get("body") or ""):
+            for number in closing_numbers(record.get("body") or ""):
                 kept = landed.get(number)
                 if not kept or kept["closed_at"] < reading["closed_at"]:
                     landed[number] = reading
