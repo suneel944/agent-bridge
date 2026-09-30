@@ -369,7 +369,9 @@ Lanes: idle 35.0 min/lane-hour (top: claude blocked: capacity, 4 min); unaccount
 Idle lane-minutes per lane-hour count the time a lane spent `idle`,
 `blocked`, `stopped` or `dead` while it owned a claim or the ledger held an
 unclaimed, unblocked issue. Unaccountable claim-minutes count the time a lane
-owned a claim while it was not `working`. Each names its largest cause. The
+owned a claim while it was not `working`. Each names its largest cause; an
+idle lane whose turn ended on a retryable provider or transport error is
+charged to `idle: provider error`. The
 totals run from the first poll that saw the lane; a gap of more than five
 minutes between polls, a stopped service, is charged to nothing. `status
 --json` carries both per lane and per project under `accounting`, and each

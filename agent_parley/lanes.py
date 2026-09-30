@@ -48,6 +48,7 @@ CAPACITY = "capacity"
 PROMPT = "prompt"
 APPROVAL = "approval"
 CAUSES = frozenset({DIALOG, CAPACITY, PROMPT, APPROVAL})
+PROVIDER_ERROR = "provider error"
 TRANSITIONS: dict[str, frozenset[str]] = {
     "": frozenset({STARTING, WORKING, IDLE, BLOCKED, STOPPED, DEAD}),
     STARTING: frozenset({STARTING, WORKING, IDLE, BLOCKED, STOPPED, DEAD}),
@@ -795,6 +796,7 @@ def account(
     *,
     has_work: bool,
     owns: bool,
+    idle_cause: str = "",
     now: float | None = None,
 ) -> dict | None:
     """Adds the time since the last poll to a lane's idle and claim totals.
@@ -802,7 +804,11 @@ def account(
     Idle time is time the lane spent `idle`, `blocked`, `stopped` or `dead`
     while claimable or owned work existed. Unaccountable time is time the
     lane owned a claim while it was not `working`. Each total is kept per
-    state and cause, so the largest one can be named. The span since the
+    state and cause, so the largest one can be named. An idle lane records
+    no cause of its own, so the caller can name one it read elsewhere, such
+    as `PROVIDER_ERROR` for a turn that ended on a retryable provider
+    failure, and the gap is charged under `idle: provider error`. The span
+    since the
     last poll is split where the lane last changed state: the part before
     is charged to the state and work the last poll saw, the rest to the
     current ones. A span longer than `ACCOUNT_GAP`, a stopped service,
@@ -816,6 +822,7 @@ def account(
         record: The lane's current state record, or None.
         has_work: Whether claimable or owned work exists for the lane.
         owns: Whether the lane owns an open claim.
+        idle_cause: Cause an idle lane's gap is charged under, or empty.
         now: Unix time of the poll, or None for the current time.
 
     Returns:
@@ -827,6 +834,8 @@ def account(
     ensure(db)
     previous = read_accounts(db, root).get(lane)
     current = label(record)
+    if idle_cause and current == IDLE:
+        current = f"{IDLE}: {idle_cause}"
     totals: dict = {
         "observed": 0.0,
         "idle": 0.0,
