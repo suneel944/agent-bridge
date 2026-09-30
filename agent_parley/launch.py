@@ -224,6 +224,9 @@ reported.
         and no bypass flag is ever passed. A lane without that opt-in that the
         service could resume is named on standard error, because the service
         withholds its resume rather than start a session nobody can answer.
+        A client whose adapter `denials.EVENTS` names also runs the lane's
+        hook on the event reporting a refused tool call, so the refusal
+        reaches the operator as a decision.
 
         Args:
             agent: Participant name within the project.
@@ -359,7 +362,18 @@ reported.
                         }
                     },
                 )
-                native: dict = {"hooks": hooks}
+                from agent_parley import denials
+
+                native: dict = {
+                    "hooks": {
+                        **hooks,
+                        **{
+                            event: hooks["PreToolUse"]
+                            for event, adapter in denials.EVENTS.items()
+                            if adapter == entry["adapter"]
+                        },
+                    }
+                }
                 if dialogs.pre_approved(data, agent):
                     native["permissions"] = {
                         "allow": [protocol.TOOL_PREFIX, protocol.cli_rule()]

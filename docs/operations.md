@@ -473,6 +473,7 @@ condition, that count, its age and what clears it:
 | `shares to a retired lane` | Retirement superseded shares the lane still owed; the row sits on the retired lane, counts them and lasts while their acknowledgement deadlines run, or one day for a share without one. It is informational. | Nothing; the row clears when those deadlines pass. |
 | `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
 | `integration unverified` | The base checkout carries a merge that failed its gate, conflicted or was interrupted, or the record of one cannot be read. One row per project, on the lane that may repair it, naming the kind, the attempt and the gate result; every further merge is held. | The step the row names: rerun `agent-parley participant merge NAME` after the repair, `--renew-recovery` once attempts are used, or `agent-parley participant merge --verify-recovery` when no lane may repair it. See [Recovering an unverified integration](#recovering-an-unverified-integration). |
+| `crossing ready` | The project records an integration base, no claim is held, at least one issue landed there by a merged pull request is still open on the forge, and the cached reading holds every open issue. One row per project names the landed issues still open and ages from the newest landing or the newest claim end, whichever is later; with notifications configured it opens one decision, which never applies anything. The decision opens only while that age is under one day. | `gh pr create --head BRANCH`, naming each landed issue as `Closes #N`; review and merge it yourself, since that merge cannot be undone. |
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
@@ -2018,7 +2019,30 @@ no lane's reflog moved to, or several did, is attributed to nobody. Only
 when the forge cannot say anything about the issue does the newest pull request
 on the lane branch speak for it, and a lane branch merge never marks a claimed
 issue the forge still reads as open. Issue readings are reused for five
-minutes. Forge lookups are bounded and best effort; an offline forge cannot
+minutes.
+
+A milestone integrated on a branch other than the default branch leaves every
+issue open until that branch crosses, because GitHub closes an issue from
+`Closes #N` only on a merge into the default branch. Record the branch once,
+from the base checkout: `agent-parley branch integration integration/1.0.0`
+(an empty string removes it; lanes are refused). The service then reads, at
+most once per five minutes, and no sooner than one minute after a failed
+read, the newest 100 pull requests merged into that branch, and a claimed
+issue the forge still reads as open whose body a merged pull request closes
+by keyword, inside the claim's generation and from any branch, is observed
+as merged. A keyword inside an HTML comment, a fenced code block or an
+inline code span is ignored, as GitHub ignores it. Like any merged pull request that no other
+lane landed, it ends the claim as complete with actor `supervisor`, the pull
+request, merge commit and base kept in the evidence, so the claim leaves the
+lane, stops counting toward the cap, and is never woken, reminded or offered
+again. `status` prints `Landed in BRANCH: #N (PR #M), ...` for those issues
+until the forge closes them. When no claim is held, at least one landed
+issue is still open and the cached reading holds every open issue,
+`problems` lists one `crossing ready` row, and with
+notifications configured one decision asks the operator to open the crossing
+pull request (`gh pr create --head BRANCH`, naming each issue as `Closes #N`).
+Nothing opens or merges it for you: a merge to the default branch cannot be
+undone. Forge lookups are bounded and best effort; an offline forge cannot
 establish completion. Reminders appear in issue/status output and
 at checkpoints. An explicit subsequent message reaching every waiting peer
 marks a response observed; that is delivery evidence, not proof of a complete
@@ -2126,7 +2150,12 @@ cursor position reports and focus events do not count as partially entered
 operator input, so they do not refuse the wake. Complete replies are removed
 from the input-state check without hiding operator bytes that arrived in the
 same read; incomplete replies are carried until the next read and refuse a wake
-until they complete.
+until they complete or until half a second passes without another byte. A lone
+Esc therefore resolves as a keypress, as terminal programs resolve it, and adds
+no text. Backspace and delete erase one counted character, so a line typed and
+then erased reads as empty. A `busy:input` refusal in `problems` tells the
+operator to submit or clear the unsent text in the lane's own terminal rather
+than to answer a prompt.
 Wake attempts, backoff, the last result and escalation are fields of the
 lane's state in the store, and every wake decision reads them there. Results
 appear in `status`, the retained event log and private `<name>-wake.json`,
@@ -2341,6 +2370,7 @@ These events notify, and nothing else:
 | --- | --- |
 | `handoff_offered` | A handoff is offered to a lane. |
 | `permission_prompt` | A lane is blocked on a native permission prompt. |
+| `permission_denied` | A native permission layer, such as Claude Code's auto mode classifier, refused a lane's tool call without a prompt. |
 | `native_dialog` | A lane is held by a native dialog the launcher escalated. |
 | `lane_blocked` | A lane has stayed blocked (approval, prompt, dialog) for 30 minutes; sent once per block. |
 | `lane_idle` | A lane is idle with no claim past the project's `stalled_after`. |
@@ -2421,6 +2451,27 @@ decision as `stale`, so a later tap is refused and an answer already given is
 never pressed on another dialog; the new screen is asked about afresh. A
 prompt the launcher cannot read is sent as terminal-only and answered at the
 lane's terminal. Nothing is ever answered on expiry.
+
+A tool call a native permission layer refuses without drawing a prompt is
+recorded as a `permission_denied` decision. Today that is Claude Code's auto
+mode classifier: every Claude Code lane runs its hook on the
+`PermissionDenied` event, which the `claude` CLI raises with the tool,
+its input and the classifier's reason, such as `Interfere With Workloads` or
+`CI Bypass`. No other adapter reports such a refusal to a hook yet. The
+decision names the lane, the issue the lane has claimed, if any, the exact
+refused command and the stated reason. It offers `run it yourself`, with the
+command to run in the lane's worktree, `add a rule`, with a suggested
+permission rule such as `Bash(git push:*)`, and, when the lane holds a claim,
+`reassign` and `release`. The same refusal again, from the same lane on the
+same claim with the same command, refreshes that decision instead of opening
+a second one. While it is open the supervisor defers the lane's wakes under
+`permission denied` rather than asking it for a turn that would meet the
+same refusal; the answer reaches the lane as supervisor mail, like any other
+answer, and the lane or the operator carries it out. The decision is
+irreversible, so every option takes the `confirm` tap and no timeout ever
+applies a default to it. Nothing retries, rewords or works around the
+refused call, and the service never writes the suggested rule or any bypass
+flag: adding the rule is the operator's edit to their own settings.
 
 ### Reclaiming landed lanes
 
@@ -3292,8 +3343,9 @@ Every supervision poll sweeps the project's open decision records, the ones
 notifications deliver, before sending the due ones. A record settles only
 when its notification kind maps to a reversible table kind, it was recorded
 reversible, and it recommends one of its own options. Today a
-`orphan_decision` record settles as `orphan_claim`; `permission_prompt` and
-`native_dialog` records map to `native_permission` and always wait; any other
+`orphan_decision` record settles as `orphan_claim`; `permission_prompt`,
+`permission_denied` and `native_dialog` records map to `native_permission`
+and always wait; any other
 record waits for an answer. A settled record is answered with its recommended
 option by `timeout`, handed to its lane like any other answer, logged and
 announced as above. A record the operator answered first, or one missing the

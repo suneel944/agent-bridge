@@ -23,6 +23,8 @@ from agent_parley.state import BridgeError, lock
 PROMPT = "Review pending coordination messages and handoff reminders."
 MAX_WORK_PROMPT = 2_000
 SUBMIT_DELAY = 0.2
+ESCAPE_TIMEOUT = 0.5
+ERASE = frozenset({0x08, 0x7F})
 ANSWERING = re.compile(rb"[\r\n0-9]")
 DETACHED_ROWS = 24
 DETACHED_COLUMNS = 80
@@ -286,31 +288,37 @@ def operator_input(entered: bytes, control: bytes = b"") -> tuple[bytes, bytes]:
     return bytes(operator), b""
 
 
-def pending(entered: bytes, previous: bool) -> bool:
-    """Decides whether the operator holds a partially entered line.
+def pending(entered: bytes, previous: int) -> int:
+    """Counts the characters the operator holds in a partially entered line.
 
     Terminal control traffic shares the operator's input descriptor. Complete
     recognized control sequences are removed, but bytes after them and unknown
     escape-prefixed input are still inspected. Line submission, interruption
-    and line clearing reset the state in byte order, so later text in the same
-    read can establish a new pending line.
+    and line clearing reset the count in byte order, so later text in the same
+    read can establish a new pending line. Backspace and delete erase one
+    character, so a line typed and then erased reads as empty. Other control
+    bytes and UTF-8 continuation bytes add no character; a control byte that
+    edits the line in a way the count cannot follow leaves it pending.
 
     Args:
         entered: Bytes read from the operator's terminal in one call.
-        previous: Pending state before this read.
+        previous: Characters pending before this read.
 
     Returns:
-        True while the operator has typed text without submitting it.
+        The characters typed without submitting them; zero means no pending
+        line. An incomplete recognized control prefix counts as pending.
     """
     entered, control = operator_input(entered)
-    if control:
-        return True
     result = previous
     for value in entered:
         if value in (0x03, 0x0A, 0x0D, 0x15):
-            result = False
-        else:
-            result = True
+            result = 0
+        elif value in ERASE:
+            result = max(0, result - 1)
+        elif value == 0x09 or (value >= 0x20 and not 0x80 <= value <= 0xBF):
+            result += 1
+    if control:
+        return max(result, 1)
     return result
 
 
@@ -776,6 +784,10 @@ def _session(
 ) -> int | None:
     """Relays one native session until the client exits or is stopped.
 
+    A control prefix the operator leaves incomplete for `ESCAPE_TIMEOUT`
+    seconds resolves as a keypress, as terminal programs resolve a lone Esc,
+    so it adds no text and stops refusing wakes as pending input.
+
     Args:
         pid: Native client process.
         master: Pseudo-terminal master descriptor, closed on return.
@@ -806,8 +818,9 @@ def _session(
     signal.signal(signal.SIGWINCH, resize)
     if attached:
         resize()
-    pending_input = False
+    pending_input = 0
     pending_control = b""
+    control_at = 0.0
     detached_control = b""
     title_control = b""
     child_title = ""
@@ -865,6 +878,8 @@ def _session(
             waiting = 1.0
             if submit_at:
                 waiting = max(0.0, submit_at - time.monotonic())
+            if pending_control:
+                waiting = min(waiting, ESCAPE_TIMEOUT)
             ready, _, _ = select.select(descriptors, [], [], waiting)
             if submit_at and time.monotonic() >= submit_at:
                 submit_at = 0.0
@@ -877,10 +892,16 @@ def _session(
                 operator, pending_control = operator_input(
                     entered, pending_control
                 )
+                control_at = time.monotonic()
                 pending_input = pending(operator, pending_input)
                 os.write(master, entered)
                 if watch.holding and ANSWERING.search(entered):
                     watch.answered()
+            if (
+                pending_control
+                and time.monotonic() - control_at >= ESCAPE_TIMEOUT
+            ):
+                pending_control = b""
             if master in ready:
                 try:
                     output = os.read(master, 65536)

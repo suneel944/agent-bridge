@@ -26,6 +26,14 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+MAX_LANDINGS = 100
+CLOSING = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE
+)
+UNLINKED = re.compile(
+    r"<!--.*?(?:-->|\Z)|^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1|\Z)|(`+).+?\2",
+    re.DOTALL | re.MULTILINE,
+)
 TIMELINE_PAGE = 100
 TIMELINE_PAGES = 10
 FAILED_CHECKS = frozenset(
@@ -341,10 +349,6 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
         The matching pull request numbers, empty when none match or the
         timeline cannot be read.
     """
-    keyword = re.compile(
-        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{number}\b",
-        re.IGNORECASE,
-    )
     try:
         events = []
         for page in range(1, TIMELINE_PAGES + 1):
@@ -372,12 +376,102 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
                 merged
                 and home == project
                 and _epoch(merged) <= closed_at
-                and keyword.search(source.get("body") or "")
+                and number in closing_numbers(source.get("body") or "")
             ):
                 found.append(int(source["number"]))
         return found
     except (ValueError, TypeError, AttributeError, KeyError):
         return []
+
+
+def closing_numbers(body: str) -> list[str]:
+    """Lists the issues a pull request body closes by keyword.
+
+    GitHub links a closing keyword only in rendered prose, so a keyword
+    inside an HTML comment, a fenced code block or an inline code span
+    closes nothing and is removed before the keywords are read.
+
+    Args:
+        body: Markdown body of one pull request.
+
+    Returns:
+        Bare issue numbers in the order the prose names them.
+    """
+    return CLOSING.findall(UNLINKED.sub(" ", body))
+
+
+def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
+    """Reports which issues merged pull requests into a branch close.
+
+    GitHub closes an issue from a closing keyword only when the pull request
+    merges into the default branch, and links it to the issue only then, so
+    work merged into a milestone's integration branch leaves its issue open
+    and unlinked. One bounded request reads the newest `MAX_LANDINGS` pull
+    requests merged into that branch, and each one's body names the issues
+    it closes by keyword, whichever branch it came from. A pull request that
+    merely mentions an issue is never taken as landing it. Only the GitHub
+    forge opens pull requests, so every other forge reports None.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        base: Integration branch the pull requests merged into.
+
+    Returns:
+        Bare issue number to the newest merged pull request closing it: the
+        state `MERGED`, the instant it merged in Unix seconds as
+        `closed_at`, its number, URL, head branch, merge commit and the
+        base branch. None when the forge is unavailable or the response
+        cannot be read.
+    """
+    if _implementation(repo) != "github":
+        return None
+    project = _reachable(repo)
+    if not project:
+        return None
+    output = _run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            project,
+            "--base",
+            base,
+            "--state",
+            "merged",
+            "--limit",
+            str(MAX_LANDINGS),
+            "--json",
+            "number,url,headRefName,mergeCommit,mergedAt,body",
+        ],
+        15,
+    )
+    try:
+        records = json.loads(output or "null")
+        if not isinstance(records, list):
+            return None
+        landed: dict[str, dict] = {}
+        for record in records:
+            if not record.get("mergedAt"):
+                continue
+            reading = {
+                "state": "MERGED",
+                "closed_at": _epoch(record["mergedAt"]),
+                "pull_request": int(record["number"]),
+                "url": str(record.get("url") or ""),
+                "branch": str(record.get("headRefName") or ""),
+                "commit": str(
+                    (record.get("mergeCommit") or {}).get("oid") or ""
+                ),
+                "base": base,
+            }
+            for number in closing_numbers(record.get("body") or ""):
+                kept = landed.get(number)
+                if not kept or kept["closed_at"] < reading["closed_at"]:
+                    landed[number] = reading
+        return landed
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
 
 
 def open_pull_requests(repo: Path) -> list[dict] | None:

@@ -22,8 +22,9 @@ with its own recommended option by `ANSWERED_BY` and handed to its lane the
 way any other answer is.
 
 An irreversible kind never times out: a merge to the default branch, a
-release or tag, discarding uncommitted work, deleting a branch and every
-native permission prompt always wait for an answer. A kind this table does
+release or tag, discarding uncommitted work, deleting a branch, every
+native permission prompt and every tool call a native permission layer
+denied always wait for an answer. A kind this table does
 not know is treated as irreversible, so a misspelled or newer kind fails
 closed.
 
@@ -118,6 +119,7 @@ KINDS: dict[str, Kind] = {
 EVENTS: dict[str, str] = {
     notify.Event.ORPHAN_DECISION: "orphan_claim",
     notify.Event.PERMISSION_PROMPT: "native_permission",
+    notify.Event.PERMISSION_DENIED: "native_permission",
     notify.Event.NATIVE_DIALOG: "native_permission",
 }
 

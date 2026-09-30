@@ -21,6 +21,7 @@ from agent_parley import (
     budgets,
     convergence,
     decisions,
+    denials,
     dialogs,
     forge,
     issues,
@@ -3008,7 +3009,9 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
     actor `supervisor` and the forge evidence, never as the lane's. A
     closed, unmerged pull request, a lane branch reading without the
     issue's closing pull request, or work another lane landed still goes
-    through reminders and the operator.
+    through reminders and the operator. A pull request merged into the
+    project's integration base ends the claim the same way, with the base
+    kept in the evidence, though the issue stays open on the forge.
 
     Args:
         directory: Private project state directory.
@@ -3038,7 +3041,11 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
                 },
                 outcome="complete",
                 actor="supervisor",
-                reason="merged pull request closed the issue on the forge",
+                reason=(
+                    f"pull request merged into integration base {seen['base']}"
+                    if seen.get("base")
+                    else "merged pull request closed the issue on the forge"
+                ),
                 claim_id=str(seen["claim_id"]),
             )
             resolved.append(number)
@@ -4864,6 +4871,31 @@ def _issue_reading(root: Path, number: str) -> dict | None:
     return reading
 
 
+_landings: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def _landing_reading(root: Path, base: str) -> dict:
+    """Reads the pull requests merged into an integration base, reused.
+
+    One bounded forge read answers every claim at once, so it is reused for
+    `ISSUE_READING_SECONDS` like the per-issue reading. A failed reading
+    reads as no landing and is retried no sooner than `FORGE_RETRY` seconds
+    later, so a forge that is down costs one timeout per retry window
+    rather than one per poll.
+    """
+    key = (str(root), base)
+    now = time.time()
+    kept = _landings.get(key)
+    if kept and now < kept[0]:
+        return kept[1]
+    reading = forge.integration_landings(root, base)
+    if reading is None:
+        _landings[key] = (now + FORGE_RETRY, {})
+        return {}
+    _landings[key] = (now + ISSUE_READING_SECONDS, reading)
+    return reading
+
+
 def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
     """Observes which claimed issues ended inside their ownership generation.
 
@@ -4873,6 +4905,12 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
     merge their lane branch, and a lane branch merge says nothing about which
     claim it closed. Only when the forge cannot say anything about an issue
     does the lane branch's newest pull request speak for it.
+
+    An issue the forge reports open still ended when the project records an
+    integration base and a pull request merged into that branch inside the
+    claim's generation closes the issue by keyword. The forge leaves such an
+    issue open until the branch crosses to the default branch, yet the
+    claim's work has landed, so it is observed as a merge like any other.
 
     Args:
         manifest: Current participant manifest.
@@ -4884,12 +4922,14 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
         forge's own close instant when the forge named the issue rather than
         only the branch and, when the forge named one, the closing pull
         request's number, URL and merge commit with the claim it was read
-        for. `landed_by` names another lane whose lane branch carried the
-        closing pull request, or whose
-        worktree alone checked out the
-        per-issue branch it came from.
+        for, and `base` for work that landed in the integration base.
+        `landed_by` names another lane whose lane branch carried the closing
+        pull request, or whose worktree alone checked out the per-issue
+        branch it came from.
     """
     root = Path(manifest["root"])
+    base = str(manifest.get("integration_base") or "")
+    landings: dict | None = None
     lanes = {
         participant["branch"]: name
         for name, participant in manifest["participants"].items()
@@ -4920,7 +4960,13 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 }
                 continue
             if reading["state"] not in {"MERGED", "CLOSED"}:
-                continue
+                if not base:
+                    continue
+                if landings is None:
+                    landings = _landing_reading(root, base)
+                if number not in landings:
+                    continue
+                reading = landings[number]
             if reading["closed_at"] < since:
                 continue
             seen = {
@@ -4932,6 +4978,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "url": reading["url"],
                 "commit": reading["commit"],
                 "claim_id": record.get("claim_id"),
+                **({"base": reading["base"]} if reading.get("base") else {}),
             }
             landed = lanes.get(reading["branch"])
             if not landed and reading["branch"]:
@@ -6818,6 +6865,12 @@ def _wake_block(
     the gate clears on its own and the lane is asked for a turn like any
     other idle lane.
 
+    A lane whose tool call a native permission layer refused waits on the
+    operator's decision about it, so while `denials.waiting` finds that
+    decision open the lane is blocked under `denials.CAUSE` and is not asked
+    for another turn that could only meet the same refusal. An answer
+    settles the decision, and the next poll wakes the lane with it.
+
     Args:
         directory: Private project state directory.
         name: Participant that owns the lane.
@@ -6841,6 +6894,8 @@ def _wake_block(
         and float(reset_at) > time.time()
     ):
         return reason, float(reset_at)
+    if held := denials.waiting(directory, name):
+        return f"blocked: {denials.CAUSE} ({held['id']})", 0.0
     lane = observed.get("record") or {}
     if lane.get("state") == lanes.BLOCKED:
         return f"blocked: {lane['cause']}", 0.0

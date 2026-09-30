@@ -35,13 +35,13 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `lifecycle` | Execution state an issue's owner still owes, stored in the issue ledger so an ownership transition and its claim generation publish together, and the dependency settlement completion triggers |
 | `recovery` | Capture and restore of an abandoned claim's work as recovery checkpoints, operator-authorized takeover, and the persisted capacity recovery candidates |
 | `lanes` | The one authoritative state record of each lane in the store (`starting`, `working`, `idle`, `blocked` with its cause, `stopped`, `dead`, `reclaimed`), its closed transition table, and the event every accepted or refused transition appends; the per-lane files are evidence it reads, never a second answer. Hooks (`checkpoints.record`) and the dialog watcher submit evidence to a per-project spool (`lane-evidence.jsonl`) instead of waiting on the store; each poll applies it in arrival order before its liveness sample, and keeps it for the next poll when the store is busy. A session change is a transition that records both session ids. Each poll also charges the time since the last one to idle lane-minutes and unaccountable claim-minutes by state and cause, which `status` reports. The `accounting` events those charges append and every other lane event are each kept to the latest `MAX_EVENTS` (2000) per project, so per-poll accounting never evicts the transition history. A host restart moves every recorded session's row to `stopped` with the restart named as its evidence, which `rebooted` reads to refuse a resume until a new session clears it. The wake budget (attempts, backlog, next attempt, exhaustion, escalation) lives in the same store, seeded once from a lane's published `-wake.json` on upgrade |
-| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, returning the claims and reservations of lanes proved dead past `orphan_retire_after`, the reclaim sweep, a project whose root checkout is gone, the open-issue catalog `status` reads, cached in `FORGE_ISSUES` (`forge-issues.json`) and refreshed once it is `FORGE_TTL` (300 s) old, a failed read retried no sooner than `FORGE_RETRY` (60 s) later while the last good reading is kept, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane, as is, once, a head pending past `checks_ceiling` |
+| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, returning the claims and reservations of lanes proved dead past `orphan_retire_after`, the reclaim sweep, a project whose root checkout is gone, the open-issue catalog `status` reads, cached in `FORGE_ISSUES` (`forge-issues.json`) and refreshed once it is `FORGE_TTL` (300 s) old, a failed read retried no sooner than `FORGE_RETRY` (60 s) later while the last good reading is kept, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane, as is, once, a head pending past `checks_ceiling`; a claimed issue still open on the forge that a pull request merged into the manifest's `integration_base` closes inside the claim's generation ends the claim like any merged pull request |
 | `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends. Accounts are published per project in `convergence.json`; the thresholds are the supervision settings `convergence_repeats` (3 repeats of one failure by default) and `convergence_after` (14400 working seconds since the last milestone by default), and both responses are keyed mail, the escalation also notifying through `non_convergence` |
 | `roster` | Providers, credential profiles and project participants |
 | `retirement` | The withdrawal of one lane at its own request: the work it returns, the worktree it leaves only when Git reports it clean, and the durable retirement mark the supervisor and the operator views read |
 | `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees: one holding ignored files is always kept, and a quiet one whose unpushed commits already landed through another branch is bundled into a recovery checkpoint and removed without force. Also the pruning of files retired lanes no longer need and of wake logs past their retention |
 | `policy` | Attribution rules shared by the lane hook, integration and the repository gate |
-| `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, the ready-report comment posted there, and one bounded reading of the check, review and merge state of up to `MAX_PULL_REQUESTS` (30) open pull requests on GitHub |
+| `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, the ready-report comment posted there, and one bounded reading of the check, review and merge state of up to `MAX_PULL_REQUESTS` (30) open pull requests on GitHub, and of the issues the newest `MAX_LANDINGS` (100) pull requests merged into the recorded integration base close by keyword |
 | `forecast` | Bounded co-change history of the base checkout, cached per base commit, and the advisory collision forecast a reservation or claim carries |
 | `recommend` | Ranking of the unclaimed, unblocked issues a lane could take next, from the ledger, the recorded plan, the reservations peers hold and the collision forecast, with the reason for each place; it claims nothing |
 | `checkpoints` | Lifecycle observations and bounded context delivery |
@@ -72,6 +72,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `completion` | Shell completion scripts generated from the live command parser, and the lock-free candidate lookup they call back into |
 | `plugins` | Adds the published marketplace and plugin to each supported native CLI on PATH through that CLI's own plugin commands, reading its listing first so a re-run never duplicates an entry |
 | `decisions` | Durable records of the situations that wait on an operator's answer, one open record per situation, queued and retried with backoff until every configured transport accepts the delivery |
+| `denials` | Recognition of a tool call a native permission layer refused, from the hook event each adapter raises for one, recorded as one irreversible operator decision per lane, claim and command that holds the lane's wakes while it is open |
 | `notify` | Outbound Telegram and SMTP notification of the coordination changes an absent owner needs, selected from decisions the event log already recorded |
 | `inbound` | Read-only status queries long-polled from the Telegram bot, admitted by chat identifier and passcode, parsed by the command line's own status filters |
 | `state` | Private atomic JSON and text publication and operation locks |
@@ -1416,7 +1417,28 @@ already completed action. Coordination errors before edits pause work.
 Status reports notice counts and injected UTF-8 bytes, not tokenizer counts or
 API billing. That measure covers what coordination itself delivers into a
 lane's context and nothing else; it is not, and must not be read as, what a
-lane spends.
+lane spends. `participant show` also reports the bytes per hour over the last
+24 clock hours, which the lane's activity record keeps as hourly totals, and
+`top --json` carries the same rate as `injected_bytes_per_hour`.
+
+Hook notices are sent as deltas. Each notice (participants, the issue notice
+with its claim rows and reminders, the work offer and its continuation line,
+operator edits, base advances, budget crossings and owed acknowledgements) is
+split into entries, and the lane's activity record in the private state
+directory keeps a digest of every entry it was last given, per notice kind.
+Elapsed seconds are masked before digesting, so a claim row whose age alone
+moved is not new. A later hook injects only the entries whose digest is not
+recorded; a notice with nothing new injects nothing, and a `Stop` is blocked
+only when the issue notice or the work offer has a new entry. When anything is
+injected, one line counts the unchanged entries left out and names
+`agent-parley status` and `agent-parley issue list` as the full reading.
+Fresh entries share `MAX_NOTICE_BYTES` (1,024) per injection; entries past it
+collapse to one line naming the same commands and are not recorded, so the
+next delivery offers them again. Every `SessionStart`, whatever its source
+(`startup`, `resume`, `clear` or `compact`), drops the record and the notice
+revisions, so the first hook after a compaction or a new session resends
+everything once. The `MAX_NOTICE_REPEATS` ceiling on completion reminders and
+deadline notices applies before the delta and is unchanged by it.
 
 `top` reports a lane's token count separately, from the session records the
 native client already writes under its own config home: the Claude transcript

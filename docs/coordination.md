@@ -90,7 +90,11 @@ checkout, and it offers rather than takes; the detail is in
 They block branch changes inside an assigned lane, catch drift after any bypass,
 and deliver short updates only when coordination state actually changes. Each
 notice is capped at 1,536 UTF-8 bytes; an unchanged checkpoint adds no context
-at all. If a rename removed the assigned branch, the hook names the exact
+at all. A notice carries only the entries the lane was not already given, such
+as one new claim row rather than the whole claim set, and says how many
+unchanged entries it left out; `agent-parley status` and `agent-parley issue
+list` always return the full state. A session start, including one after a
+compaction, resends everything once. If a rename removed the assigned branch, the hook names the exact
 repair. Branch drift blocks completion once; a Stop retry can end the session
 while status continues to show the drift.
 
@@ -155,6 +159,17 @@ that ends without a tool call does not reset the silence. A holder that runs a
 tool again, or progress recorded on an idle claim, cancels the sequence. A
 claim observed complete is never moved; its completion reminder and the
 operator's `issue resolve` end it.
+
+A pull request merged into the project's recorded integration base
+(`agent-parley branch integration BRANCH`) that closes a claimed issue by
+keyword counts as that claim's landed work, though the forge keeps the issue
+open until the base crosses to the default branch. The supervisor ends the
+claim as complete, `status` names the issue as landed with its pull request,
+and when no claim is held one `crossing ready` problem asks the operator to
+open the crossing pull request. That step stays the operator's. The problem
+waits for a whole reading of the forge's open issues, so it never repeats
+after the crossing closed them, and ages from the newest landing or claim
+end.
 
 ## A dead lane's claims are offered, then returned
 

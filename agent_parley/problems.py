@@ -34,6 +34,8 @@ from agent_parley import (
     lanes,
     merges,
     plan,
+    reclaim,
+    records,
     recovery,
     roster,
     store,
@@ -76,8 +78,11 @@ PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
 CHECKS = "checks stalled"
+CROSSING = "crossing ready"
 CHECKS_FAILED = "checks failed"
 CHECKS_REFUSED = "checks refused"
+CHILD_SESSION = "session outliving its claim"
+CHILD_RECENT = 60
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -289,6 +294,24 @@ def _remedy(
         )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
+    held = record.get("dialog") or {}
+    if (
+        blocked == DIALOG
+        and wake.get("result") == DIALOG
+        and held.get("name") != dialogs.PERMISSION
+        and not held.get("escalated")
+    ):
+        return (
+            _answer(
+                name,
+                repo,
+                record,
+                f"submit or clear the unsent text in {name}'s own terminal "
+                "(Enter, or Ctrl-U to clear the line); it reads no mail "
+                "until that line is empty",
+            ),
+            BY_OPERATOR,
+        )
     if blocked == DIALOG:
         return (
             _answer(
@@ -535,6 +558,65 @@ def _unresolved_rows(
             root,
             BY_OPERATOR,
             len(unresolved),
+        )
+    ]
+
+
+def _child_rows(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    record: dict,
+    name: str,
+    repo: str,
+    root: str,
+    now: float,
+) -> list[dict]:
+    """Reports a session still active in a worktree beyond the lane's claim.
+
+    A lane can run a project's own tooling from its shell, and that tooling
+    can start further native sessions in a worktree the lane made for a
+    pull request or a sub-task. Agent Parley never sees those sessions
+    start and never stops them; this only tells the lane, once its claim
+    has ended, that one is still writing to its session record.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Project manifest holding this participant.
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+        now: Unix time the observation ages are measured against.
+
+    Returns:
+        One row naming how many session records are still active and how
+        long since the most recent, or no row while the lane holds a claim,
+        no worktree beyond its own is attributed to it, or none of them
+        show activity within `CHILD_RECENT` seconds.
+    """
+    if record["claims"]:
+        return []
+    children = reclaim.child_worktrees(directory, manifest, name)
+    if not children:
+        return []
+    participant = manifest["participants"][name]
+    count, latest = records.child_activity(home, participant, children)
+    if not count or latest is None or now - latest > CHILD_RECENT:
+        return []
+    return [
+        _row(
+            CHILD_SESSION,
+            f"{count} native session(s) in a worktree this lane made are "
+            "still active after its claim ended",
+            f"agent-parley status {name} {repo}; agent-parley never "
+            "stops a session",
+            max(0, int(now - latest)),
+            name,
+            root,
+            BY_OPERATOR,
+            count,
         )
     ]
 
@@ -1392,6 +1474,54 @@ def _checks_rows(directory: Path, root: str, now: float) -> list[dict]:
     ]
 
 
+def _crossing_rows(project: dict, now: float) -> list[dict]:
+    """Asks the operator once to cross a fully landed integration base.
+
+    When no claim is held and at least one issue landed in the integration
+    base still waits on the forge, the milestone's work sits complete on a
+    branch the default branch never received. Merging it there cannot be
+    undone, so the row only asks: nothing opens or merges the crossing pull
+    request for the operator. The row clears once a claim is held again or
+    the forge closes the landed issues. Without a whole reading of the
+    forge's open issues, a landed issue the crossing already closed cannot
+    be told apart, so no row is raised. The row ages from the newest
+    landing or the newest claim end, whichever is later, so the claim that
+    last stopped holding the work is what opens the decision.
+
+    Args:
+        project: One project of the status reading.
+        now: Unix time the landing ages are measured against.
+
+    Returns:
+        One row while the integration base is fully landed, or none.
+    """
+    integration = project.get("integration") or {}
+    landed = integration.get("landed") or []
+    if not landed or integration.get("held") or not integration.get("catalog"):
+        return []
+    base = str(integration["base"])
+    return [
+        _row(
+            CROSSING,
+            f"every claim landed in {base}: "
+            + ", ".join(f"#{item['issue']}" for item in landed)
+            + "; the default branch has not received them",
+            f"gh pr create --head {shlex.quote(base)}, naming each landed "
+            "issue as Closes #N in its body; review and merge it yourself, "
+            "since that merge cannot be undone",
+            _age(
+                max(
+                    float(integration.get("settled_at") or 0),
+                    *(float(item.get("at") or 0) for item in landed),
+                ),
+                now,
+            ),
+            project=str(project["root"]),
+            count=len(landed),
+        )
+    ]
+
+
 def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
     """Reports each open pull request whose head's checks ran and failed.
 
@@ -1550,6 +1680,7 @@ def derive(
             )
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
+        repo = f"--repo {shlex.quote(str(project['root']))}"
         for record in project["participants"]:
             aged.extend(
                 _lane_rows(
@@ -1560,6 +1691,18 @@ def derive(
                     after,
                     stamp,
                     directory,
+                )
+            )
+            aged.extend(
+                _child_rows(
+                    home,
+                    directory,
+                    data,
+                    record,
+                    record["participant"],
+                    repo,
+                    project["root"],
+                    stamp,
                 )
             )
         aged.extend(_offer_rows(project, stamp))
@@ -1574,6 +1717,7 @@ def derive(
         aged.extend(_checks_rows(directory, project["root"], stamp))
         aged.extend(_checks_failed_rows(directory, project["root"], stamp))
         aged.extend(_checks_refused_rows(directory, project["root"], stamp))
+        aged.extend(_crossing_rows(project, stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )

@@ -984,7 +984,9 @@ def lane_detail(record: dict, data: dict) -> None:
         )
     print(
         f"    Context delivered: {record['injected_bytes']} "
-        f"UTF-8 bytes in {record['injections']} notices"
+        f"UTF-8 bytes in {record['injections']} notices; "
+        f"{record.get('injected_per_hour', 0)} bytes per hour over the "
+        "last day"
     )
     if record["report_age_seconds"] is not None:
         print(f"    Report age: {record['report_age_seconds']}s")
@@ -4838,6 +4840,23 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     naming_set.add_argument("--repo", type=Path, default=Path.cwd())
+    naming_base = namings.add_parser(
+        "integration",
+        help=(
+            "Record the branch a milestone's pull requests merge into; "
+            "operator-only."
+        ),
+    )
+    naming_base.add_argument(
+        "integration",
+        metavar="BRANCH",
+        help=(
+            "Integration branch, such as integration/1.0.0; a pull request "
+            "merged into it that closes a claimed issue lands the claim. An "
+            "empty string removes it."
+        ),
+    )
+    naming_base.add_argument("--repo", type=Path, default=Path.cwd())
     tracker = commands.add_parser(
         "forge",
         help="Show or set the issue tracker this project coordinates over.",
@@ -5767,9 +5786,14 @@ def main() -> int:
                         {
                             "root": data["root"],
                             "prefix": data["branch_prefix"],
+                            "integration_base": data.get(
+                                "integration_base", ""
+                            ),
                         },
                     )
                 )
+            elif args.action == "integration":
+                print(bridge.integration_branch(repository, args.integration))
             else:
                 print(
                     bridge.branch_naming(
