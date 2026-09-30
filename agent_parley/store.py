@@ -2599,6 +2599,7 @@ def _grant_queued(
     actor: dict,
     released: list[str],
     reclaimed: bool = False,
+    reason: str = "",
 ) -> list[dict]:
     """Hands each released key to the lane that queued for it first.
 
@@ -2617,6 +2618,8 @@ def _grant_queued(
         reclaimed: Whether the release was the runtime reclaiming expired
             leases rather than the holder releasing them, which the notice
             says so the taking lane knows the holder never handed over.
+        reason: Why the runtime released the keys on the holder's behalf,
+            stated in the notice in place of the expiry, or empty.
 
     Returns:
         One entry per lane granted something, naming that lane, the keys it
@@ -2703,7 +2706,7 @@ def _grant_queued(
     notices = []
     for name in sorted(taken):
         keys = taken[name]
-        subject, body = _notice(actor["name"], keys, reclaimed)
+        subject, body = _notice(actor["name"], keys, reclaimed, reason)
         message = _send(
             db,
             actor,
@@ -2721,7 +2724,7 @@ def _grant_queued(
 
 
 def _notice(
-    holder: str, keys: list[str], reclaimed: bool = False
+    holder: str, keys: list[str], reclaimed: bool = False, reason: str = ""
 ) -> tuple[str, str]:
     """Words the one notice a lane reads when its queued keys are granted.
 
@@ -2730,13 +2733,18 @@ def _notice(
         keys: Keys the reading lane now holds, in the order granted.
         reclaimed: Whether the runtime released the keys because they were
             expired and unworked, rather than the holder releasing them.
+        reason: Why the runtime released the keys for their holder, which
+            replaces the expiry in the notice when given.
 
     Returns:
         The bounded subject and body of the notice.
     """
     listed = ", ".join(keys)[:MAX_NOTICE_CHARACTERS]
     handed = (
-        f"{holder}'s reservation of {listed} expired unrenewed and was released"
+        f"{holder}'s reservation of {listed} was released because {reason}"
+        if reason
+        else f"{holder}'s reservation of {listed} expired unrenewed and was "
+        "released"
         if reclaimed
         else f"{holder} released {listed}"
     )
@@ -5254,6 +5262,55 @@ def release_reservations(home: Path, root: str, name: str) -> list[str]:
             (holder["project_id"], holder["id"]),
         )
     return released
+
+
+def release_dead_holder(home: Path, root: str, name: str, reason: str) -> dict:
+    """Releases a dead lane's reservations and grants what peers queued.
+
+    A lease bound to a live claim has no expiry, so the expiry sweep never
+    frees one whose holder died, and a peer queued behind it waits for a
+    release nobody will make. Supervision calls this once it has proved the
+    holder dead. The release, the grants it enables and the notice each
+    taking lane reads share one transaction. Reservations stay advisory:
+    this changes who is told a key is free, not what the file system allows.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        name: Registered identity of the dead lane.
+        reason: Why the holder was released, quoted in each grant notice.
+
+    Returns:
+        The released keys in key order and, as ``granted``, one entry per
+        lane that took queued keys. A missing store or an unregistered lane
+        releases nothing.
+    """
+    if not (home / DATABASE).exists():
+        return {"released": [], "granted": []}
+    with connect(home, write=True) as db:
+        try:
+            holder = _identify(db, root, name)
+        except BridgeError:
+            return {"released": [], "granted": []}
+        released = sorted(
+            {
+                row["path_pattern"]
+                for row in db.execute(
+                    "SELECT path_pattern FROM file_reservations WHERE "
+                    "project_id=? AND agent_id=? AND released_ts IS NULL",
+                    (holder["project_id"], holder["id"]),
+                )
+            }
+        )
+        if not released:
+            return {"released": [], "granted": []}
+        db.execute(
+            "UPDATE file_reservations SET released_ts=CURRENT_TIMESTAMP "
+            "WHERE project_id=? AND agent_id=? AND released_ts IS NULL",
+            (holder["project_id"], holder["id"]),
+        )
+        granted = _grant_queued(db, holder, released, reason=reason)
+    return {"released": released, "granted": granted}
 
 
 def reclaim_expired(home: Path, root: str) -> list[dict]:

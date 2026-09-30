@@ -296,16 +296,23 @@ def satisfied(record: dict) -> bool:
     `ended_on_forge`. The operator merging or closing by hand ends the work
     as surely as verified integration does, and nothing else would ever
     clear the edge. A reclaim drops the mark, so a reopened blocker holds
-    its dependents again.
+    its dependents again. A blocker whose issue the forge reports closed
+    while a lane still holds it is satisfied too: a dead holder never
+    releases it, so its dependents would otherwise wait for nothing.
 
     Args:
         record: Ledger record of the blocking issue, or an empty mapping.
 
     Returns:
-        True when the blocker is complete or ended on the forge.
+        True when the blocker is complete, ended on the forge, or closed on
+        the forge.
     """
-    return state(record)["state"] == COMPLETE or bool(
-        record.get("ended_on_forge")
+    from agent_parley import issues
+
+    return (
+        state(record)["state"] == COMPLETE
+        or bool(record.get("ended_on_forge"))
+        or bool(record and issues.closed(record))
     )
 
 
