@@ -138,6 +138,24 @@ def _prune(root: str, lane: Path) -> dict:
     return {"worktree": PRUNED if removed else KEPT, "dirty": []}
 
 
+def _awaits(record: dict) -> bool:
+    """Reports whether a claim is ready work still awaiting integration.
+
+    Ready work whose issue closed on the forge inside the claim's generation
+    has nothing left to integrate, so it may be released like any other
+    claim, as `lifecycle.released` allows.
+
+    Args:
+        record: Published ledger record for one issue.
+
+    Returns:
+        Whether the claim is ready and its issue has not closed.
+    """
+    return lifecycle.state(record)[
+        "state"
+    ] == lifecycle.READY and not issues.closed(record)
+
+
 def _return_work(directory: Path, manifest: dict, name: str) -> dict:
     """Returns every piece of work a retiring lane holds or was offered.
 
@@ -160,11 +178,7 @@ def _return_work(directory: Path, manifest: dict, name: str) -> dict:
     """
     ledger = issues.snapshot(directory)
     held = issues.holders(ledger).get(name, [])
-    ready = [
-        number
-        for number in held
-        if lifecycle.state(ledger["issues"][number])["state"] == lifecycle.READY
-    ]
+    ready = [number for number in held if _awaits(ledger["issues"][number])]
     if ready:
         listed = ", ".join(f"#{number}" for number in ready)
         raise BridgeError(
@@ -274,3 +288,139 @@ def withdraw(directory: Path, name: str) -> dict:
         mark(directory, name, at)
         (directory / f"{name}-identity.json").unlink(missing_ok=True)
         return {"participant": name, "retired_at": at, **work, **worktree}
+
+
+def abandon(directory: Path, name: str, cap: int | None = None) -> dict:
+    """Returns the work a lane supervision proved dead still holds.
+
+    A dead lane cannot retire itself and never answers, so everything that
+    waits on it waits for nothing. Supervision calls this once the lane is
+    proved dead, and the lane's own transitions are applied on its behalf,
+    as a retirement would apply them, but the lane is not retired: its
+    worktree, branch, credential and roster entry stay, so an operator can
+    still resume it, and a resumed lane finds its claims in the pool.
+
+    Offers made to the lane are declined back to their senders. Each claim
+    it holds is released to the pool, and a claim a live peer asked to take
+    over is then claimed for that peer. A claim with a pending offer is kept,
+    because the recipient's acceptance moves it without the dead lane, and
+    ready work whose issue has not closed is kept, because it must stay
+    claimed until verified integration completes. Requests the lane made are
+    withdrawn, and every completion reminder addressed to it is stamped
+    answered by the supervisor, so no peer is shown a reminder the lane will
+    never answer. Nothing in the worktree is touched.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant proved dead.
+        cap: Most claims one lane may hold, applied to a requesting peer.
+
+    Returns:
+        The issues released, the offers declined, the claims kept with the
+        lane, and the issues handed to the peer that requested them.
+
+    Raises:
+        LockBusy: If another lane command holds the lane's checkpoint lock
+            past `LOCK_SECONDS`; nothing was changed.
+    """
+    report: dict = {"released": [], "declined": [], "kept": [], "given": {}}
+    with lock(directory / f"{name}-checkpoint.lock", timeout=LOCK_SECONDS):
+        manifest = roster.read(directory)
+        participant = manifest["participants"].get(name)
+        if participant is None or roster.retired(participant):
+            return report
+        participants = set(manifest["participants"])
+        ledger = issues.snapshot(directory)
+        for number in sorted(ledger["issues"], key=int):
+            offer = ledger["issues"][number].get("offer") or {}
+            if offer.get("to") != name or not offer.get("id"):
+                continue
+            try:
+                issues.change(
+                    directory,
+                    name,
+                    "decline",
+                    number,
+                    participants=participants,
+                    offer_id=str(offer["id"]),
+                )
+            except BridgeError:
+                continue
+            report["declined"].append(number)
+        ledger = issues.snapshot(directory)
+        for number in issues.holders(ledger).get(name, []):
+            record = ledger["issues"][number]
+            if record.get("offer") or _awaits(record):
+                report["kept"].append(number)
+                continue
+            request = record.get("request") or {}
+            peer = (
+                str(request.get("to") or "")
+                if issues.offer_source(request) == issues.PEER
+                else ""
+            )
+            try:
+                issues.change(
+                    directory,
+                    name,
+                    "release",
+                    number,
+                    participants=participants,
+                )
+            except BridgeError:
+                report["kept"].append(number)
+                continue
+            report["released"].append(number)
+            if peer in participants - {name} and not issues.closed(record):
+                try:
+                    issues.change(
+                        directory,
+                        peer,
+                        "claim",
+                        number,
+                        participants=participants,
+                        cap=cap,
+                    )
+                except BridgeError:
+                    continue
+                report["given"][number] = peer
+        _silence(directory, name)
+    return report
+
+
+def _silence(directory: Path, name: str) -> None:
+    """Withdraws a dead lane's requests and answers its reminders.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant proved dead.
+    """
+    now = time.time()
+    with lock(directory / "issues.lock", timeout=LOCK_SECONDS):
+        ledger = issues.snapshot(directory)
+        changed = False
+        for record in ledger["issues"].values():
+            request = record.get("request") or {}
+            if request.get("to") == name:
+                record["request"] = None
+                lifecycle.append_history(
+                    record,
+                    {
+                        "action": "withdraw",
+                        "actor": "supervisor",
+                        "at": now,
+                        "owner": record.get("owner"),
+                        "offer": record.get("offer"),
+                        "request": None,
+                        "offer_id": request.get("id"),
+                        "claim_id": record.get("claim_id"),
+                    },
+                )
+                changed = True
+            prompt = record.get("handoff_prompt") or {}
+            if prompt.get("holder") == name and not prompt.get("responded_at"):
+                prompt.update(responded_at=now, answered_by="supervisor")
+                changed = True
+        if changed:
+            ledger["revision"] += 1
+            write_json(directory / "issues.json", ledger)

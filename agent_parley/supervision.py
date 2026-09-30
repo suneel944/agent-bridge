@@ -4034,7 +4034,9 @@ def orphan_decision(
                 "detail": (
                     f"{name} stayed dead after {WORK_WAKE_ATTEMPTS} wakes; "
                     f"{choice}; or retry agent-parley run {name} --resume "
-                    f"--repo {root}. Nothing moves until you act."
+                    f"--repo {root}. Unless you act, the service returns "
+                    "its claims and reservations once it has been dead for "
+                    "the orphan ceiling."
                 ),
             },
         )
@@ -4525,6 +4527,175 @@ def _announce_return(
                 f"Orphan marker withdrawn for {name}",
                 body,
                 f"orphan-return:{digest}",
+            )
+
+
+def dead_reason(
+    home: Path, directory: Path, manifest: dict, name: str, ceiling: float
+) -> str:
+    """States why a lane is proved dead, or nothing while it may return.
+
+    Two readings prove a lane dead. A lane whose state record has read
+    `dead` for the ceiling or longer has no session process for the current
+    boot, and wakes had that long to bring it back. A lane with no state
+    record and no activity file was added and never launched, and one whose
+    worktree was created at least the ceiling ago is waited on for nothing.
+    A retired lane, a lane in any other state, and a lane whose worktree
+    cannot be read are never proved dead.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant whose lane is read.
+        ceiling: Seconds a lane stays dead or unlaunched before it is proved
+            dead, the project's `orphan_retire_after`.
+
+    Returns:
+        One clause naming the evidence, or an empty string.
+    """
+    participant = manifest["participants"][name]
+    if roster.retired(participant):
+        return ""
+    now = time.time()
+    record = condition(home, manifest["root"], name)
+    if record is not None:
+        since = float(record.get("since") or now)
+        if record["state"] != lanes.DEAD or now - since < ceiling:
+            return ""
+        evidence = record.get("evidence") or "no session process"
+        return f"{name} has been dead for {int(now - since)}s ({evidence})"
+    if (directory / f"{name}-activity.json").exists():
+        return ""
+    try:
+        added = (Path(participant["lane"]) / ".git").stat().st_mtime
+    except OSError:
+        return ""
+    if now - added < ceiling:
+        return ""
+    return f"{name} was added {int(now - added)}s ago and never launched"
+
+
+def dead_lanes(
+    home: Path, directory: Path, manifest: dict, config: dict
+) -> None:
+    """Returns the work and reservations of every lane proved dead.
+
+    A dead lane's claims, the offers made to it, the requests it made and
+    its advisory reservations used to stay with it until the operator
+    retired it, so peers queued behind it waited for nothing and every
+    reminder it could not answer kept being shown to them. Once
+    `dead_reason` proves a lane dead, `retirement.abandon` returns its work
+    and `store.release_dead_holder` releases its reservations and grants
+    them to the peers queued for them, each told in the grant. The lanes
+    that can act are told once what moved and what stayed. The lane is not
+    retired and its worktree is never touched, so the operator can still
+    resume it; a lane that returns finds its claims in the pool.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+    """
+    from agent_parley import retirement
+
+    root = manifest["root"]
+    proved = {
+        name: reason
+        for name in manifest["participants"]
+        if (
+            reason := dead_reason(
+                home, directory, manifest, name, config["orphan_retire_after"]
+            )
+        )
+    }
+    if not proved:
+        return
+    records = {
+        name: condition(home, root, name) for name in manifest["participants"]
+    }
+    audience = _audience(manifest, records, set(proved))
+    for name, reason in proved.items():
+        try:
+            work = retirement.abandon(
+                directory, name, config["max_claims_per_lane"]
+            )
+        except (BridgeError, OSError, ValueError) as exc:
+            issues.note_supervision_error(directory, f"dead lane {name}: {exc}")
+            continue
+        try:
+            keys = store.release_dead_holder(
+                home,
+                root,
+                manifest["participants"][name]["display"],
+                f"{reason}, so the service released it",
+            )
+        except (BridgeError, OSError, sqlite3.Error):
+            keys = {"released": [], "granted": []}
+        _announce_dead(home, manifest, audience, name, reason, work, keys)
+
+
+def _announce_dead(
+    home: Path,
+    manifest: dict,
+    audience: list[str],
+    name: str,
+    reason: str,
+    work: dict,
+    keys: dict,
+) -> None:
+    """Tells every lane that can act once what a dead lane gave back.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Current participant manifest.
+        audience: Participants that are neither dead, reclaimed nor retired.
+        name: Participant proved dead.
+        reason: Evidence that proved it dead.
+        work: What `retirement.abandon` returned.
+        keys: What `store.release_dead_holder` released and granted.
+    """
+
+    def listed(numbers: list[str]) -> str:
+        """Joins issue numbers, or says there were none."""
+        return ", ".join(f"#{number}" for number in numbers) or "none"
+
+    if not (work["released"] or work["declined"] or keys["released"]):
+        return
+    given = ", ".join(
+        f"#{number} to {peer}" for number, peer in work["given"].items()
+    )
+    granted = ", ".join(
+        f"{', '.join(entry['paths'])} to {entry['agent']}"
+        for entry in keys["granted"]
+    )
+    body = (
+        f"{reason}, so the service returned what it held. Claims released "
+        f"to the pool: {listed(work['released'])}. Claimed for the peer that "
+        f"requested them: {given or 'none'}. Offers declined back to their "
+        f"senders: {listed(work['declined'])}. Claims kept with {name}: "
+        f"{listed(work['kept'])}, ready work awaiting integration or an "
+        "offer its recipient can accept. Reservations released: "
+        f"{', '.join(keys['released']) or 'none'}; granted from the queue: "
+        f"{granted or 'none'}. Reservations are advisory, so nothing on disk "
+        f"changed, and {name}'s worktree is kept. The operator can resume it "
+        f"with agent-parley run {name} --resume."
+    )
+    digest = hashlib.sha256(
+        json.dumps([name, work, keys["released"]], sort_keys=True).encode()
+    ).hexdigest()[:32]
+    for peer in audience:
+        if peer == name:
+            continue
+        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+            store.speak(
+                home,
+                manifest["root"],
+                manifest["participants"][peer]["display"],
+                f"{name} is dead; its work returned",
+                body,
+                f"dead-lane:{digest}:{peer}",
             )
 
 
@@ -5464,6 +5635,7 @@ def _poll(home: Path, directory: Path) -> None:
     with contextlib.suppress(BridgeError, sqlite3.Error):
         store.reclaim_expired(home, manifest["root"])
     stage("deliveries", deliveries, home, directory, manifest)
+    stage("dead lanes", dead_lanes, home, directory, manifest, config)
     stage("dependencies", lifecycle.settle_dependencies, directory)
     stage("forge issues", refresh_forge_issues, directory, manifest)
     if config["prompts"]:

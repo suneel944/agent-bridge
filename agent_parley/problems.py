@@ -448,7 +448,9 @@ def _retire_rows(
     lane is ready to retire. A lane whose session process is alive is never
     offered retirement, whatever its markers say, because `participant
     retire` refuses a lane with a running session. The row only names the
-    command: the sweep never releases held work on its own.
+    command: the sweep never retires a lane on its own. Supervision returns
+    the work of a lane it proved dead, but leaves the lane itself for the
+    operator to retire or resume.
 
     Args:
         record: One participant record from the status reading.
