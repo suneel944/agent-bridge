@@ -56,6 +56,8 @@ def checkout(directory: Path) -> tuple[bool, bool | None]:
     Membership is read from a ``.git`` entry in the directory or a parent,
     so a slow or missing Git never makes a plain directory read as a
     checkout; Git runs only to learn whether a found checkout is dirty.
+    It runs with ``--no-optional-locks`` so the reading never refreshes
+    and rewrites the checkout's index.
 
     Args:
         directory: Directory to inspect.
@@ -71,7 +73,7 @@ def checkout(directory: Path) -> tuple[bool, bool | None]:
         return False, False
     try:
         finished = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=directory,
             stdin=subprocess.DEVNULL,
             capture_output=True,

@@ -132,6 +132,31 @@ def test_running_service_and_registered_project_offer_the_dashboard(
     assert "agent-parley top" in printed
 
 
+def snapshot(root):
+    """Maps every path under a directory to its size and modification time."""
+    return {
+        str(entry): (entry.stat().st_size, entry.stat().st_mtime_ns)
+        for entry in sorted(root.rglob("*"))
+    }
+
+
+def test_existing_state_and_checkout_are_left_untouched(
+    path, bridge, repo, paired, monkeypatch, capsys
+):
+    path("claude")
+    (repo / "shared.txt").write_text("changed\n")
+    (bridge.home / "server.json").write_text('{"pid": 1, "start_ticks": "1"}')
+    monkeypatch.setattr(
+        process, "identify", lambda record, home: process.ServerProcess(1, "1")
+    )
+    state = snapshot(bridge.home)
+    checkout = snapshot(repo)
+    screen(capsys, bridge.home, repo)
+    after = snapshot(bridge.home), snapshot(repo)
+    (bridge.home / "server.json").unlink()
+    assert after == (state, checkout)
+
+
 def test_bare_entry_does_not_load_the_command_surface(
     path, tmp_path, monkeypatch
 ):
