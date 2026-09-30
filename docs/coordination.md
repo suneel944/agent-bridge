@@ -20,8 +20,8 @@ checkpoint. A dependency never stops a claim, but it keeps the issue out of the
 unclaimed work lanes are shown, and `report ready` and a verified completion
 refuse while a dependency is incomplete. A block on an unrecorded issue or one
 that would form a cycle is refused, and the supervisor drops an edge once its
-blocker is complete, was released after it ended on the forge, or is no longer
-recorded.
+blocker is complete, was released after it ended on the forge, is closed on the
+forge while a lane still holds it, or is no longer recorded.
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-issues.svg" width="880" alt="agent-parley issue list showing an issue that waits on another, the participant holding it, and a pending handoff with its offer ID">
@@ -156,7 +156,7 @@ tool again, or progress recorded on an idle claim, cancels the sequence. A
 claim observed complete is never moved; its completion reminder and the
 operator's `issue resolve` end it.
 
-## A dead lane's claims are offered, never taken away
+## A dead lane's claims are offered, then returned
 
 A lane whose state record reads `dead` has its claims marked `orphaned` in
 `issue list`, `status` and `top`, which marks the issue `#42*`. A lane is
@@ -186,6 +186,19 @@ stop with a checkpoint, not a crash.
 ```sh
 agent-parley issue claim 42 --take-orphaned
 ```
+
+A lane that nobody takes over is not waited on forever. Supervision proves a
+lane dead when its state record has read `dead` for `orphan_retire_after`
+(3600 seconds), or when it has no state record, no activity file and a
+worktree at least that old, meaning it was added and never launched. The
+`dead lanes` poll stage then declines the offers made to it, releases its
+claims to the pool, and claims a released issue for the live peer that
+requested it. Ready work that still waits on integration stays with it. Its
+requests are withdrawn, the reminders about it are answered, and its advisory
+reservations are released, each granted to the first queued peer with a notice
+that says why. Every lane that can act is told once what moved. The lane is not
+retired and its worktree, branch and credential are kept, so the operator can
+still resume it; a lane that returns finds its claims in the pool.
 
 ## A budget informs; it does not gate
 
