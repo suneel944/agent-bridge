@@ -24,6 +24,7 @@ exclude:
   - CHANGELOG.md
   - AGENTS.md
   - CLAUDE.md
+  - docs/video
 defaults:
   - scope:
       path: README.md
