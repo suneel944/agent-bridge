@@ -2059,6 +2059,17 @@ stalled` row until the head finishes or changes. Nothing is re-run, merged or
 bypassed automatically. A forge whose checks report no start time is never
 marked stalled.
 
+A red verdict also keeps, per head commit, the attempt count and when it was
+first seen red, incrementing once per rerun that ends red again on the same
+commit. `problems` lists one `checks failed` row per pull request naming the
+failing checks and the attempt. A required check the forge reports as never
+started (`action_required` or `startup_failure`) is different: only the
+operator can act on it, so every open pull request sharing the same check
+name and forge conclusion is grouped into one `checks refused` row naming
+every affected pull request, and one decision, opened through
+`decisions.open_or_refresh` and keyed by that check name and conclusion, so
+the operator answers the shared cause once rather than once per lane.
+
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
 complete. The reminder is written once and a silent lane is asked

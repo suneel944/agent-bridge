@@ -75,6 +75,8 @@ PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
 CHECKS = "checks stalled"
+CHECKS_FAILED = "checks failed"
+CHECKS_REFUSED = "checks refused"
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -1335,6 +1337,111 @@ def _checks_rows(directory: Path, root: str, now: float) -> list[dict]:
     ]
 
 
+def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each open pull request whose head's checks ran and failed.
+
+    A check the forge never started names an operator cause and is reported
+    by `_checks_refused_rows` instead, grouped across every pull request it
+    blocks rather than once per lane.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the attempt's age is measured against.
+
+    Returns:
+        One row per open pull request whose checks are red and report at
+        least one check the forge ran and failed.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    rows = []
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        ran = [
+            check
+            for check in reading.get("failed") or []
+            if not check.get("not_started")
+        ]
+        if not ran:
+            continue
+        rows.append(
+            _row(
+                CHECKS_FAILED,
+                f"pull request #{reading.get('number')} checks failed "
+                f"(attempt {reading.get('red_attempts') or 1}): "
+                + ", ".join(
+                    f"{check['name']} {check['conclusion']}" for check in ran
+                ),
+                f"gh pr checks {reading.get('url')}, then fix and push or "
+                "re-run",
+                _age(reading.get("red_since"), now),
+                str(reading.get("lane") or ""),
+                root,
+            )
+        )
+    return rows
+
+
+def _checks_refused_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each cause blocking pull requests the forge refused to start.
+
+    Every open pull request whose head reports a required check the forge
+    never started shares one row per check name and conclusion, naming every
+    pull request it blocks, so the operator answers the cause once rather
+    than once per lane. `supervision.pull_request_wakes` opens the matching
+    decision; this row only reads the same cached reading.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the oldest occurrence's age is measured against.
+
+    Returns:
+        One row per distinct check name and forge conclusion an open pull
+        request's red head reports as never started.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        for check in reading.get("failed") or []:
+            if check.get("not_started"):
+                key = (str(check["name"]), str(check["conclusion"]))
+                groups.setdefault(key, []).append(reading)
+    rows = []
+    for (name, conclusion), members in groups.items():
+        numbers = sorted(int(item["number"]) for item in members)
+        listed = ", ".join(f"#{number}" for number in numbers)
+        rows.append(
+            _row(
+                CHECKS_REFUSED,
+                f"{len(numbers)} pull requests blocked: required job "
+                f"{name!r} not started, forge reports {conclusion}: "
+                f"{listed}",
+                "resolve at the forge (billing, spending limit or manual "
+                "approval), then re-run once",
+                max(_age(item.get("red_since"), now) for item in members),
+                project=root,
+                count=len(numbers),
+            )
+        )
+    return rows
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1409,6 +1516,8 @@ def derive(
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
         aged.extend(_checks_rows(directory, project["root"], stamp))
+        aged.extend(_checks_failed_rows(directory, project["root"], stamp))
+        aged.extend(_checks_refused_rows(directory, project["root"], stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )
