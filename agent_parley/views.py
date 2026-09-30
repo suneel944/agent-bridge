@@ -615,6 +615,7 @@ def _row(row: dict) -> dict:
         "queued_requests": row["queued"],
         "queued_by": list(row["queued_by"]),
         "injected_bytes": row["injected_bytes"],
+        "injected_bytes_per_hour": row.get("injected_per_hour", 0),
         "hook_events": row["hook_events"],
         "denials": row["denials"],
         "denied_by": [dict(item) for item in row.get("denied_by") or []],

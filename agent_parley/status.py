@@ -875,6 +875,7 @@ class StatusMixin(BridgeCore):
             ),
             "injected_bytes": state.get("injected_bytes", 0),
             "injections": state.get("injections", 0),
+            "injected_per_hour": checkpoints.hourly_rate(state),
             "claims": [
                 {
                     "issue": int(number),

@@ -984,7 +984,9 @@ def lane_detail(record: dict, data: dict) -> None:
         )
     print(
         f"    Context delivered: {record['injected_bytes']} "
-        f"UTF-8 bytes in {record['injections']} notices"
+        f"UTF-8 bytes in {record['injections']} notices; "
+        f"{record.get('injected_per_hour', 0)} bytes per hour over the "
+        "last day"
     )
     if record["report_age_seconds"] is not None:
         print(f"    Report age: {record['report_age_seconds']}s")
