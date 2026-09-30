@@ -2704,6 +2704,7 @@ def reminders(
     manifest: dict,
     closed: set[str],
     landed: dict[str, str] | None = None,
+    closed_at: dict[str, float] | None = None,
 ) -> None:
     """Records idempotent reminders without releasing or transferring claims.
 
@@ -2713,6 +2714,12 @@ def reminders(
     it can still do, so it is stamped answered and leaves the lane's wake
     backlog, delivery and listing.
 
+    An explicit completion message may reach the store before this poll
+    notices the release or the forge close it answers, since the forge and
+    the store are read independently. The reminder therefore records the
+    release or the close's own instant, not this poll's, so a message
+    already sent when the reminder is written still counts.
+
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
@@ -2721,14 +2728,9 @@ def reminders(
         landed: Another lane that landed the closing pull request, per issue
             number, named in the reminder so the owner and the operator
             reading it learn a peer finished the claim.
+        closed_at: The forge's own close or merge instant, per issue number,
+            for every issue in `closed` the forge could report one for.
     """
-    after_message_id = 0
-    home = directory.parent.parent
-    if (home / store.DATABASE).exists():
-        with store.connect(home) as db:
-            after_message_id = db.execute(
-                "SELECT coalesce(max(id),0) FROM messages"
-            ).fetchone()[0]
     with lock(directory / "issues.lock", timeout=1):
         ledger = issues.snapshot(directory)
         changed = False
@@ -2766,13 +2768,18 @@ def reminders(
             identifier = f"{number}:{history[-1]['at']}:{trigger}"
             if record.get("handoff_prompt", {}).get("id") == identifier:
                 continue
+            since = (
+                float(history[-1]["at"])
+                if released
+                else float((closed_at or {}).get(number, time.time()))
+            )
             recipients = ", ".join(waiting) or "project peers"
             record["handoff_prompt"] = {
                 "id": identifier,
                 "holder": holder,
                 "waiting": waiting,
                 "created": time.time(),
-                "after_message_id": after_message_id,
+                "since": since,
                 "trigger": trigger,
                 "text": (
                     f"Issue #{number}: {trigger}. {holder}, send an explicit "
@@ -4766,10 +4773,12 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
 
     Returns:
         One observation per ended issue number: the branch the work landed
-        from, the pull request state, the instant it was observed and, when
-        the forge named one, the closing pull request's number, URL and merge
-        commit with the claim it was read for. `landed_by` names another
-        lane whose lane branch carried the closing pull request, or whose
+        from, the pull request state, the instant it was observed, the
+        forge's own close instant when the forge named the issue rather than
+        only the branch and, when the forge named one, the closing pull
+        request's number, URL and merge commit with the claim it was read
+        for. `landed_by` names another lane whose lane branch carried the
+        closing pull request, or whose
         worktree alone checked out the
         per-issue branch it came from.
     """
@@ -4811,6 +4820,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "branch": reading["branch"] or f"issue #{number}",
                 "state": reading["state"],
                 "observed_at": time.time(),
+                "closed_at": reading["closed_at"],
                 "pull_request": reading["pull_request"],
                 "url": reading["url"],
                 "commit": reading["commit"],
@@ -6129,6 +6139,11 @@ def _remind(
             for number, seen in ended.items()
             if seen.get("landed_by")
         },
+        {
+            number: seen["closed_at"]
+            for number, seen in ended.items()
+            if seen.get("closed_at")
+        },
     )
     stage("deadline defaults", deadline_defaults, directory, manifest)
     stage("deadline notices", deadline_notices, directory, manifest)
@@ -6191,11 +6206,11 @@ def observe_responses(home: Path, directory: Path, manifest: dict) -> None:
                     "LEFT JOIN message_recipients r ON r.message_id=m.id "
                     "LEFT JOIN agents recipient ON recipient.id=r.agent_id "
                     "WHERE p.human_key=? AND sender.name=? "
-                    "AND m.id>?",
+                    "AND m.created_ts>=datetime(?,'unixepoch')",
                     (
                         manifest["root"],
                         holder["display"],
-                        prompt.get("after_message_id", 0),
+                        prompt.get("since", prompt.get("created", 0)),
                     ),
                 ).fetchall()
                 recipients = {row["name"] for row in rows if row["name"]}
