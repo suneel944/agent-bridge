@@ -715,8 +715,13 @@ class StatusMixin(BridgeCore):
             observed["evidence"] = condition["evidence"]
             age = observed["age_seconds"]
             inferred = lanes.inference(provenance)
+            cause = supervision.provider_error(directory, agent)
             liveness = (
-                lanes.describe(condition)
+                lanes.describe(
+                    {**condition, "cause": cause}
+                    if cause and condition["state"] == lanes.IDLE
+                    else condition
+                )
                 + (f"; event {age}s ago" if age is not None else "")
                 + (f"; {inferred}" if inferred else "")
             )

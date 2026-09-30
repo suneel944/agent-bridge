@@ -1213,6 +1213,22 @@ def published_capacity(directory: Path, name: str) -> dict:
     return {**UNKNOWN_CAPACITY, **value}
 
 
+def provider_error(directory: Path, name: str) -> str:
+    """Names the idle cause a retryable provider failure gives one lane.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose capacity observation is read.
+
+    Returns:
+        `lanes.PROVIDER_ERROR` when the lane's last durable capacity
+        observation is retryable, otherwise an empty string.
+    """
+    if published_capacity(directory, name)["state"] == "retryable":
+        return lanes.PROVIDER_ERROR
+    return ""
+
+
 def record_capacity(directory: Path, name: str, observation: dict) -> dict:
     """Persists a newer validated capacity or bounded-probe outcome.
 
@@ -5955,7 +5971,10 @@ def account_lanes(home: Path, directory: Path, manifest: dict) -> None:
     """Charges this poll's span to every lane's idle and claim totals.
 
     Work exists for a lane when it owns an open claim or the ledger holds
-    an unclaimed, unblocked issue any lane could take.
+    an unclaimed, unblocked issue any lane could take. An idle lane whose
+    last provider-capacity observation is retryable ended its turn on a
+    provider or transport error, so its gap is charged to
+    `lanes.PROVIDER_ERROR` rather than to plain idleness.
 
     Args:
         home: Private bridge state root.
@@ -5974,6 +5993,7 @@ def account_lanes(home: Path, directory: Path, manifest: dict) -> None:
                 lanes.read(db, manifest["root"], name),
                 has_work=claimable or bool(owned.get(name)),
                 owns=bool(owned.get(name)),
+                idle_cause=provider_error(directory, name),
             )
 
 
@@ -6865,9 +6885,12 @@ def wake(
     overdue-claim transition in `overdue_claims`, and its orphaned claims
     become one operator decision through `orphan_decision`.
 
-    A durable retryable capacity observation is itself a backlog reason, so a
-    lane whose client stopped on a transient provider error resumes on this
-    bounded backoff rather than on the silence budget. The reason is keyed by
+    A durable retryable capacity observation is itself a backlog reason while
+    the lane holds an actionable claim, so a lane whose client stopped on a
+    transient provider or transport error, including a server error after a
+    partial response, resumes on this bounded backoff rather than on the
+    silence budget. A lane with no actionable claim is not woken for the
+    error alone, because its turn has no work to resume. The reason is keyed by
     the observation that recorded the block, so a newer transient failure
     schedules its own attempts and a restored capacity drops the reason. An
     exhausted lane is never woken this way, because only a later success, a
@@ -6976,7 +6999,8 @@ def wake(
             (manifest["root"], participant["display"]),
         ).fetchone()[0]
     backlog = _mail_digest(pending)
-    ledger = issues.snapshot(directory)["issues"].values()
+    snapshot = issues.snapshot(directory)
+    ledger = snapshot["issues"].values()
     backlog.extend(
         record["handoff_prompt"]["id"]
         for record in ledger
@@ -6997,7 +7021,9 @@ def wake(
         == "wake"
     )
     capacity = published_capacity(directory, name)
-    if capacity["state"] == "retryable":
+    if capacity["state"] == "retryable" and lifecycle.actionable(
+        snapshot, name
+    ):
         backlog.append(f"capacity:{capacity['observation_id']}")
     with lock(directory / f"{name}-wake.lock"):
         work_item = _work_backlog(
