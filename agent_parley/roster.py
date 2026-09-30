@@ -198,6 +198,51 @@ def branch_prefix(value: str) -> str:
     return value
 
 
+def branch_name(value: object) -> bool:
+    """Reports whether a value is one usable Git branch name.
+
+    Args:
+        value: Candidate branch name.
+
+    Returns:
+        Whether the value matches `TARGET_BRANCH` and holds no `..`, no
+        repeated slash and no trailing slash, dot or `.lock`.
+    """
+    return (
+        isinstance(value, str)
+        and bool(TARGET_BRANCH.fullmatch(value))
+        and ".." not in value
+        and "//" not in value
+        and not value.endswith(("/", ".", ".lock"))
+    )
+
+
+def integration_base(value: object) -> str:
+    """Validates the branch a milestone's pull requests merge into.
+
+    Work merged into this branch counts as landed for the claim it closes,
+    though the forge leaves its issue open until the branch crosses to the
+    default branch. An empty value records no integration base.
+
+    Args:
+        value: Candidate branch name, or an empty string.
+
+    Returns:
+        The accepted branch name, empty when none is recorded.
+
+    Raises:
+        BridgeError: If the value is neither empty nor one Git branch name.
+    """
+    if value == "":
+        return ""
+    if not branch_name(value):
+        raise BridgeError(
+            "The integration base must be one Git branch name, such as "
+            "integration/1.0.0, or an empty string to remove it."
+        )
+    return str(value)
+
+
 def next_lane_branch(manifest: dict, key: str, taken: set[str]) -> str:
     """Derives the next neutral branch name for a new lane.
 
@@ -1055,6 +1100,11 @@ def normalize(manifest: dict) -> dict:
         "pull_request": pull_request_policy(manifest.get("pull_request", {})),
         "integration": manifest.get("integration", {}),
         **(
+            {"integration_base": integration_base(manifest["integration_base"])}
+            if manifest.get("integration_base")
+            else {}
+        ),
+        **(
             {"timeouts": manifest["timeouts"]}
             if manifest.get("timeouts")
             else {}
@@ -1279,13 +1329,7 @@ def integration_policy(value: object) -> dict:
             invalid + "`unattended` must name exactly `target` and `issues`."
         )
     target = unattended["target"]
-    if (
-        not isinstance(target, str)
-        or not TARGET_BRANCH.fullmatch(target)
-        or ".." in target
-        or "//" in target
-        or target.endswith(("/", ".", ".lock"))
-    ):
+    if not branch_name(target):
         raise BridgeError(invalid + "`target` must be one Git branch name.")
     numbers = unattended["issues"]
     if (

@@ -76,6 +76,7 @@ PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
 CHECKS = "checks stalled"
+CROSSING = "crossing ready"
 CHECKS_FAILED = "checks failed"
 CHECKS_REFUSED = "checks refused"
 
@@ -1410,6 +1411,54 @@ def _checks_rows(directory: Path, root: str, now: float) -> list[dict]:
     ]
 
 
+def _crossing_rows(project: dict, now: float) -> list[dict]:
+    """Asks the operator once to cross a fully landed integration base.
+
+    When no claim is held and at least one issue landed in the integration
+    base still waits on the forge, the milestone's work sits complete on a
+    branch the default branch never received. Merging it there cannot be
+    undone, so the row only asks: nothing opens or merges the crossing pull
+    request for the operator. The row clears once a claim is held again or
+    the forge closes the landed issues. Without a whole reading of the
+    forge's open issues, a landed issue the crossing already closed cannot
+    be told apart, so no row is raised. The row ages from the newest
+    landing or the newest claim end, whichever is later, so the claim that
+    last stopped holding the work is what opens the decision.
+
+    Args:
+        project: One project of the status reading.
+        now: Unix time the landing ages are measured against.
+
+    Returns:
+        One row while the integration base is fully landed, or none.
+    """
+    integration = project.get("integration") or {}
+    landed = integration.get("landed") or []
+    if not landed or integration.get("held") or not integration.get("catalog"):
+        return []
+    base = str(integration["base"])
+    return [
+        _row(
+            CROSSING,
+            f"every claim landed in {base}: "
+            + ", ".join(f"#{item['issue']}" for item in landed)
+            + "; the default branch has not received them",
+            f"gh pr create --head {shlex.quote(base)}, naming each landed "
+            "issue as Closes #N in its body; review and merge it yourself, "
+            "since that merge cannot be undone",
+            _age(
+                max(
+                    float(integration.get("settled_at") or 0),
+                    *(float(item.get("at") or 0) for item in landed),
+                ),
+                now,
+            ),
+            project=str(project["root"]),
+            count=len(landed),
+        )
+    ]
+
+
 def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
     """Reports each open pull request whose head's checks ran and failed.
 
@@ -1592,6 +1641,7 @@ def derive(
         aged.extend(_checks_rows(directory, project["root"], stamp))
         aged.extend(_checks_failed_rows(directory, project["root"], stamp))
         aged.extend(_checks_refused_rows(directory, project["root"], stamp))
+        aged.extend(_crossing_rows(project, stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )

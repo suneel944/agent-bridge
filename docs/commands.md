@@ -120,8 +120,9 @@ on standard output and export to a file.
 | `credentials show NAME` | Show one profile with every recorded value redacted: the config home, the override names and the variables required from your shell. |
 | `credentials add NAME` | Define a config home and environment requirements. |
 | `credentials remove NAME` | Delete a profile definition, preserving native files and logins. |
-| `branch show` | Show the prefix new lane branches are created under. |
+| `branch show` | Show the prefix new lane branches are created under and the recorded integration base. |
 | `branch set PREFIX` | Set that prefix; existing lanes keep their branch. |
+| `branch integration BRANCH` | Record the non-default branch a milestone's pull requests merge into, operator-only; a pull request merged there that closes a claimed issue lands the claim. An empty string removes it. |
 | `forge show` | Show the issue tracker this project coordinates over. |
 | `forge set NAME` | Select `github`, `beads` or `null`; only `github` opens pull requests. |
 | `resources show` | Show the named resources lanes may reserve. |
