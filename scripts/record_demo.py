@@ -40,8 +40,9 @@ Regenerate with ``make demo-stub``, or::
     uv run --locked python scripts/record_demo.py
 
 The result is written to ``docs/assets/demo.svg`` and is the published
-asset. ``scripts/record_live.py`` (``make demo``) records real clients
-instead and needs model quota. The asset is
+asset; ``--short`` writes the README's first-screen cut to
+``docs/assets/demo-short.svg`` instead. ``scripts/record_live.py``
+(``make demo``) records real clients instead and needs model quota. The asset is
 referenced from ``README.md`` through a pinned jsdelivr URL, because the
 README is also the PyPI long description and relative image paths do not
 resolve there.
@@ -66,8 +67,14 @@ from agent_parley.demo import (
     fixtures,
     git,
 )
-from agent_parley.demo_scenario import record
+from agent_parley.demo_scenario import record, tour
 
+SHORT = (
+    "ada claims #41 from inside its lane.",
+    "grace asks for the same paths: a named collision.",
+    "grace accepts; only then does ownership move.",
+    "The dashboard: state, issues, mail, leases, denials.",
+)
 TYPE_RATE = 0.028
 TYPE_LIMIT = 1.6
 FADE = 0.35
@@ -855,20 +862,26 @@ def screenshots(destination: Path) -> int:
 def main() -> int:
     """Records the demo and writes the asset.
 
-    Run with ``--screenshots`` to record the static screenshots instead.
+    Run with ``--screenshots`` to record the static screenshots instead, or
+    with ``--short`` to record the README's first-screen cut: the `tour`
+    steps whose captions `SHORT` names, written to ``demo-short.svg``.
 
     Returns:
         Zero when the recording and the asset were written.
+
+    Raises:
+        RuntimeError: If the short cut lost one of its captions.
     """
     destination = Path(__file__).resolve().parent.parent / "docs" / "assets"
     if "--screenshots" in sys.argv[1:]:
         return screenshots(destination)
+    short = "--short" in sys.argv[1:]
     with tempfile.TemporaryDirectory(prefix="agent-parley-demo-") as path:
         base = Path(path)
         home, binaries, repository = fixtures(base)
         recorder = Recorder(home, repository, environment(home, binaries, base))
         try:
-            record(recorder)
+            (tour if short else record)(recorder)
         finally:
             recorder.close()
         places = {
@@ -878,11 +891,19 @@ def main() -> int:
             str(Path.home()): DEMO_HOME,
         }
         steps = rewritten(recorder.steps, places)
-    total = render(steps, destination / "demo.svg")
-    print(
-        f"{len(steps)} frames, {total:.0f}s, written to "
-        f"{destination / 'demo.svg'}"
-    )
+    name = "demo.svg"
+    if short:
+        name = "demo-short.svg"
+        chosen = [
+            step
+            for step in steps
+            if isinstance(step, Step) and step.caption in SHORT
+        ]
+        if [step.caption for step in chosen] != list(SHORT):
+            raise RuntimeError(f"short cut captions changed: {chosen}")
+        steps = list(chosen)
+    total = render(steps, destination / name)
+    print(f"{len(steps)} frames, {total:.0f}s, written to {destination / name}")
     return 0
 
 
