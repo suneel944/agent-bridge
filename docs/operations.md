@@ -472,6 +472,7 @@ condition, that count, its age and what clears it:
 | `shares to a retired lane` | Retirement superseded shares the lane still owed; the row sits on the retired lane, counts them and lasts while their acknowledgement deadlines run, or one day for a share without one. It is informational. | Nothing; the row clears when those deadlines pass. |
 | `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
 | `integration unverified` | The base checkout carries a merge that failed its gate, conflicted or was interrupted, or the record of one cannot be read. One row per project, on the lane that may repair it, naming the kind, the attempt and the gate result; every further merge is held. | The step the row names: rerun `agent-parley participant merge NAME` after the repair, `--renew-recovery` once attempts are used, or `agent-parley participant merge --verify-recovery` when no lane may repair it. See [Recovering an unverified integration](#recovering-an-unverified-integration). |
+| `crossing ready` | The project records an integration base, no claim is held, and every issue landed there by a merged pull request is still open on the forge. One row per project names them and ages from the newest landing; with notifications configured it opens one decision, which never applies anything. | `gh pr create --head BRANCH`, naming each landed issue as `Closes #N`; review and merge it yourself, since that merge cannot be undone. |
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
@@ -2015,7 +2016,27 @@ no lane's reflog moved to, or several did, is attributed to nobody. Only
 when the forge cannot say anything about the issue does the newest pull request
 on the lane branch speak for it, and a lane branch merge never marks a claimed
 issue the forge still reads as open. Issue readings are reused for five
-minutes. Forge lookups are bounded and best effort; an offline forge cannot
+minutes.
+
+A milestone integrated on a branch other than the default branch leaves every
+issue open until that branch crosses, because GitHub closes an issue from
+`Closes #N` only on a merge into the default branch. Record the branch once,
+from the base checkout: `agent-parley branch integration integration/1.0.0`
+(an empty string removes it; lanes are refused). The service then reads, at
+most once per five minutes, the newest 100 pull requests merged into that
+branch, and a claimed issue the forge still reads as open whose body a merged
+pull request closes by keyword, inside the claim's generation and from any
+branch, is observed as merged. Like any merged pull request that no other
+lane landed, it ends the claim as complete with actor `supervisor`, the pull
+request, merge commit and base kept in the evidence, so the claim leaves the
+lane, stops counting toward the cap, and is never woken, reminded or offered
+again. `status` prints `Landed in BRANCH: #N (PR #M), ...` for those issues
+until the forge closes them. When no claim is held and at least one landed
+issue is still open, `problems` lists one `crossing ready` row, and with
+notifications configured one decision asks the operator to open the crossing
+pull request (`gh pr create --head BRANCH`, naming each issue as `Closes #N`).
+Nothing opens or merges it for you: a merge to the default branch cannot be
+undone. Forge lookups are bounded and best effort; an offline forge cannot
 establish completion. Reminders appear in issue/status output and
 at checkpoints. An explicit subsequent message reaching every waiting peer
 marks a response observed; that is delivery evidence, not proof of a complete

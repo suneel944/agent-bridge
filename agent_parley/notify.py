@@ -152,6 +152,7 @@ PROBLEM_CONDITIONS = frozenset(
         "wake attention",
         "waiting on approval",
         "held by a native dialog",
+        "crossing ready",
     }
 )
 

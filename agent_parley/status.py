@@ -89,6 +89,31 @@ def forge_note(known: dict) -> str:
     return ""
 
 
+def landed_line(integration: dict) -> str:
+    """States in one line which issues landed in the integration base.
+
+    Args:
+        integration: The ``integration`` reading of one status project.
+
+    Returns:
+        Empty when nothing landed there. Otherwise the base, each landed
+        issue with its pull request, and that the issues wait only for the
+        crossing pull request.
+    """
+    if not integration.get("landed"):
+        return ""
+    listed = ", ".join(
+        f"#{item['issue']} (PR #{item['pull_request']})"
+        if item["pull_request"]
+        else f"#{item['issue']}"
+        for item in integration["landed"]
+    )
+    return (
+        f"Landed in {integration['base']}: {listed}; each waits only for "
+        "the crossing pull request to the default branch."
+    )
+
+
 def lane_state(record: dict) -> str:
     """Names the state one lane is in for the compact status view.
 
@@ -1005,6 +1030,7 @@ class StatusMixin(BridgeCore):
                             path.parent
                         ),
                         "supervision_poll": supervision.last_poll(path.parent),
+                        **self._integration(path.parent, data, context),
                     }
                 )
         return {
@@ -1013,6 +1039,42 @@ class StatusMixin(BridgeCore):
             "inbound": inbound_status(self.home),
             "outbound": notify.reported(notify.environment(self.home)),
             "projects": projects,
+        }
+
+    def _integration(self, directory: Path, data: dict, context: dict) -> dict:
+        """Reads the work landed in the project's integration base.
+
+        Args:
+            directory: Private state directory of the project.
+            data: Normalized project manifest.
+            context: Project reading from `_project_context`.
+
+        Returns:
+            Empty when no integration base is recorded. Otherwise
+            ``integration`` holding the base, the issues landed there that
+            the forge has not closed, and the issues still claimed.
+        """
+        from agent_parley.cli import issues
+
+        base = data.get("integration_base") or ""
+        if not base:
+            return {}
+        known = self.forge_issues(directory, data["root"])
+        ledger = context["ledger"]
+        return {
+            "integration": {
+                "base": base,
+                "landed": issues.landed(
+                    ledger, base, known["issues"] if known["complete"] else None
+                ),
+                "held": sorted(
+                    (
+                        int(number)
+                        for number, record in ledger["issues"].items()
+                        if record.get("owner")
+                    ),
+                ),
+            }
         }
 
     def _health(self, report: dict) -> None:
@@ -1291,6 +1353,8 @@ class StatusMixin(BridgeCore):
             if isinstance(polled.get("at"), (int, float)):
                 print(supervision_liveness(polled))
             print(describe(snapshot(path.parent)))
+            if line := landed_line(project.get("integration") or {}):
+                print(line)
             if measured := reclaim.summary_line(project.get("reclaim") or {}):
                 print(measured)
             if accounted := project.get("accounting"):

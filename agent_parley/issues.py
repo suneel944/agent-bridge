@@ -221,6 +221,51 @@ def closed(record: dict) -> bool:
     )
 
 
+def landed(ledger: dict, base: str, opened: dict | None) -> list[dict]:
+    """Lists the issues whose work landed in the integration base.
+
+    A claim ended through a pull request merged into the integration base
+    keeps its issue open on the forge until the base crosses to the default
+    branch, so the issue waits only on that crossing. Once the forge reports
+    the issue closed, it no longer waits and leaves the list.
+
+    Args:
+        ledger: Published issue ledger.
+        base: Recorded integration base, empty when none is recorded.
+        opened: Every open issue the forge reported, by bare number, or None
+            when no complete reading is known, which keeps every landing.
+
+    Returns:
+        One entry per issue in ascending order: its number, the pull
+        request's number and URL, and when the claim ended.
+    """
+    if not base:
+        return []
+    found = []
+    for number, record in sorted(
+        ledger.get("issues", {}).items(), key=lambda item: int(item[0])
+    ):
+        resolution = record.get("resolution") or {}
+        evidence = resolution.get("evidence") or {}
+        if (
+            record.get("owner")
+            or resolution.get("outcome") != "complete"
+            or evidence.get("base") != base
+            or lifecycle.state(record)["state"] != lifecycle.COMPLETE
+            or (opened is not None and number not in opened)
+        ):
+            continue
+        found.append(
+            {
+                "issue": int(number),
+                "pull_request": int(evidence.get("pull_request") or 0),
+                "url": str(evidence.get("url") or ""),
+                "at": float(resolution.get("at") or 0),
+            }
+        )
+    return found
+
+
 def deadline_notice(record: dict) -> dict:
     """Returns the deadline notice a record still stands behind.
 
