@@ -1981,7 +1981,7 @@ def _keys(
     for pattern in paths:
         _text(pattern, "path", 240)
         if named_resource(pattern):
-            if not roster.RESOURCE.fullmatch(pattern):
+            if not roster.resource_name(pattern):
                 raise BridgeError(
                     f"{pattern!r} is not a named resource; write a scheme and "
                     "a name, such as port:5432 or suite:integration."
@@ -2265,13 +2265,17 @@ def _reserve(
     checkpoint instead.
 
     A key written with a scheme, such as ``port:5432``, ``db:local``,
-    ``suite:integration`` or ``device:android-1``, reserves a named resource
-    rather than a path. Lanes collide on those as readily as on files, and a
-    worktree isolates neither. A named resource conflicts on an exact match
-    only: no glob, no prefix and no path containment applies to it, because a
-    port number is not a directory. Where a project declares which resources
-    exist, an undeclared name is refused with that list; where it declares
-    none, every well-formed name is accepted.
+    ``suite:integration``, ``device:android-1`` or ``merge:integration/0.15.0``,
+    reserves a named resource rather than a path. Lanes collide on those as
+    readily as on files, and a worktree isolates neither. A named resource
+    conflicts on an exact match only: no glob, no prefix and no path
+    containment applies to it, because a port number is not a directory, and
+    the branch a ``merge:`` key names may carry its own slashes. Where a
+    project declares which resources exist, an undeclared name is refused
+    with that list; where it declares none, every well-formed name is
+    accepted. A lane about to merge into a shared branch takes a
+    ``merge:<branch>`` reservation first and releases it once its merge lands,
+    so peers queue for their turn instead of racing a stale gate.
 
     Args:
         db: Open transaction owned by the caller.

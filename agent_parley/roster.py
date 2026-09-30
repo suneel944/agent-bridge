@@ -489,6 +489,32 @@ def merged_budget(current: dict, changes: dict) -> dict:
 
 MAX_RESOURCES = 64
 RESOURCE = re.compile(r"[a-z][a-z0-9_-]{0,15}:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+MERGE_RESOURCE = re.compile(r"merge:[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+
+
+def resource_name(pattern: str) -> bool:
+    """Reports whether a string is a well-formed named-resource key.
+
+    Every scheme but ``merge`` names an opaque token, the same shape as a
+    declared resource: no slash, so it is never mistaken for a path. A
+    ``merge:`` resource names a Git branch that may itself carry slashes,
+    such as ``merge:integration/0.15.0``, so its name is validated the same
+    way the unattended integration policy validates its target branch.
+
+    Args:
+        pattern: Candidate reservation key or declared resource name.
+
+    Returns:
+        Whether the key is well-formed for its scheme.
+    """
+    if MERGE_RESOURCE.fullmatch(pattern):
+        branch = pattern.split(":", 1)[1]
+        return (
+            ".." not in branch
+            and "//" not in branch
+            and not branch.endswith(("/", ".", ".lock"))
+        )
+    return bool(RESOURCE.fullmatch(pattern))
 
 
 def resources(declared: list) -> list[str]:
@@ -496,7 +522,8 @@ def resources(declared: list) -> list[str]:
 
     A declaration is a convenience, not a security boundary: it catches a
     mistyped resource before two lanes reserve different spellings of the same
-    thing. A project that declares nothing accepts every well-formed name.
+    thing. A project that declares nothing accepts every well-formed name,
+    including a ``merge:<branch>`` naming a shared branch's turn order.
 
     Args:
         declared: Resource names such as ``port:5432`` or ``db:local``.
@@ -512,7 +539,7 @@ def resources(declared: list) -> list[str]:
             f"A project declares at most {MAX_RESOURCES} named resources."
         )
     for name in declared:
-        if not isinstance(name, str) or not RESOURCE.fullmatch(name):
+        if not isinstance(name, str) or not resource_name(name):
             raise BridgeError(
                 f"{name!r} is not a named resource; write a scheme and a "
                 "name, such as port:5432 or suite:integration."
