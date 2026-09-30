@@ -50,6 +50,7 @@ INACTIVE = "inactive"
 OVERDUE = "overdue claim"
 OVER_CAP = "claims over cap"
 OFFER = "unanswered offer"
+REQUEST = "unanswered request"
 UNRESOLVED = "unresolved completion"
 DIVERGING = "not converging"
 ACK = "awaiting acknowledgement"
@@ -955,6 +956,60 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
     return rows
 
 
+def _request_rows(project: dict, now: float) -> list[dict]:
+    """Groups the unanswered peer takeover requests, one row per holder.
+
+    An operator's own request carries no row here, the same way an
+    operator's own offer withdrawal is left to the operator, because it
+    still waits on that operator to withdraw or restate it. A peer request
+    is different: the peer asking has no path to force a decision, so the
+    row names the holder that owes one.
+
+    Args:
+        project: One project block from the status reading.
+        now: Unix time the request ages are measured against.
+
+    Returns:
+        One row per lane holding unanswered peer takeover requests, naming
+        the oldest request and counting the rest, exactly as unanswered
+        handoff offers are grouped by the lane that must decide.
+    """
+    repo = f"--repo {shlex.quote(str(project['root']))}"
+    waiting: dict[str, list[tuple[int, int, dict]]] = {}
+    for record in project["issues"]:
+        pending = record["request"]
+        if not pending or pending.get("source") != issues.PEER:
+            continue
+        created = _recorded(pending.get("created_at"), now)
+        waiting.setdefault(record["owner"], []).append(
+            (max(0, int(now - created)), record["issue"], pending)
+        )
+    rows = []
+    for holder, items in waiting.items():
+        items.sort(key=lambda item: -item[0])
+        age, number, pending = items[0]
+        peer = pending["to"]
+        detail = (
+            f"issue #{number} takeover asked by {peer}, unanswered by {holder}"
+            if len(items) == 1
+            else f"{len(items)} takeover requests wait on {holder}, the "
+            f"oldest issue #{number} asked by {peer}"
+        )
+        rows.append(
+            _row(
+                REQUEST,
+                detail,
+                f"agent-parley issue assign {number} --unassign {repo}",
+                age,
+                holder,
+                project["root"],
+                BY_OPERATOR,
+                len(items),
+            )
+        )
+    return rows
+
+
 def _bounce_rows(
     home: Path, directory: Path, data: dict, project: dict, config: dict
 ) -> list[dict]:
@@ -1508,6 +1563,7 @@ def derive(
                 )
             )
         aged.extend(_offer_rows(project, stamp))
+        aged.extend(_request_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
         aged.extend(_retired_rows(home, project))
         aged.extend(_refused_rows(directory, project["root"], stamp))

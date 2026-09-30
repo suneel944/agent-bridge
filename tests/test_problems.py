@@ -758,6 +758,39 @@ def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
     assert rows(bridge, problems.OFFER) == []
 
 
+def test_an_unanswered_request_names_its_holder_and_the_unassign(
+    bridge, repo, paired, served, monkeypatch, capsys
+):
+    bridge.issue(paired["lanes"]["claude"], "claim", "1")
+    bridge.issue(paired["lanes"]["codex"], "request", "1", summary="Take it")
+    [row] = rows(bridge, problems.REQUEST)
+    assert row["participant"] == "claude"
+    assert (
+        "issue #1 takeover asked by codex, unanswered by claude"
+        in row["detail"]
+    )
+    assert row["command"] == (
+        f"agent-parley issue assign 1 --unassign {at(paired['root'])}"
+    )
+    program, *arguments = shlex.split(row["command"])
+    monkeypatch.setattr(
+        sys, "argv", [program, "--home", str(bridge.home), *arguments]
+    )
+    assert cli.main() == 0
+    capsys.readouterr()
+    assert rows(bridge, problems.REQUEST) == []
+
+
+def test_an_operator_request_is_not_a_row(bridge, repo, paired, served):
+    bridge.issue(paired["lanes"]["claude"], "claim", "1")
+    bridge.issue_assign(repo, "1", "codex")
+    directory = bridge.project(repo)[1]
+    assert issues.snapshot(directory)["issues"]["1"]["request"]["source"] == (
+        issues.OPERATOR
+    )
+    assert rows(bridge, problems.REQUEST) == []
+
+
 def test_two_offers_waiting_on_one_lane_are_one_row(
     bridge, repo, paired, served
 ):
