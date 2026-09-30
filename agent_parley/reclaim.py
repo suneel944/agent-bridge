@@ -731,6 +731,72 @@ def _owner(
     return ""
 
 
+def _owner_index(
+    manifest: dict,
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Builds the lookups `_owner` needs from a project manifest.
+
+    Args:
+        manifest: Project manifest naming the root and participants.
+
+    Returns:
+        Resolved lane worktree path to participant name, and branch prefix
+        to participant name, longest prefix first.
+    """
+    participants = manifest["participants"]
+    lanes = {
+        str(Path(participant["lane"]).resolve()): name
+        for name, participant in participants.items()
+    }
+    prefixes = sorted(
+        {
+            (prefix, name)
+            for name, participant in participants.items()
+            for prefix in (name, participant.get("branch") or name)
+        },
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    return lanes, prefixes
+
+
+def child_worktrees(directory: Path, manifest: dict, name: str) -> list[Path]:
+    """Lists the worktrees one lane made beyond its own, under the project.
+
+    A lane can run a project's own tooling from its shell and have that
+    tooling add further Git worktrees, for a pull request or a sub-task,
+    directly inside the project state directory beside every lane. Git
+    registers each one against the project repository the same way it
+    registers a lane, so the same attribution `strays` uses names which
+    lane made it: by path, when the worktree sits inside that lane, or by
+    branch, when its branch is named after that lane. Only worktrees Git
+    already registers are read; nothing here scans the filesystem.
+
+    Args:
+        directory: Private project state directory holding the lanes.
+        manifest: Project manifest naming the root and participants.
+        name: Participant whose own worktrees are listed.
+
+    Returns:
+        Resolved paths Git registers and attributes to this lane, its own
+        lane worktree excluded, empty when Git could not be read.
+    """
+    entries = _entries(manifest["root"])
+    if entries is None:
+        return []
+    base = str(Path(manifest["root"]).resolve())
+    lanes, prefixes = _owner_index(manifest)
+    own = str(Path(manifest["participants"][name]["lane"]).resolve())
+    found = []
+    for entry in entries:
+        if entry["path"] in (base, own):
+            continue
+        path = Path(entry["path"])
+        if _owner(path, entry["branch"], lanes, prefixes) == name:
+            found.append(path)
+    return found
+
+
 def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     """Assesses the worktrees lanes made beside their own lane worktrees.
 
@@ -770,19 +836,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     ]
     base = str(Path(manifest["root"]).resolve())
     participants = manifest["participants"]
-    lanes = {
-        str(Path(participant["lane"]).resolve()): name
-        for name, participant in participants.items()
-    }
-    prefixes = sorted(
-        {
-            (prefix, name)
-            for name, participant in participants.items()
-            for prefix in (name, participant.get("branch") or name)
-        },
-        key=lambda pair: len(pair[0]),
-        reverse=True,
-    )
+    lanes, prefixes = _owner_index(manifest)
     owned = owned_roots(directory)
     rows = []
     for entry in entries:

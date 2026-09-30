@@ -34,6 +34,8 @@ from agent_parley import (
     lanes,
     merges,
     plan,
+    reclaim,
+    records,
     recovery,
     roster,
     store,
@@ -79,6 +81,8 @@ CHECKS = "checks stalled"
 CROSSING = "crossing ready"
 CHECKS_FAILED = "checks failed"
 CHECKS_REFUSED = "checks refused"
+CHILD_SESSION = "session outliving its claim"
+CHILD_RECENT = 60
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -554,6 +558,65 @@ def _unresolved_rows(
             root,
             BY_OPERATOR,
             len(unresolved),
+        )
+    ]
+
+
+def _child_rows(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    record: dict,
+    name: str,
+    repo: str,
+    root: str,
+    now: float,
+) -> list[dict]:
+    """Reports a session still active in a worktree beyond the lane's claim.
+
+    A lane can run a project's own tooling from its shell, and that tooling
+    can start further native sessions in a worktree the lane made for a
+    pull request or a sub-task. Agent Parley never sees those sessions
+    start and never stops them; this only tells the lane, once its claim
+    has ended, that one is still writing to its session record.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Project manifest holding this participant.
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+        now: Unix time the observation ages are measured against.
+
+    Returns:
+        One row naming how many session records are still active and how
+        long since the most recent, or no row while the lane holds a claim,
+        no worktree beyond its own is attributed to it, or none of them
+        show activity within `CHILD_RECENT` seconds.
+    """
+    if record["claims"]:
+        return []
+    children = reclaim.child_worktrees(directory, manifest, name)
+    if not children:
+        return []
+    participant = manifest["participants"][name]
+    count, latest = records.child_activity(home, participant, children)
+    if not count or latest is None or now - latest > CHILD_RECENT:
+        return []
+    return [
+        _row(
+            CHILD_SESSION,
+            f"{count} native session(s) in a worktree this lane made are "
+            "still active after its claim ended",
+            f"agent-parley status {name} {repo}; agent-parley never "
+            "stops a session",
+            max(0, int(now - latest)),
+            name,
+            root,
+            BY_OPERATOR,
+            count,
         )
     ]
 
@@ -1617,6 +1680,7 @@ def derive(
             )
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
+        repo = f"--repo {shlex.quote(str(project['root']))}"
         for record in project["participants"]:
             aged.extend(
                 _lane_rows(
@@ -1627,6 +1691,18 @@ def derive(
                     after,
                     stamp,
                     directory,
+                )
+            )
+            aged.extend(
+                _child_rows(
+                    home,
+                    directory,
+                    data,
+                    record,
+                    record["participant"],
+                    repo,
+                    project["root"],
+                    stamp,
                 )
             )
         aged.extend(_offer_rows(project, stamp))
