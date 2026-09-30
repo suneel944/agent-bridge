@@ -69,7 +69,7 @@ on standard output and export to a file.
 | `issue match GOAL` | List the open issues whose recorded title or forge labels share subject words with a stated goal, marking the ones a peer already owns and naming the peer reservations those words run into. It is read only: a match is a reason to read the issue and claim or negotiate for it rather than open a second number for the same work, and no match is a recorded reason to open one. |
 | `issue claim NUMBER` | Claim an available issue from this lane. `--within 6h` on `claim`, `offer` or `accept` records a deadline; past it the record reads overdue, and ownership never moves on a deadline. |
 | `issue claim NUMBER --take-orphaned` | Take an issue whose owner reads as orphaned, recording the previous owner and the reason and moving the reservations that owner held for this claim to the taking lane; reservations for its other claims stay with it. |
-| `issue request NUMBER` | Ask the holder of an owned issue to hand it to this lane; `--summary` says why. The holder answers with `issue accept` or `issue decline`, and a holder that neither answers nor records progress within the project's `takeover_grace` has the request granted as an offer to this lane. |
+| `issue request NUMBER` | Ask the holder of an owned issue to hand it to this lane; `--summary` says why, and `--within 30m` records a deadline; past it the request reads overdue and shows in `problems`, but is granted only by the project's `takeover_grace`. The holder answers with `issue accept` or `issue decline`, and a holder that neither answers nor records progress within `takeover_grace` has the request granted as an offer to this lane. |
 | `issue release NUMBER` | Release ownership without closing the GitHub issue. |
 | `issue offer NUMBER --to NAME --summary TEXT` | Pause work and offer ownership explicitly; `--remaining ITEM`, repeatable, lists the work still to do, and `--when-released N` records it until that issue is released. |
 | `issue accept NUMBER --offer-id ID` | Accept the current offer addressed to this lane; the offered reservations move with the issue. |
@@ -127,7 +127,7 @@ on standard output and export to a file.
 | `resources show` | Show the named resources lanes may reserve. |
 | `resources set NAMES` | Declare them; an empty string accepts any well-formed name. |
 | `deadlines show` | Show this project's deadline and attempt defaults. |
-| `deadlines set` | Set `--claim`, `--offer`, `--ack` windows and `--attempts`. |
+| `deadlines set` | Set `--claim`, `--offer`, `--request`, `--ack` windows and `--attempts`. |
 | `budget show` | Show the advisory token, call and hour limits every lane of this project inherits. |
 | `budget set` | Set `--tokens`, `--calls` and `--hours` project defaults; a budget informs and does not gate. |
 | `budget enforce` | Show or set the opt-in run budget: aggregate `--tokens`, `--calls` and `--hours` across every lane; `0` removes one. Once used up, no wake, dispatch, retry or launch starts. A usage limit, not a billing cap. For the operator; refused from a lane's environment by accident guard, not enforcement. |

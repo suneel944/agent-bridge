@@ -4099,7 +4099,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 metavar="KEY",
                 help=RETRY_HELP,
             )
-        if action in ("claim", "offer", "accept"):
+        if action in ("claim", "offer", "accept", "request"):
             command.add_argument(
                 "--within",
                 type=duration,
@@ -4855,6 +4855,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     for field, described in (
         ("claim", "a claim"),
         ("offer", "a handoff offer"),
+        ("request", "a takeover request"),
         ("ack", "an acknowledgement"),
     ):
         budget_set.add_argument(
@@ -5789,6 +5790,7 @@ def main() -> int:
                         {
                             "claim": args.claim,
                             "offer": args.offer,
+                            "request": args.request,
                             "ack": args.ack,
                             "attempts": args.attempts,
                         },

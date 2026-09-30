@@ -3021,6 +3021,45 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
             write_json(directory / "issues.json", ledger)
 
 
+def expire_offers(directory: Path, manifest: dict) -> None:
+    """Cancels a peer handoff offer that outlived its deadline.
+
+    A handoff offer answers a real person, so a passed deadline never
+    accepts it on the recipient's behalf; the offer is cancelled instead,
+    returning the issue to the lane that made it, exactly as that lane's own
+    cancel would. That lane reads the cancellation in its issue history and
+    decides its next step fresh. Only an offer that recorded its own
+    deadline is touched; a project that configures no offer default, and a
+    caller that passed no `--within`, leaves the offer to run until the
+    holder or the recipient acts. An overdue claim recovering through its
+    own offer-then-release cycle is unaffected: by the time this runs its
+    offer is already gone, or about to be released regardless.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    now = time.time()
+    ledger = issues.snapshot(directory)
+    for number, record in ledger["issues"].items():
+        holder = record.get("owner")
+        offer = record.get("offer")
+        if (
+            not offer
+            or holder not in manifest["participants"]
+            or not issues.offer_state(offer, now)["overdue"]
+        ):
+            continue
+        with contextlib.suppress(BridgeError):
+            issues.change(
+                directory,
+                holder,
+                "cancel",
+                number,
+                participants=set(manifest["participants"]),
+            )
+
+
 def deadline_defaults(directory: Path, manifest: dict) -> None:
     """Gives every claim that has no deadline the project's claim default.
 
@@ -6105,6 +6144,7 @@ def _remind(
     )
     stage("deadline defaults", deadline_defaults, directory, manifest)
     stage("deadline notices", deadline_notices, directory, manifest)
+    stage("offer expiry", expire_offers, directory, manifest)
     stage(
         "acknowledgements",
         acknowledgement_deadlines,
