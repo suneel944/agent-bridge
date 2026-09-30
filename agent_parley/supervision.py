@@ -3062,7 +3062,11 @@ def tool_silence(directory: Path, name: str) -> float | None:
     `PostToolUse` never completed, so a supervisor resume that starts a
     tool and ends does not reset the silence clock. A hook call from another
     session, or a record the service wrote itself, is not the lane's work
-    and is skipped, as :func:`silence` skips it.
+    and is skipped, as :func:`silence` skips it. An open `PreToolUse` still
+    younger than `TOOL_TIMEOUT` reads as no silence at all, the same span
+    :func:`lane_state` trusts as work in flight, so a long tool call such as
+    a full test suite is never mistaken for a stopped holder while
+    `issue list` still shows it in flight.
 
     Args:
         directory: Private project state directory.
@@ -3096,7 +3100,10 @@ def tool_silence(directory: Path, name: str) -> float | None:
     counted = max(latest, pending)
     if not counted:
         return None
-    return max(0.0, time.time() - counted)
+    now = time.time()
+    if pending and now - pending <= TOOL_TIMEOUT:
+        return 0.0
+    return max(0.0, now - counted)
 
 
 def holder_silent(
