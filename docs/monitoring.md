@@ -413,7 +413,11 @@ Two readings wake a lane before they could ever reach this list. A lane
 waiting on its own pull request is sent one supervisor message, and so a wake,
 when that pull request's checks finish, a review lands or its merge state
 changes, and once more when its head stays pending past the checks ceiling,
-which also lists it here as `checks stalled`. A claim whose verification keeps failing with no verified improvement
+which also lists it here as `checks stalled`. A red run lists here as `checks
+failed`, naming the attempt; a required check the forge never started is
+different, since only you can act on it, so every pull request sharing that
+cause is grouped into one `checks refused` row and one decision instead of a
+row per lane. A claim whose verification keeps failing with no verified improvement
 is asked once to change approach, and only a repeat is escalated to you as
 `not converging`. Both are described under
 [waking](operations.md#availability-reminders-and-waking) in Operations. The

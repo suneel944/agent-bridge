@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import forge, issues, problems, store, supervision, tables
+from agent_parley import (
+    decisions,
+    forge,
+    issues,
+    problems,
+    store,
+    supervision,
+    tables,
+)
 
 SHA = "a" * 40
 NEXT = "b" * 40
@@ -388,3 +396,107 @@ def test_the_forge_reading_keeps_each_pending_check_start(
         {"name": "macos", "state": "in_progress", "started": None},
         {"name": "ci/legacy", "state": "pending", "started": None},
     ]
+
+
+def test_the_forge_reading_names_a_failed_and_a_never_started_check(
+    monkeypatch, tmp_path
+):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    records = [
+        {
+            "number": 1,
+            "statusCheckRollup": [
+                {
+                    "name": "test",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                },
+                {
+                    "name": "build",
+                    "status": "COMPLETED",
+                    "conclusion": "STARTUP_FAILURE",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(forge, "_run", lambda *args: json.dumps(records))
+    (one,) = forge.open_pull_requests(tmp_path)
+    assert one["checks"] == "red"
+    assert one["failed"] == [
+        {"name": "test", "conclusion": "failure", "not_started": False},
+        {
+            "name": "build",
+            "conclusion": "startup_failure",
+            "not_started": True,
+        },
+    ]
+
+
+def failed_rows(directory):
+    """Returns the checks-failed problem rows the record yields."""
+    return problems._checks_failed_rows(directory, "root", time.time())
+
+
+def refused_rows(directory):
+    """Returns the checks-refused problem rows the record yields."""
+    return problems._checks_refused_rows(directory, "root", time.time())
+
+
+FAILED = [{"name": "test", "conclusion": "failure", "not_started": False}]
+REFUSED = [
+    {"name": "billing", "conclusion": "startup_failure", "not_started": True}
+]
+
+
+def test_a_red_required_check_is_one_problems_entry(
+    bridge, project, monkeypatch
+):
+    red = reading(project, checks="red", failing=["test"], failed=FAILED)
+    observe(bridge, project, monkeypatch, red)
+    rows = failed_rows(project)
+    assert len(rows) == 1
+    assert rows[0]["condition"] == problems.CHECKS_FAILED
+    assert rows[0]["participant"] == "claude"
+    assert "test failure" in rows[0]["detail"]
+    assert "attempt 1" in rows[0]["detail"]
+    assert refused_rows(project) == []
+
+
+def test_a_rerun_that_ends_red_again_counts_a_second_attempt(
+    bridge, project, monkeypatch
+):
+    red = reading(project, checks="red", failing=["test"], failed=FAILED)
+    observe(bridge, project, monkeypatch, red)
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    observe(bridge, project, monkeypatch, red)
+    rows = failed_rows(project)
+    assert "attempt 2" in rows[0]["detail"]
+
+
+def test_three_pull_requests_sharing_a_not_started_cause_are_one_row(
+    bridge, project, monkeypatch
+):
+    readings = [
+        reading(
+            project,
+            number=number,
+            branch="",
+            checks="red",
+            failing=["billing"],
+            failed=REFUSED,
+        )
+        for number in (7, 8, 9)
+    ]
+    observe(bridge, project, monkeypatch, *readings)
+    rows = refused_rows(project)
+    assert len(rows) == 1
+    assert rows[0]["condition"] == problems.CHECKS_REFUSED
+    assert rows[0]["count"] == 3
+    assert "#7" in rows[0]["detail"] and "#9" in rows[0]["detail"]
+    assert failed_rows(project) == []
+    opened = json.loads((project / decisions.RECORD_NAME).read_text())
+    [record] = opened.values()
+    assert record["kind"] == "checks_not_started"
+    assert "3 pull requests blocked" in record["question"]
+    assert record["state"] == decisions.OPEN

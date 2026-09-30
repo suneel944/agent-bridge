@@ -20,6 +20,7 @@ from typing import TypeGuard, cast
 from agent_parley import (
     budgets,
     convergence,
+    decisions,
     dialogs,
     forge,
     issues,
@@ -5027,6 +5028,16 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     the lane. A forge that reports no check start times is never announced
     as stalled, so it behaves as before.
 
+    Each reading also counts the attempts a head has made at a red verdict,
+    incrementing once per rerun that ends red again on the same commit, so
+    `problems` can show how many times a failed check was retried. A red
+    check the forge reports as never started (`action_required` or
+    `startup_failure`) names a cause only the operator can act on; every
+    open pull request sharing one is grouped into one decision through
+    `decisions.open_or_refresh`, keyed by the check name and the forge's
+    conclusion, so the operator answers a shared cause once rather than once
+    per lane.
+
     A pull request belongs to the lane whose branch is its head, else to the
     one lane owning every claimed issue it closes, else to the lane
     `branch_lane` attributes its head branch to. One no lane can be named
@@ -5058,16 +5069,21 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     for reading in readings:
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
+        record = _checks_clock(previous, record, now)
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
         stalled = _stalled_checks(record, now, ceiling)
         if stalled:
             changes.append(stalled)
-        name = _pull_request_lane(manifest, ledger, reading) if changes else ""
+        watched = changes or record["checks"] in {"pending", "red"}
+        name = _pull_request_lane(manifest, ledger, reading) if watched else ""
+        if name:
+            record["lane"] = name
+        elif previous.get("lane"):
+            record["lane"] = str(previous["lane"])
         if stalled:
             record["stalled_at"] = now
-            record["lane"] = name
-        if not name:
+        if not changes or not name:
             continue
         body = (
             f"Pull request #{reading['number']} {reading['url']} at head "
@@ -5087,6 +5103,7 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
                 body,
                 f"pull-request:{digest}",
             )
+    _not_started_decisions(directory, manifest["root"], kept, now)
     write_json(
         path,
         {"read_at": now, "pull_requests": kept},
@@ -5116,6 +5133,44 @@ def _pending_clock(before: dict, after: dict, now: float) -> dict:
     if before.get("stalled_at"):
         record["stalled_at"] = before["stalled_at"]
         record["lane"] = str(before.get("lane") or "")
+    return record
+
+
+def _checks_clock(before: dict, after: dict, now: float) -> dict:
+    """Carries a red head's first-seen time and attempt count forward.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading, already carrying its pending clock.
+        now: Unix time of this poll.
+
+    Returns:
+        `after` unchanged unless its checks are red: then with `red_since`
+        set to when this head was first seen red on this commit, and
+        `red_attempts` counting this red verdict and every earlier one an
+        intervening pending run separated it from, on the same commit. A new
+        commit restarts both at one attempt. Both are carried through an
+        intervening non-red reading on the same commit so a rerun still in
+        flight does not lose the count.
+    """
+    record = dict(after)
+    if before.get("sha") == after["sha"]:
+        if before.get("red_since"):
+            record["red_since"] = before["red_since"]
+        if before.get("red_attempts"):
+            record["red_attempts"] = before["red_attempts"]
+    if after["checks"] != "red":
+        return record
+    if before.get("sha") != after["sha"]:
+        record["red_since"] = now
+        record["red_attempts"] = 1
+        return record
+    if before.get("checks") == "red":
+        record["red_since"] = float(record.get("red_since") or now)
+        record["red_attempts"] = int(record.get("red_attempts") or 1)
+        return record
+    record["red_since"] = now
+    record["red_attempts"] = int(record.get("red_attempts") or 0) + 1
     return record
 
 
@@ -5156,6 +5211,73 @@ def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
         "a conclusion, or cancel and re-run one still in progress past its "
         "job timeout; after one re-run it is an operator decision"
     )
+
+
+def _not_started_groups(
+    readings: dict[str, dict],
+) -> dict[tuple[str, str], list[dict]]:
+    """Groups open pull requests by a required check the forge never started.
+
+    Args:
+        readings: Every currently open pull request's kept record, keyed by
+            number.
+
+    Returns:
+        The check name and the forge's conclusion mapped to every red
+        reading that reports a check the forge never started under that
+        name and conclusion.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for reading in readings.values():
+        if reading.get("checks") != "red":
+            continue
+        for check in reading.get("failed") or []:
+            if not check.get("not_started"):
+                continue
+            key = (str(check["name"]), str(check["conclusion"]))
+            groups.setdefault(key, []).append(reading)
+    return groups
+
+
+def _not_started_decisions(
+    directory: Path, project: str, readings: dict[str, dict], now: float
+) -> None:
+    """Opens one decision per cause naming every pull request it blocks.
+
+    A required check the forge refused to start, such as a billing or
+    spending-limit refusal, names an action only the operator can take. The
+    same cause commonly blocks several open pull requests at once; grouping
+    them by the check name and the forge's own conclusion keeps the operator
+    from being asked the same cause once per lane. Each cause keeps one open
+    decision, refreshed rather than reopened while it recurs.
+
+    Args:
+        directory: Private project state directory.
+        project: Canonical project root.
+        readings: Every currently open pull request's kept record, keyed by
+            number.
+        now: Unix time of this poll.
+    """
+    for (name, conclusion), members in _not_started_groups(readings).items():
+        numbers = sorted(int(item["number"]) for item in members)
+        listed = ", ".join(f"#{number}" for number in numbers)
+        question = (
+            f"{len(numbers)} pull requests blocked: required job {name!r} "
+            f"not started, forge reports {conclusion}. Affected: {listed}"
+        )
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            decisions.open_or_refresh(
+                directory,
+                project=project,
+                lane="",
+                kind="checks_not_started",
+                key=f"{name}\x00{conclusion}",
+                question=question,
+                options=("acknowledge", "resolved"),
+                recommended="acknowledge",
+                reversibility=decisions.REVERSIBLE,
+                now=now,
+            )
 
 
 def _pull_request_changes(before: dict, after: dict) -> list[str]:
