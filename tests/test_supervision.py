@@ -1706,7 +1706,10 @@ def test_a_spent_budget_asks_the_operator_about_orphaned_claims(
     assert fields["issue"] == "#1"
     assert fields["since"] == int(record["exhausted_at"])
     assert "--take-orphaned" in fields["detail"]
-    assert fields["detail"].endswith("Nothing moves until you act.")
+    assert fields["detail"].endswith(
+        "returns its claims and reservations once it has been dead for "
+        "the orphan ceiling."
+    )
     assert issues.snapshot(directory)["issues"]["1"]["owner"] == "codex"
 
 
