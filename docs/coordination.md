@@ -90,7 +90,11 @@ checkout, and it offers rather than takes; the detail is in
 They block branch changes inside an assigned lane, catch drift after any bypass,
 and deliver short updates only when coordination state actually changes. Each
 notice is capped at 1,536 UTF-8 bytes; an unchanged checkpoint adds no context
-at all. If a rename removed the assigned branch, the hook names the exact
+at all. A notice carries only the entries the lane was not already given, such
+as one new claim row rather than the whole claim set, and says how many
+unchanged entries it left out; `agent-parley status` and `agent-parley issue
+list` always return the full state. A session start, including one after a
+compaction, resends everything once. If a rename removed the assigned branch, the hook names the exact
 repair. Branch drift blocks completion once; a Stop retry can end the session
 while status continues to show the drift.
 

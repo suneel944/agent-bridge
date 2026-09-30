@@ -346,7 +346,7 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
         else:
             state.pop("operator_edits", None)
         size = len(text.encode())
-        state["injected_bytes"] = state.get("injected_bytes", 0) + size
+        checkpoints.count_injection(state, size)
         state["injections"] = state.get("injections", 0) + 1
         state["delivered"] = time.time()
         write_json(directory / f"{agent}-activity.json", state)

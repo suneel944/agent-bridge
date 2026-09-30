@@ -1416,7 +1416,28 @@ already completed action. Coordination errors before edits pause work.
 Status reports notice counts and injected UTF-8 bytes, not tokenizer counts or
 API billing. That measure covers what coordination itself delivers into a
 lane's context and nothing else; it is not, and must not be read as, what a
-lane spends.
+lane spends. `participant show` also reports the bytes per hour over the last
+24 clock hours, which the lane's activity record keeps as hourly totals, and
+`top --json` carries the same rate as `injected_bytes_per_hour`.
+
+Hook notices are sent as deltas. Each notice (participants, the issue notice
+with its claim rows and reminders, the work offer and its continuation line,
+operator edits, base advances, budget crossings and owed acknowledgements) is
+split into entries, and the lane's activity record in the private state
+directory keeps a digest of every entry it was last given, per notice kind.
+Elapsed seconds are masked before digesting, so a claim row whose age alone
+moved is not new. A later hook injects only the entries whose digest is not
+recorded; a notice with nothing new injects nothing, and a `Stop` is blocked
+only when the issue notice or the work offer has a new entry. When anything is
+injected, one line counts the unchanged entries left out and names
+`agent-parley status` and `agent-parley issue list` as the full reading.
+Fresh entries share `MAX_NOTICE_BYTES` (1,024) per injection; entries past it
+collapse to one line naming the same commands and are not recorded, so the
+next delivery offers them again. Every `SessionStart`, whatever its source
+(`startup`, `resume`, `clear` or `compact`), drops the record and the notice
+revisions, so the first hook after a compaction or a new session resends
+everything once. The `MAX_NOTICE_REPEATS` ceiling on completion reminders and
+deadline notices applies before the delta and is unchanged by it.
 
 `top` reports a lane's token count separately, from the session records the
 native client already writes under its own config home: the Claude transcript
