@@ -2126,7 +2126,12 @@ cursor position reports and focus events do not count as partially entered
 operator input, so they do not refuse the wake. Complete replies are removed
 from the input-state check without hiding operator bytes that arrived in the
 same read; incomplete replies are carried until the next read and refuse a wake
-until they complete.
+until they complete or until half a second passes without another byte. A lone
+Esc therefore resolves as a keypress, as terminal programs resolve it, and adds
+no text. Backspace and delete erase one counted character, so a line typed and
+then erased reads as empty. A `busy:input` refusal in `problems` tells the
+operator to submit or clear the unsent text in the lane's own terminal rather
+than to answer a prompt.
 Wake attempts, backoff, the last result and escalation are fields of the
 lane's state in the store, and every wake decision reads them there. Results
 appear in `status`, the retained event log and private `<name>-wake.json`,
