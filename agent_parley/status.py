@@ -109,6 +109,44 @@ def lane_state(record: dict) -> str:
     return str(record["availability"]["state"])
 
 
+def task_line(record: dict, fallback: str) -> str:
+    """Describes the work one lane is on for its status task line.
+
+    The lane's last report is its own account of its work, but a report
+    about an issue the lane has since released describes finished work, not
+    current work. Such a report keeps its text, labelled with its issue and
+    age, and open claims the lane has not reported on since claiming are
+    named ahead of it, so a closed issue's summary never reads as the lane's
+    current task.
+
+    Args:
+        record: One lane record from the status reading, carrying its
+            claims, report summary, report issue and report age.
+        fallback: Registered or mailed task shown when no report exists.
+
+    Returns:
+        The task line, at most 240 characters.
+    """
+    from agent_parley.tables import age
+
+    summary = record["summary"]
+    issue = record["report_issue"]
+    if summary and record["report_held"]:
+        return summary[:240]
+    silent = ", ".join(
+        f"#{claim['issue']}"
+        for claim in record["claims"]
+        if not claim["ended"] and not claim["reported_since_claim"]
+    )
+    if summary and issue is not None:
+        reported = age(record["report_age_seconds"] or 0)
+        text = f"#{issue} (not held, reported {reported} ago): {summary}"
+    else:
+        text = summary or fallback
+    note = f"no report on held {silent}" if silent else ""
+    return "; ".join(part for part in (note, text) if part)[:240]
+
+
 def stopped_seconds(record: dict) -> float | None:
     """Reports how long a lane has been stopped, or None while it is not.
 
@@ -222,6 +260,25 @@ def attention(claim: dict, owner: str) -> list[str]:
 def since(instant: float) -> int | None:
     """Reports whole seconds since a Unix time, or None when it is unset."""
     return max(int(time.time() - instant), 0) if instant else None
+
+
+def reported_since(record: dict) -> bool:
+    """Reports whether a claim's holder reported on it since claiming it.
+
+    Args:
+        record: Published ledger record for one issue.
+
+    Returns:
+        True when the claim's recorded report progress is at or after the
+        start of its current ownership generation. Progress carried over
+        from an earlier generation does not count.
+    """
+    from agent_parley import issues, lifecycle
+
+    progress = lifecycle.state(record).get("progress")
+    if not isinstance(progress, dict):
+        return False
+    return float(progress.get("at", 0) or 0) >= issues.claimed_since(record)
 
 
 def registered_root(home: Path, path: Path) -> str:
@@ -648,7 +705,10 @@ class StatusMixin(BridgeCore):
             so the activity file cannot report a condition the record does
             not hold; only a lane with no record yet is read from the file.
             `current_task` is the lane's own last report or registered task,
-            never the operator's last prompt, and each claim carries its
+            never the operator's last prompt, built by `task_line`, with
+            `report_issue` naming the issue that report was about and
+            `report_held` whether the lane still holds it; each claim
+            carries whether it was reported on since claiming, and its
             recorded title, whether it ended on the forge, the seconds since
             it last progressed and its cached pull request.
         """
@@ -692,6 +752,13 @@ class StatusMixin(BridgeCore):
         )
         branch = lane_branch(Path(participant["lane"]))
         reported_at = state.get("reported_at")
+        latest = metrics.latest_report(directory, agent) or {}
+        report_issue = (
+            int(latest["issue"])
+            if latest.get("issue") not in (None, "")
+            and latest.get("summary") == state.get("summary")
+            else None
+        )
         stalled = supervision.stall(
             self.home,
             directory,
@@ -790,6 +857,7 @@ class StatusMixin(BridgeCore):
                         participant["branch"],
                     ),
                     "delivered": issues.delivered(record),
+                    "reported_since_claim": reported_since(record),
                     **deadline_state(record),
                     "deadline_at": views.timestamp(
                         deadline_state(record)["deadline"]
@@ -850,10 +918,12 @@ class StatusMixin(BridgeCore):
             ),
             "wake": None,
             "mail": None,
-            "current_task": str(
-                state.get("summary") or state.get("task") or ""
-            )[:240],
+            "report_issue": report_issue,
         }
+        record["report_held"] = report_issue is not None and any(
+            claim["issue"] == report_issue for claim in record["claims"]
+        )
+        record["current_task"] = task_line(record, str(state.get("task") or ""))
         record["lane_state"] = lane_state(record)
         if wake:
             next_at = wake.get("next_at")
@@ -882,12 +952,9 @@ class StatusMixin(BridgeCore):
         except (sqlite3.Error, BridgeError, OSError) as exc:
             record["mail"] = {"error": str(exc)}
             return record
-        record["current_task"] = str(
-            state.get("summary")
-            or mail["reported_task"]
-            or state.get("task")
-            or ""
-        )[:240]
+        record["current_task"] = task_line(
+            record, str(mail["reported_task"] or state.get("task") or "")
+        )
         record["mail"] = {
             "pending_operator_items": scheduled,
             "unread": mail["unread"],

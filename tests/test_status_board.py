@@ -466,3 +466,54 @@ def test_no_forge_reading_hides_nothing_and_says_so(
     assert offline["calls"] == [FORGE_TIMEOUT]
     assert rows(lines) == ["#42", "#43"]
     assert any("unavailable (no GitHub)" in line for line in lines)
+
+
+def lane_reading(bridge, repo, name="claude"):
+    """Returns one lane's record from a fresh status reading."""
+    project = next(
+        item
+        for item in bridge.status_snapshot()["projects"]
+        if item["root"] == str(repo)
+    )
+    return next(
+        record
+        for record in project["participants"]
+        if record["participant"] == name
+    )
+
+
+def test_a_report_on_a_held_issue_is_the_task_line(bridge, repo, paired):
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "42")
+    bridge.issue(lane, "claim", "43")
+    bridge.report(lane, "partial", "Wiring the engine", "tests", "", issue="42")
+    record = lane_reading(bridge, repo)
+    assert record["current_task"] == "Wiring the engine"
+    assert record["report_issue"] == 42
+    assert record["report_held"] is True
+    assert [claim["reported_since_claim"] for claim in record["claims"]] == [
+        True,
+        False,
+    ]
+
+
+def test_a_report_on_a_released_issue_is_labelled_and_silent_claims_named(
+    bridge, repo, paired
+):
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "42")
+    bridge.report(lane, "partial", "Issue closed", "nothing", "", issue="42")
+    bridge.issue(lane, "release", "42")
+    bridge.issue(lane, "claim", "43")
+    bridge.issue(lane, "claim", "44")
+    path = bridge.project(repo)[1] / "claude-activity.json"
+    state = json.loads(path.read_text())
+    state["reported_at"] = time.time() - 1260
+    write_json(path, state)
+    record = lane_reading(bridge, repo)
+    assert record["report_issue"] == 42
+    assert record["report_held"] is False
+    assert record["current_task"] == (
+        "no report on held #43, #44; "
+        "#42 (not held, reported 21m ago): Issue closed"
+    )
