@@ -2370,6 +2370,7 @@ These events notify, and nothing else:
 | --- | --- |
 | `handoff_offered` | A handoff is offered to a lane. |
 | `permission_prompt` | A lane is blocked on a native permission prompt. |
+| `permission_denied` | A native permission layer, such as Claude Code's auto mode classifier, refused a lane's tool call without a prompt. |
 | `native_dialog` | A lane is held by a native dialog the launcher escalated. |
 | `lane_blocked` | A lane has stayed blocked (approval, prompt, dialog) for 30 minutes; sent once per block. |
 | `lane_idle` | A lane is idle with no claim past the project's `stalled_after`. |
@@ -2450,6 +2451,27 @@ decision as `stale`, so a later tap is refused and an answer already given is
 never pressed on another dialog; the new screen is asked about afresh. A
 prompt the launcher cannot read is sent as terminal-only and answered at the
 lane's terminal. Nothing is ever answered on expiry.
+
+A tool call a native permission layer refuses without drawing a prompt is
+recorded as a `permission_denied` decision. Today that is Claude Code's auto
+mode classifier: every Claude Code lane runs its hook on the
+`PermissionDenied` event, which the `claude` CLI raises with the tool,
+its input and the classifier's reason, such as `Interfere With Workloads` or
+`CI Bypass`. No other adapter reports such a refusal to a hook yet. The
+decision names the lane, the issue the lane has claimed, if any, the exact
+refused command and the stated reason. It offers `run it yourself`, with the
+command to run in the lane's worktree, `add a rule`, with a suggested
+permission rule such as `Bash(git push:*)`, and, when the lane holds a claim,
+`reassign` and `release`. The same refusal again, from the same lane on the
+same claim with the same command, refreshes that decision instead of opening
+a second one. While it is open the supervisor defers the lane's wakes under
+`permission denied` rather than asking it for a turn that would meet the
+same refusal; the answer reaches the lane as supervisor mail, like any other
+answer, and the lane or the operator carries it out. The decision is
+irreversible, so every option takes the `confirm` tap and no timeout ever
+applies a default to it. Nothing retries, rewords or works around the
+refused call, and the service never writes the suggested rule or any bypass
+flag: adding the rule is the operator's edit to their own settings.
 
 ### Reclaiming landed lanes
 
@@ -3321,8 +3343,9 @@ Every supervision poll sweeps the project's open decision records, the ones
 notifications deliver, before sending the due ones. A record settles only
 when its notification kind maps to a reversible table kind, it was recorded
 reversible, and it recommends one of its own options. Today a
-`orphan_decision` record settles as `orphan_claim`; `permission_prompt` and
-`native_dialog` records map to `native_permission` and always wait; any other
+`orphan_decision` record settles as `orphan_claim`; `permission_prompt`,
+`permission_denied` and `native_dialog` records map to `native_permission`
+and always wait; any other
 record waits for an answer. A settled record is answered with its recommended
 option by `timeout`, handed to its lane like any other answer, logged and
 announced as above. A record the operator answered first, or one missing the

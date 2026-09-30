@@ -72,6 +72,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `completion` | Shell completion scripts generated from the live command parser, and the lock-free candidate lookup they call back into |
 | `plugins` | Adds the published marketplace and plugin to each supported native CLI on PATH through that CLI's own plugin commands, reading its listing first so a re-run never duplicates an entry |
 | `decisions` | Durable records of the situations that wait on an operator's answer, one open record per situation, queued and retried with backoff until every configured transport accepts the delivery |
+| `denials` | Recognition of a tool call a native permission layer refused, from the hook event each adapter raises for one, recorded as one irreversible operator decision per lane, claim and command that holds the lane's wakes while it is open |
 | `notify` | Outbound Telegram and SMTP notification of the coordination changes an absent owner needs, selected from decisions the event log already recorded |
 | `inbound` | Read-only status queries long-polled from the Telegram bot, admitted by chat identifier and passcode, parsed by the command line's own status filters |
 | `state` | Private atomic JSON and text publication and operation locks |
