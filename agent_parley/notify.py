@@ -54,6 +54,7 @@ class Event(StrEnum):
 
     HANDOFF_OFFERED = "handoff_offered"
     PERMISSION_PROMPT = "permission_prompt"
+    PERMISSION_DENIED = "permission_denied"
     LANE_IDLE = "lane_idle"
     RUN_FINISHED = "run_finished"
     HOOK_REFUSAL = "hook_refusal"
@@ -70,6 +71,7 @@ class Event(StrEnum):
 TITLES: dict[str, str] = {
     Event.HANDOFF_OFFERED: "A handoff offer is waiting",
     Event.PERMISSION_PROMPT: "A lane is blocked on a permission prompt",
+    Event.PERMISSION_DENIED: "A lane's tool call was denied",
     Event.LANE_IDLE: "A lane is idle with no claim",
     Event.RUN_FINISHED: "A lane run finished",
     Event.HOOK_REFUSAL: "A hook refused a lane action",
@@ -86,6 +88,7 @@ TITLES: dict[str, str] = {
 KEY_FIELDS: dict[str, tuple[str, ...]] = {
     Event.HANDOFF_OFFERED: ("offer",),
     Event.PERMISSION_PROMPT: ("session", "tool"),
+    Event.PERMISSION_DENIED: ("issue", "tool", "command"),
     Event.LANE_IDLE: ("since",),
     Event.RUN_FINISHED: ("session",),
     Event.HOOK_REFUSAL: ("session", "reason"),
@@ -104,6 +107,10 @@ ACKNOWLEDGE = (("acknowledge",), decisions.REVERSIBLE)
 ANSWERS: dict[str, tuple[tuple[str, ...], str]] = {
     Event.HANDOFF_OFFERED: (("accept", "decline"), decisions.REVERSIBLE),
     Event.PERMISSION_PROMPT: (("deny", "allow"), decisions.IRREVERSIBLE),
+    Event.PERMISSION_DENIED: (
+        ("run it yourself", "add a rule"),
+        decisions.IRREVERSIBLE,
+    ),
     Event.LANE_IDLE: (("wake", "retire", "leave"), decisions.REVERSIBLE),
     Event.RUN_FINISHED: (("acknowledge",), decisions.REVERSIBLE),
     Event.HOOK_REFUSAL: (("acknowledge",), decisions.REVERSIBLE),

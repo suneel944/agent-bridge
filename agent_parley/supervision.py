@@ -21,6 +21,7 @@ from agent_parley import (
     budgets,
     convergence,
     decisions,
+    denials,
     dialogs,
     forge,
     issues,
@@ -6744,6 +6745,12 @@ def _wake_block(
     its first attempt has already recorded that, so the refusal is reported
     before the cause starts sparing the budget.
 
+    A lane whose tool call a native permission layer refused waits on the
+    operator's decision about it, so while `denials.waiting` finds that
+    decision open the lane is blocked under `denials.CAUSE` and is not asked
+    for another turn that could only meet the same refusal. An answer
+    settles the decision, and the next poll wakes the lane with it.
+
     Args:
         directory: Private project state directory.
         name: Participant that owns the lane.
@@ -6767,6 +6774,8 @@ def _wake_block(
         and float(reset_at) > time.time()
     ):
         return reason, float(reset_at)
+    if held := denials.waiting(directory, name):
+        return f"blocked: {denials.CAUSE} ({held['id']})", 0.0
     lane = observed.get("record") or {}
     if lane.get("state") == lanes.BLOCKED:
         return f"blocked: {lane['cause']}", 0.0

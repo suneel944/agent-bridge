@@ -19,6 +19,7 @@ from pathlib import Path
 from types import ModuleType
 
 from agent_parley import (
+    denials,
     hook,
     lanes,
     policy,
@@ -205,6 +206,7 @@ class Reason(StrEnum):
     OVERSIZE_PAYLOAD = "oversize_payload"
     UNREADABLE_PAYLOAD = "unreadable_payload"
     OUTSIDE_LANE = "outside_lane"
+    PERMISSION_DENIED = "permission_denied"
 
 
 UNOBSERVED = frozenset(
@@ -518,6 +520,80 @@ def foreign_reading(state: dict) -> dict:
     }
 
 
+def notifying(directory: Path) -> bool:
+    """Reports whether notifications are configured, without the notifier.
+
+    Args:
+        directory: Common project state directory.
+
+    Returns:
+        True when the environment names a transport or `notify setup`
+        stored settings in the state root.
+    """
+    return bool(
+        os.environ.get("AGENT_PARLEY_NOTIFY", "").strip()
+        or (directory.parent.parent / "notify.json").is_file()
+    )
+
+
+def permission_denied(
+    directory: Path,
+    agent: str,
+    manifest: dict,
+    participant: dict,
+    payload: dict,
+) -> str:
+    """Records a tool call the native permission layer refused.
+
+    The refusal becomes the one decision `denials.record` keeps for the
+    lane, the claim it holds and the exact command, and is offered to the
+    notifier naming that decision. Like every decision it is recorded only
+    while notifications are configured. The call is never retried or
+    answered here, and a recording failure is discarded for the same
+    reason a notifier failure is.
+
+    Args:
+        directory: Common project state directory.
+        agent: Assigned native lane name.
+        manifest: Current participant manifest.
+        participant: The lane's manifest entry.
+        payload: Native lifecycle event reporting the refusal.
+
+    Returns:
+        The decision identifier, or an empty string when the event reports
+        no refusal, notifications are off or the record could not be made.
+    """
+    found = denials.detect(payload)
+    if found is None or not notifying(directory):
+        return ""
+    from agent_parley import issues, notify
+
+    try:
+        held = issues.held_claim(directory, agent)["issue"]
+        issue = "" if held is None else str(held)
+        decision = denials.record(
+            directory, manifest["root"], agent, found, issue
+        )
+    except (OSError, ValueError, KeyError, BridgeError):
+        return ""
+    with contextlib.suppress(OSError, ValueError, BridgeError):
+        notify.deliver(
+            directory,
+            agent,
+            notify.Event.PERMISSION_DENIED,
+            {
+                "repo": manifest["root"],
+                "provider": str(participant.get("provider", "")),
+                "issue": issue,
+                "tool": found.tool,
+                "command": found.command,
+                "detail": decision["detail"],
+                "decision": decision["id"],
+            },
+        )
+    return str(decision["id"])
+
+
 def announce(
     directory: Path,
     agent: str,
@@ -549,10 +625,7 @@ def announce(
     Returns:
         The notification's name once a send has started, or an empty string.
     """
-    if not (
-        os.environ.get("AGENT_PARLEY_NOTIFY", "").strip()
-        or (directory.parent.parent / "notify.json").is_file()
-    ):
+    if not notifying(directory):
         return ""
     from agent_parley import notify
 
@@ -2852,6 +2925,11 @@ def checkpoint(
     decision all reach the agent as context on the prompt, and only tool
     events keep their refusals.
 
+    An event reporting that the native permission layer refused a tool call
+    (`denials.EVENTS`) is recorded by `permission_denied` as one operator
+    decision and answered with nothing, so the client is never told to
+    retry the refused call.
+
     Args:
         home: Private bridge state root.
         directory: Common project state directory.
@@ -2876,7 +2954,7 @@ def checkpoint(
     """
     arrived = time.time()
     event = payload.get("hook_event_name")
-    if event not in EVENTS or (
+    if (event not in EVENTS and event not in denials.EVENTS) or (
         payload.get("agent_id") and event != "PreToolUse"
     ):
         record(directory, agent, payload, Reason.IGNORED_EVENT, None)
@@ -2915,6 +2993,19 @@ def checkpoint(
             "ownership generation transferred",
         )
         return fenced
+    if event in denials.EVENTS:
+        decision = permission_denied(
+            directory, agent, manifest, participant, payload
+        )
+        record(
+            directory,
+            agent,
+            payload,
+            Reason.PERMISSION_DENIED,
+            None,
+            detail={"denial_decision": decision} if decision else None,
+        )
+        return {}
     if participant.get("paused", False):
         refusal = paused_output(event)
         record(directory, agent, payload, Reason.PAUSED, refusal, "paused")
