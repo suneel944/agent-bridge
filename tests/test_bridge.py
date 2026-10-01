@@ -1752,7 +1752,33 @@ def test_forge_slug_reads_github_remotes_and_ignores_everything_else(repo):
     assert forge.slug(repo) == "owner/name"
     git(repo, "remote", "set-url", "origin", "https://github.com/owner/name")
     assert forge.slug(repo) == "owner/name"
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://user@github.com/owner/name.git",
+    )
+    assert forge.slug(repo) == "owner/name"
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "ssh://git@ssh.github.com:443/owner/name.git",
+    )
+    assert forge.slug(repo) == "owner/name"
+    git(repo, "remote", "set-url", "origin", "https://GitHub.com/owner/name")
+    assert forge.slug(repo) == "owner/name"
     git(repo, "remote", "set-url", "origin", "git@example.com:owner/name.git")
+    assert forge.slug(repo) is None
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://user@gitlab.com/owner/name.git",
+    )
     assert forge.slug(repo) is None
 
 
