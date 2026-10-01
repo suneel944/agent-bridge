@@ -1913,7 +1913,7 @@ The private project manifest accepts `"supervision"` with `interval` (default
 (300 seconds), `max_claims_per_lane` (2 claims, 1 to 100),
 `convergence_repeats` (3 failures, 1 to 100), `convergence_after`
 (14400 seconds), `prompts`, `wake`,
-`reclaim` and `titles` (all true). Numeric second values range from 1 to 86400 seconds.
+`reclaim`, `titles` and `rerun_cancelled` (all true). Numeric second values range from 1 to 86400 seconds.
 
 Issue convergence is accounted separately from wakes and liveness.
 `convergence.py` keeps one account per owned issue and claim generation in
@@ -2090,9 +2090,21 @@ its state and its age. The message recommends one re-run, `gh run rerun
 one still in progress past its job timeout, and leaves it to the lane; after
 one re-run it is an operator decision. `status` prints the pending age beside
 `CI pending` and marks the head `stalled`, and `problems` lists a `checks
-stalled` row until the head finishes or changes. Nothing is re-run, merged or
-bypassed automatically. A forge whose checks report no start time is never
-marked stalled.
+stalled` row until the head finishes or changes. Nothing pending is re-run,
+merged or bypassed automatically. A forge whose checks report no start time is
+never marked stalled.
+
+A finished run is different when every failing check ended `cancelled` or
+`timed_out` and every other check passed: there is nothing to fix or push, so
+the service runs `gh run rerun RUN --job JOB --repo OWNER/NAME` once per such
+job through the operator's own `gh` authentication, whether or not the owning
+lane is alive. The request is recorded on that head commit and never repeated
+for it; a check that ended `failure` is never re-run. The lane is told a
+re-run was requested so it does not push an empty commit. `problems` keeps a
+`checks failed` row reading `re-run requested` until the new conclusion
+arrives; a second cancellation on the same head, or a forge that refused the
+re-run, names the exact command instead of `fix and push`. Set the
+supervision key `rerun_cancelled` to false to turn the automatic re-run off.
 
 A red verdict also keeps, per head commit, the attempt count and when it was
 first seen red, incrementing once per rerun that ends red again on the same
