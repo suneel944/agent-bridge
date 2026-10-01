@@ -4433,6 +4433,22 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "recent change, after writing a recovery checkpoint of each."
         ),
     )
+    collecting.add_argument(
+        "--project",
+        default="",
+        metavar="ROOT",
+        help=(
+            "Instead of sweeping lanes, remove the private state of the "
+            "project whose root checkout ROOT is gone, once the service "
+            "retired its lanes and no session of it runs; its recovery "
+            "checkpoints move to the state root's recovered folder."
+        ),
+    )
+    collecting.add_argument(
+        "--yes",
+        action="store_true",
+        help="With --project, delete the recovery checkpoints too.",
+    )
     collecting.add_argument("--json", action="store_true", help=JSON_HELP)
     notifying = commands.add_parser(
         "notify",
@@ -5704,6 +5720,23 @@ def main() -> int:
         elif args.command in ("gc", "reclaim"):
             if args.force and not args.apply:
                 parser.error("--force needs --apply.")
+            if args.yes and not args.project:
+                parser.error("--yes needs --project.")
+            if args.project:
+                if args.force:
+                    parser.error("--force does not apply to --project.")
+                forgot = supervision.forget(
+                    bridge.home,
+                    args.project,
+                    apply=args.apply,
+                    discard=args.yes,
+                )
+                print(
+                    views.render("gc", {"project": forgot})
+                    if args.json
+                    else "\n".join(supervision.forgotten_lines(forgot))
+                )
+                return 0
             swept = bridge.reclaim(args.repo.resolve(), apply=args.apply)
             made = bridge.reclaim_worktrees(
                 args.repo.resolve(),

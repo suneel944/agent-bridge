@@ -10,7 +10,11 @@ a repository, creates the state directory or runs a native CLI: the service
 is judged from its published record and the process that record names, the
 registration from the recorded manifests, and each native CLI's plugin from
 the record that CLI keeps (`plugins.recorded`). The only process started is
-one bounded `git status` in the working directory. The text carries no
+one bounded `git status` in the working directory. For a registered project
+whose service runs, the screen also reads what `agent-parley problems`
+would list, from the readings supervision cached, and whether outbound
+notification is configured, so a returning operator learns what needs
+them before starting another lane. The text carries no
 color or cursor control, so it reads the same with ``NO_COLOR`` set and
 without a terminal.
 """
@@ -23,7 +27,7 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
-from agent_parley import plugins, process
+from agent_parley import BridgeError, plugins, process
 from agent_parley.status import registered_root
 
 GIT_SECONDS = 2.0
@@ -41,6 +45,11 @@ class Found(NamedTuple):
         clis: Each supported native CLI on PATH, mapped to whether its
             plugin record lists the Agent Parley plugin.
         service: Whether the recorded coordination service is running.
+        problems: The rows `agent-parley problems` would list, most urgent
+            first; read only for a registered project with a running
+            service.
+        notify: Whether an outbound notification transport is configured.
+        lanes: How many lanes the project has registered.
     """
 
     repository: bool
@@ -48,6 +57,9 @@ class Found(NamedTuple):
     registered: bool
     clis: dict[str, bool]
     service: bool
+    problems: tuple[dict, ...] = ()
+    notify: bool = True
+    lanes: int = 0
 
 
 def checkout(directory: Path) -> tuple[bool, bool | None]:
@@ -107,6 +119,49 @@ def serving(home: Path) -> bool:
     return isinstance(record, dict) and bool(process.identify(record, home))
 
 
+def attention(home: Path, root: str) -> tuple[tuple[dict, ...], bool, int]:
+    """Reads what needs the operator, as `agent-parley problems` would.
+
+    The rows come from the same status reading and derivation `problems`
+    uses, which read the pull requests and issues supervision last cached
+    rather than polling the forge. The command surface is imported only
+    here, for a registered project with a running service, so every other
+    screen stays as fast as before. Every Git process the reading starts
+    runs with ``GIT_OPTIONAL_LOCKS=0``, so no checkout's index is
+    refreshed and rewritten by a screen that promises to write nothing.
+
+    Args:
+        home: Private state directory, known to exist.
+        root: Recorded root of the project the working directory belongs to.
+
+    Returns:
+        The problem rows, most urgent first, whether an outbound
+        notification transport is configured, and how many lanes the
+        project has registered.
+    """
+    from agent_parley import notify
+    from agent_parley.cli import Bridge, problems
+
+    previous = os.environ.get("GIT_OPTIONAL_LOCKS")
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        bridge = Bridge(home)
+        report = bridge.status_snapshot()
+        rows = tuple(problems.derive(bridge.home, report))
+    finally:
+        if previous is None:
+            del os.environ["GIT_OPTIONAL_LOCKS"]
+        else:
+            os.environ["GIT_OPTIONAL_LOCKS"] = previous
+    lanes = sum(
+        len(project["participants"])
+        for project in report["projects"]
+        if project["root"] == root
+    )
+    configured = bool(notify.reported(notify.environment(home))["transports"])
+    return rows, configured, lanes
+
+
 def look(home: Path, directory: Path) -> Found:
     """Reads everything the screen reports, writing nothing.
 
@@ -119,14 +174,35 @@ def look(home: Path, directory: Path) -> Found:
     """
     repository, dirty = checkout(directory)
     try:
-        registered = repository and bool(registered_root(home, directory))
+        root = registered_root(home, directory) if repository else ""
     except (OSError, ValueError, KeyError, TypeError):
-        registered = False
+        root = ""
     clis = {
         client.name: plugins.recorded(client.name)
         for client, _ in plugins.detected()
     }
-    return Found(repository, dirty, registered, clis, serving(home))
+    found = Found(repository, dirty, bool(root), clis, serving(home))
+    if not (root and found.service):
+        return found
+    import sqlite3
+
+    from agent_parley import store
+
+    if not (home / store.DATABASE).exists():
+        return found
+
+    try:
+        rows, configured, lanes = attention(home, root)
+    except (
+        BridgeError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        sqlite3.Error,
+    ):
+        return found
+    return found._replace(problems=rows, notify=configured, lanes=lanes)
 
 
 def advice(found: Found) -> list[tuple[str, str]]:
@@ -151,6 +227,14 @@ def advice(found: Found) -> list[tuple[str, str]]:
             ),
         ]
     steps = []
+    if found.problems:
+        steps.append(
+            ("agent-parley problems", "See what needs you and how to clear it.")
+        )
+    if not found.notify and found.lanes:
+        steps.append(
+            ("agent-parley notify setup", "Get told when a lane needs you.")
+        )
     missing = [name for name, added in found.clis.items() if not added]
     if missing:
         steps.append(
@@ -207,6 +291,18 @@ def render(found: Found) -> str:
         clis = f"none on PATH ({names})"
     steps = advice(found)
     width = max(len(command) for command, _ in steps) + 2
+    pending = []
+    if found.problems:
+        count = len(found.problems)
+        named = ", ".join(
+            " ".join(filter(None, (row["participant"], row["condition"])))
+            for row in found.problems[:2]
+        )
+        noun = "problem" if count == 1 else "problems"
+        line = f"  Needs you {count} {noun}: {named}"
+        pending.append(line if len(line) <= 80 else line[:77] + "...")
+    if not found.notify and found.lanes:
+        pending.append("  Notify    off")
     return "\n".join(
         [
             "Agent Parley coordinates native coding CLIs in one repository.",
@@ -217,6 +313,7 @@ def render(found: Found) -> str:
             + ("registered" if found.registered else "not registered"),
             f"  CLIs      {clis}",
             "  Service   " + ("running" if found.service else "not running"),
+            *pending,
             "",
             "Next:",
             *(f"  {command.ljust(width)}{what}" for command, what in steps),

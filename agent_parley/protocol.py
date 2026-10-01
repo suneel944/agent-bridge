@@ -66,9 +66,10 @@ ROOT_GONE = "root gone"
 SETUP_GAP = "setup gap"
 RESTORE_ROOT = (
     "These projects name a root checkout that no longer exists; restore "
-    "it, or remove the project's state folder once nothing in it is "
-    "needed: "
+    "it, or remove the project's state once the service retired its "
+    "lanes: "
 )
+FORGET_ROOT = "agent-parley gc --project {root} --apply"
 
 
 def cli_command() -> str:

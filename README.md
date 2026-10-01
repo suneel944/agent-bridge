@@ -239,6 +239,7 @@ the same sweep on demand:
 agent-parley gc           # what would be reclaimed, and what is kept and why
 agent-parley gc --apply   # reclaim the lanes whose work has landed
 agent-parley gc --apply --force  # also dirty lane-made worktrees, checkpointed
+agent-parley gc --project ROOT --apply  # drop a gone root's project state
 ```
 
 A lane is reclaimed only when it is idle, holds no claim, has nothing
