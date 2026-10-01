@@ -19,6 +19,7 @@ from agent_parley import (
     issues,
     lanes,
     lifecycle,
+    notify,
     process,
     recovery,
     roster,
@@ -115,6 +116,41 @@ def inbox(bridge, paired, name):
         (message["subject"], message["body_md"])
         for message in listed["messages"]
     ]
+
+
+@pytest.mark.parametrize("peer", [True, False])
+def test_mail_pending_lists_the_orphan_decision_without_a_transport(
+    bridge, repo, paired, monkeypatch, peer
+):
+    monkeypatch.delenv("AGENT_PARLEY_NOTIFY", raising=False)
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "42")
+    killed(directory, "claude", STALLED + 100)
+    if peer:
+        running(directory, "codex")
+    supervision.poll(bridge.home, directory)
+    assert not notify.enabled(bridge.home)
+    assert issues.snapshot(directory)["issues"]["42"]["orphan"]
+
+    listed = bridge.mail(repo, "pending")
+
+    assert listed["pending"] == []
+    assert listed["orphans"] == [
+        {
+            "participant": "claude",
+            "detail": listed["orphans"][0]["detail"],
+            "decision": supervision.orphan_remedy("42", paired["root"], peer),
+        }
+    ]
+    assert listed["orphans"][0]["detail"].startswith("claims #42 orphaned")
+    shown = [
+        row["command"]
+        for row in bridge.problems()
+        if row["condition"] == "orphaned claims"
+    ]
+    assert shown == [listed["orphans"][0]["decision"]]
 
 
 def test_a_killed_lane_is_orphaned_announced_and_taken_by_a_peer(

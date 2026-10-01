@@ -139,7 +139,8 @@ LEGEND = (
     "An issue marked * is held by a lane whose session process is gone and "
     "which has been silent past the stall threshold; its note names those "
     "claims and the reservations that lane still holds. It is still owned "
-    "until a peer runs issue claim --take-orphaned.",
+    "until a peer runs issue claim --take-orphaned; with no live peer, the "
+    "note names the lane to start or the release instead.",
     "A lane over a token, call or hour budget gets a note naming the "
     "crossed limit. The lane budget informs and does not gate, and a token "
     "budget counts what the client recorded, not spend.",
@@ -474,6 +475,7 @@ def _row(
         "issues_held": len(owned),
         "overdue": overdue,
         "orphaned": orphaned,
+        "orphan_keys": orphan_keys,
         "orphan": supervision.orphan_marker(orphaned, orphan_keys),
         "issues": ",".join(
             f"#{number}"
@@ -523,6 +525,35 @@ def _row(
             state.get("last_prompt") or state.get("task", "")
         ).replace("\n", " ")[:MAX_PROMPT],
     }
+
+
+def _orphan_remedies(rows: list[dict], root: str) -> None:
+    """Names the operator's command on orphan notes no live peer can act on.
+
+    A row's orphan note is drawn before the project's other lanes are read,
+    so it assumes a peer can take the claims. Once every row is read, a
+    lane with no live peer gets the note naming the operator's command
+    instead.
+
+    Args:
+        rows: Every participant row of one project, before any filter.
+        root: Canonical project key the commands name.
+    """
+    states = {
+        row["participant"]: (
+            None
+            if str(row["state"]).startswith(("retired", "paused"))
+            else row.get("lane_state")
+        )
+        for row in rows
+    }
+    for row in rows:
+        if row["orphaned"] and not supervision.live_peer(
+            states, row["participant"]
+        ):
+            row["orphan"] = supervision.orphan_marker(
+                row["orphaned"], row["orphan_keys"], root, peer=False
+            )
 
 
 def _reported_ready(directory: Path, data: dict) -> set[str]:
@@ -667,6 +698,7 @@ def collect(
             _row(home, path.parent, data, agent, context)
             for agent in sorted(data["participants"])
         ]
+        _orphan_remedies(rows, data["root"])
         if providers:
             rows = [row for row in rows if row["provider_name"] in providers]
         projects.append(

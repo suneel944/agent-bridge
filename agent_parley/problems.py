@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from agent_parley import (
+    approvals,
     budgets,
     dialogs,
     issues,
@@ -68,6 +69,8 @@ WAKE = "wake attention"
 APPROVAL = "waiting on approval"
 HELD = "held by a native dialog"
 READY = "ready to retire"
+ORPHANED = "orphaned claims"
+INTEGRATE = "ready to integrate"
 HOLDING = "holding a refused key"
 FOREIGN = "second session"
 REFUSED = "recovery refused"
@@ -162,19 +165,39 @@ def _blocked(record: dict) -> str:
         The session state or recorded wake refusal that keeps delivered mail
         unread, and an empty string when nothing recorded keeps it unread. A
         message sent to a blocked lane is stored and never reaches a turn, so
-        no row offers `say` while one of these holds.
+        no row offers `say` while one of these holds. A recorded dialog
+        counts only while the session process that showed it may be alive.
     """
     result = str((record.get("wake") or {}).get("result", ""))
     if record["availability"]["state"] == supervision.STOPPED:
         return supervision.STOPPED
     if result in (DIALOG, ATTENTION):
         return result
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     if held.get("name") == dialogs.PERMISSION or held.get("escalated"):
         return DIALOG
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _dialog(record: dict) -> dict:
+    """Reads the native dialog a lane's session still shows, if any.
+
+    A dialog belongs to the session that showed it. The record is not
+    cleared when that session ends, so a dialog read while the session
+    process is known to be gone describes a prompt no terminal shows.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        The recorded dialog, or an empty mapping when none is recorded or
+        the lane's session process is known to be gone.
+    """
+    if record["availability"].get("process_alive") is False:
+        return {}
+    return record.get("dialog") or {}
 
 
 def _inferred(record: dict) -> str:
@@ -294,7 +317,7 @@ def _remedy(
         )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     if (
         blocked == DIALOG
         and wake.get("result") == DIALOG
@@ -463,6 +486,92 @@ def _cap_rows(
     ]
 
 
+def _awaiting_integration(record: dict) -> tuple[dict, int] | None:
+    """Finds a ready report whose open pull request waits for integration.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        The claim carrying the open pull request, preferring the reported
+        issue, beside the seconds the ready report has waited, or None when
+        the lane's latest report is not a ready one still unintegrated or
+        none of its claims has an open pull request in the cached reading.
+        The cache holds only open pull requests, so a merged or closed one
+        ends the wait here.
+    """
+    wait = next(
+        (
+            item
+            for item in record.get("waiting") or []
+            if item.get("kind") == "report_integration"
+            and not item.get("complete")
+        ),
+        None,
+    )
+    if wait is None:
+        return None
+    opened = sorted(
+        (claim for claim in record["claims"] if claim.get("pull_request")),
+        key=lambda claim: claim["issue"] != record.get("report_issue"),
+    )
+    if not opened:
+        return None
+    return opened[0], int(wait.get("seconds") or 0)
+
+
+def _integrate_rows(
+    record: dict, name: str, repo: str, root: str
+) -> list[dict]:
+    """Reports a ready report whose open pull request waits for integration.
+
+    A lane that reported ready and opened a pull request may stop before
+    anyone integrates it. Nothing merges on its own here; the row names the
+    pull request and the integration step its approval policy allows,
+    once the wait passes the same ceiling a declared wait uses.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+
+    Returns:
+        One row naming the issue, the pull request and the command, or no
+        row while no such report waits or it is younger than
+        `supervision.DEFAULT_WAIT_CEILING`.
+    """
+    found = _awaiting_integration(record)
+    if found is None:
+        return []
+    claim, seconds = found
+    if seconds <= supervision.DEFAULT_WAIT_CEILING:
+        return []
+    pull = claim["pull_request"]
+    shown = f"pull request #{pull['number']}"
+    if pull.get("url"):
+        shown += f" ({pull['url']})"
+    approval = record.get("approval")
+    if approval and approval.get("state") != approvals.APPROVED:
+        command = f"agent-parley approve {name} {repo}"
+    else:
+        command = (
+            f"review and merge {shown}, or agent-parley participant merge "
+            f"{name} {repo}"
+        )
+    return [
+        _row(
+            INTEGRATE,
+            f"issue #{claim['issue']} reported ready with open {shown} "
+            "awaiting integration",
+            command,
+            seconds,
+            name,
+            root,
+        )
+    ]
+
+
 def _retire_rows(
     record: dict, name: str, repo: str, root: str, ceiling: float
 ) -> list[dict]:
@@ -487,11 +596,15 @@ def _retire_rows(
 
     Returns:
         One row naming the orphaned claims and the age of the oldest
-        marker, or no row while the lane holds any claim not orphaned or
-        every marker is younger than the ceiling.
+        marker, or no row while the lane holds any claim not orphaned,
+        every marker is younger than the ceiling, or a ready report with an
+        open pull request waits for integration, since retiring would drop
+        the claim that pull request closes.
     """
     claims = record["claims"]
     if record["availability"].get("process_alive") is True:
+        return []
+    if _awaiting_integration(record):
         return []
     if not claims or not all(claim.get("orphaned") for claim in claims):
         return []
@@ -511,6 +624,51 @@ def _retire_rows(
             root,
             BY_OPERATOR,
             len(claims),
+        )
+    ]
+
+
+def _orphan_rows(record: dict, name: str, root: str, peer: bool) -> list[dict]:
+    """Reports a lane's orphaned claims with who can move them.
+
+    The supervisor's orphan decision is also sent through notification
+    transports, which may be off. This row is derived from the ledger
+    alone, so the remedy reaches the operator either way. With no live
+    lane besides the holder, it names the operator's command rather than
+    a peer that does not exist.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        root: Canonical project key.
+        peer: Whether a live lane besides this one exists to take them.
+
+    Returns:
+        One row naming the orphaned claims and the age of the oldest marker,
+        or no row while the lane's session process is alive or it holds no
+        orphaned claim.
+    """
+    if record["availability"].get("process_alive") is True:
+        return []
+    orphaned = [claim for claim in record["claims"] if claim.get("orphaned")]
+    if not orphaned:
+        return []
+    numbers = ", ".join(f"#{claim['issue']}" for claim in orphaned)
+    issue = str(orphaned[0]["issue"]) if len(orphaned) == 1 else "NUMBER"
+    reason = orphaned[0].get("orphan_reason") or "no reason recorded"
+    return [
+        _row(
+            ORPHANED,
+            f"claims {numbers} orphaned ({reason})",
+            supervision.orphan_remedy(issue, root, peer),
+            max(
+                int(claim.get("orphan_recorded_seconds") or 0)
+                for claim in orphaned
+            ),
+            name,
+            root,
+            BY_OPERATOR,
+            len(orphaned),
         )
     ]
 
@@ -722,6 +880,7 @@ def _lane_rows(
     ack_after: float,
     now: float,
     directory: Path | None = None,
+    peer: bool = True,
 ) -> list[dict]:
     """Derives the rows one lane record carries, one per cause.
 
@@ -734,6 +893,8 @@ def _lane_rows(
         now: Unix time the observation ages are measured against.
         directory: Private project state directory holding the lane's
             key-hold deadline, or None to read no deadline.
+        peer: Whether a live lane besides this one exists to take its
+            orphaned claims.
 
     Returns:
         Zero or more rows, one per cause the record shows, each carrying how
@@ -747,7 +908,10 @@ def _lane_rows(
         because a prompt the operator is about to answer needs no row. A
         native dialog the launcher escalated is reported at once by name,
         with the options it offers, because nothing will answer it but the
-        operator. A row about the lane's state says when the dialog watcher
+        operator. A prompt or dialog is reported only while the session
+        process that showed it may be alive; once that process is gone no
+        terminal shows the prompt, and the lane carries only the stopped
+        remedy. A row about the lane's state says when the dialog watcher
         or the liveness sample inferred that state and names the hook the
         lane's client lacks, because no hook confirmed it. A quiet lane
         that refused a peer a key it still holds is reported with the lanes
@@ -802,7 +966,7 @@ def _lane_rows(
                 actor,
             )
         )
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     since = held.get("since")
     if held.get("name") == dialogs.PERMISSION and isinstance(
         since, (int, float)
@@ -901,9 +1065,13 @@ def _lane_rows(
     rows.extend(
         _cap_rows(record, name, repo, root, config["max_claims_per_lane"])
     )
-    rows.extend(
-        _retire_rows(record, name, repo, root, config["orphan_retire_after"])
-    )
+    if _awaiting_integration(record):
+        rows.extend(_integrate_rows(record, name, repo, root))
+    else:
+        retire = _retire_rows(
+            record, name, repo, root, config["orphan_retire_after"]
+        )
+        rows.extend(retire or _orphan_rows(record, name, root, peer))
     rows.extend(_unresolved_rows(record, name, repo, root, now))
     rows.extend(_diverging_rows(record, name, repo, root))
     rows.extend(_ack_rows(record, name, repo, root, ack_after, waking))
@@ -1753,6 +1921,10 @@ def derive(
         after = ack_after or config["stalled_after"]
         repo = f"--repo {shlex.quote(str(project['root']))}"
         found: list[dict] = []
+        states = {
+            record["participant"]: record.get("lane_state")
+            for record in project["participants"]
+        }
         for record in project["participants"]:
             found.extend(
                 _lane_rows(
@@ -1763,6 +1935,7 @@ def derive(
                     after,
                     stamp,
                     directory,
+                    supervision.live_peer(states, record["participant"]),
                 )
             )
             aged.extend(
