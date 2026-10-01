@@ -865,3 +865,17 @@ def test_stopping_a_launcher_without_a_terminal_ends_its_client(tmp_path):
     finally:
         started.kill()
         started.wait()
+
+
+def test_the_lane_summary_skips_a_repository_project_json():
+    with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
+        directory = Path(temporary)
+        deep = directory / "lane" / "sub" / "deep"
+        deep.mkdir(parents=True)
+        write_json(directory / "project.json", {"participants": {"lane": {}}})
+        write_json(directory / "lane" / "sub" / "project.json", {"name": "lib"})
+        write_json(
+            directory / "lane-activity.json",
+            {"activity": "idle", "updated": 1},
+        )
+        assert terminal.lane_summary(deep) != ""

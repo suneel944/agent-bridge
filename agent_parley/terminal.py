@@ -574,8 +574,12 @@ def lane_summary(start: Path) -> str:
 
     A lane worktree sits directly under its project's private state
     directory, named for its participant, so the nearest ancestor whose
-    parent holds a manifest naming it is the lane. The summary is the same
-    line `compose_title` gives the tab, without a client title.
+    parent holds a manifest naming it is the lane. A repository checked
+    out inside the lane may carry its own unrelated `project.json` files
+    (an Nx workspace, for instance), so a manifest that does not name the
+    candidate folder is skipped rather than treated as proof there is no
+    enclosing lane. The summary is the same line `compose_title` gives
+    the tab, without a client title.
 
     Args:
         start: Working directory of the native client.
@@ -588,7 +592,7 @@ def lane_summary(start: Path) -> str:
         if manifest is None:
             continue
         if lane.name not in (manifest.get("participants") or {}):
-            return ""
+            continue
         return compose_title(
             lane_title(
                 lane.name,
