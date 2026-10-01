@@ -29,6 +29,7 @@ from agent_parley import (
     dashboard,
     evidence,
     forge,
+    issues,
     metrics,
     process,
     records,
@@ -2662,6 +2663,38 @@ def test_retire_removes_a_lane_and_revokes_its_credential(bridge, repo, paired):
     readded = bridge.add_participant(repo, "codex", "codex")
     assert Path(readded["lanes"]["codex"]).exists()
     assert event_summary(lane.parent, "codex")["events"] == 0
+
+
+def test_retire_releases_the_lanes_reservations_and_claims(
+    bridge, repo, paired
+):
+    _, directory = bridge.project(repo)
+    data = json.loads((directory / "project.json").read_text())
+    store.initialize(bridge.home)
+    actors = {}
+    for name in ("claude", "codex"):
+        display = data["participants"][name]["display"]
+        token = store.register(bridge.home, data["root"], display)[
+            "registration_token"
+        ]
+        actors[name] = store.authenticate(bridge.home, token)
+    claude, codex = actors["claude"], actors["codex"]
+    held = store.call(
+        bridge.home, claude, "file_reservation_paths", {"paths": ["shared.txt"]}
+    )
+    assert held["granted"]
+    queued = store.call(
+        bridge.home, codex, "request_reservation", {"paths": ["shared.txt"]}
+    )
+    assert not queued.get("granted")
+    issues.change(
+        directory, "claude", "claim", "7", participants={"claude", "codex"}
+    )
+    bridge.retire(repo, "claude")
+    active = store.active_reservations(bridge.home, data["root"])
+    assert claude["name"] not in active
+    assert active[codex["name"]] == ["shared.txt"]
+    assert issues.snapshot(directory)["issues"]["7"]["owner"] is None
 
 
 def test_retire_keeps_a_branch_that_still_holds_commits(bridge, repo, paired):
