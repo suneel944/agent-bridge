@@ -401,13 +401,12 @@ def release_candidate(root: Path, requested: str = "") -> tuple[str, int, int]:
     the count is measured from. The proposal then looks ahead for a version
     that is genuinely free.
 
-    A maintainer can name the kind instead. That request exists for the case
-    measurement cannot see: a published package repaired by a change outside
-    the package, such as the README the index renders, or a repair that landed
-    as a plain fix and must ship before a tenth issue. The requested kind
-    replaces the markers and the count, and nothing else: the version must
-    still be free, and the tree must still hold at least one commit past the
-    approved release, so a request never republishes an unchanged tree.
+    A maintainer can name the kind instead. That request exists for a package
+    repair that landed as a plain fix and must ship before a tenth issue. The
+    requested kind replaces the markers and the count, and nothing else: the
+    version must still be free, and the tree must still hold at least one
+    commit past the approved release. The candidate phase then still requires
+    a package change, so a documentation-only tree never ships as a version.
 
     Args:
         root: Checkout containing the version manifest and release history.
@@ -938,7 +937,7 @@ def main() -> None:
         if requested == MEASURED:
             requested = ""
         version, issues, features = release_candidate(root, requested)
-        changed = bool(requested) or has_package_changes(root)
+        changed = has_package_changes(root)
         eligible = bool(version) and changed
         emit("eligible", str(eligible).lower())
         emit("version", version)
@@ -952,6 +951,11 @@ def main() -> None:
             print(
                 f"{measured}; a {requested} release was requested but main "
                 "holds no commit past the approved release."
+            )
+        elif requested and not changed:
+            print(
+                f"{measured}; a {requested} release was requested but the "
+                "package is unchanged since the approved release."
             )
         elif requested:
             print(
