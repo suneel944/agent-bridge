@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.2](https://github.com/suneel944/agent-parley/compare/v0.15.1...v0.15.2) (2026-10-01)
+
+
+### Changes
+
+* docs: play the README launch video in the native player (#836)
+* docs: show one README video (#835)
+
 ## [0.15.1](https://github.com/suneel944/agent-parley/compare/v0.15.0...v0.15.1) (2026-10-01)
 
 
