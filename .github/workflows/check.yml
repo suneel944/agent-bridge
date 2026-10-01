@@ -104,7 +104,7 @@ jobs:
           mkdir -p "$root/home"
           wheel=$(ls "$RUNNER_TEMP"/dist/agent_parley-*.whl)
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
-          next="Next: cd your-repo && agent-parley run claude"
+          next="No CLI yet? Try: agent-parley demo"
           clean() {
             status=0
             env -i HOME="$root/home" PATH="$1" \
