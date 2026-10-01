@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/suneel944/agent-parley/compare/v0.15.0...v0.15.1) (2026-10-01)
+
+
+### Changes
+
+* fix: steady the wait timing test and lead the README with the launch video (#833)
+
 ## [0.15.0](https://github.com/suneel944/agent-parley/compare/v0.14.0...v0.15.0) (2026-10-01)
 
 
