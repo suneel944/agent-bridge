@@ -13,6 +13,14 @@ from each CLI's own record (`installed_plugins.json` under
 `CODEX_HOME`) to stay fast; `plugins status` asks the CLIs themselves and is
 the authoritative reading.
 
+For a registered project whose service runs, the screen also reads what
+`agent-parley problems` would list, from the readings supervision cached
+rather than a fresh forge poll. A `Needs you` line gives the count and the
+two most urgent rows, and `agent-parley problems` then leads the next
+commands. When no outbound notification transport is configured and the
+project has lanes, a `Notify off` line appears with `agent-parley notify
+setup`. A project with nothing pending shows neither line.
+
 Use `agent-parley --help` for the full command list, led by a start-here
 group (`run`, `status`, `top`, `problems`, `demo`, `doctor`) and then grouped
 as coordination, policy, observability and lifecycle, and
