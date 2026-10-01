@@ -1517,6 +1517,68 @@ def test_a_lane_ready_to_retire_carries_no_separate_orphan_row(monkeypatch):
     assert not orphaned_lane(LIVE, monkeypatch, problems.ORPHANED)
 
 
+def integrating_lane(monkeypatch, seconds, pull=True, approval=None):
+    """Derives a dead lane's rows holding a waiting ready report."""
+    monkeypatch.setattr(supervision, "dirty_paths", lambda lane: [])
+    opened = {"number": 830, "url": "https://example.test/pull/830"}
+    claims = [
+        {**ORPHANED[0], "pull_request": opened if pull else None},
+    ]
+    record = lane_record(
+        claims=claims,
+        availability=GONE,
+        report_issue=42,
+        approval=approval,
+        waiting=[
+            {
+                "kind": "report_integration",
+                "action": "pending",
+                "seconds": seconds,
+                "complete": False,
+            }
+        ],
+    )
+    return problems._lane_rows(
+        record,
+        {"lane": "/lane", "branch": "work"},
+        "/root",
+        {**supervision.DEFAULTS, "wake": False},
+        600,
+        time.time(),
+    )
+
+
+def test_a_ready_report_waiting_on_its_pull_request_replaces_retirement(
+    monkeypatch,
+):
+    ceiling = supervision.DEFAULT_WAIT_CEILING
+    late = integrating_lane(monkeypatch, ceiling + 1)
+    conditions = [row["condition"] for row in late]
+    assert problems.READY not in conditions
+    assert problems.ORPHANED not in conditions
+    [row] = [row for row in late if row["condition"] == problems.INTEGRATE]
+    assert row["detail"] == (
+        "issue #42 reported ready with open pull request #830 "
+        "(https://example.test/pull/830) awaiting integration"
+    )
+    assert row["command"].endswith(
+        "agent-parley participant merge claude --repo /root"
+    )
+    assert row["seconds"] == ceiling + 1
+    early = integrating_lane(monkeypatch, ceiling)
+    assert not {problems.INTEGRATE, problems.READY} & {
+        row["condition"] for row in early
+    }
+    closed = integrating_lane(monkeypatch, ceiling + 1, pull=False)
+    assert problems.READY in {row["condition"] for row in closed}
+    held = integrating_lane(
+        monkeypatch, ceiling + 1, approval={"state": "pending"}
+    )
+    [row] = [row for row in held if row["condition"] == problems.INTEGRATE]
+    assert row["command"] == "agent-parley approve claude --repo /root"
+    assert "approve" in declared()
+
+
 def test_a_live_lane_with_orphan_markers_is_never_offered_retirement(
     monkeypatch,
 ):

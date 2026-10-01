@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from agent_parley import (
+    approvals,
     budgets,
     dialogs,
     issues,
@@ -69,6 +70,7 @@ APPROVAL = "waiting on approval"
 HELD = "held by a native dialog"
 READY = "ready to retire"
 ORPHANED = "orphaned claims"
+INTEGRATE = "ready to integrate"
 HOLDING = "holding a refused key"
 FOREIGN = "second session"
 REFUSED = "recovery refused"
@@ -484,6 +486,92 @@ def _cap_rows(
     ]
 
 
+def _awaiting_integration(record: dict) -> tuple[dict, int] | None:
+    """Finds a ready report whose open pull request waits for integration.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        The claim carrying the open pull request, preferring the reported
+        issue, beside the seconds the ready report has waited, or None when
+        the lane's latest report is not a ready one still unintegrated or
+        none of its claims has an open pull request in the cached reading.
+        The cache holds only open pull requests, so a merged or closed one
+        ends the wait here.
+    """
+    wait = next(
+        (
+            item
+            for item in record.get("waiting") or []
+            if item.get("kind") == "report_integration"
+            and not item.get("complete")
+        ),
+        None,
+    )
+    if wait is None:
+        return None
+    opened = sorted(
+        (claim for claim in record["claims"] if claim.get("pull_request")),
+        key=lambda claim: claim["issue"] != record.get("report_issue"),
+    )
+    if not opened:
+        return None
+    return opened[0], int(wait.get("seconds") or 0)
+
+
+def _integrate_rows(
+    record: dict, name: str, repo: str, root: str
+) -> list[dict]:
+    """Reports a ready report whose open pull request waits for integration.
+
+    A lane that reported ready and opened a pull request may stop before
+    anyone integrates it. Nothing merges on its own here; the row names the
+    pull request and the integration step its approval policy allows,
+    once the wait passes the same ceiling a declared wait uses.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+
+    Returns:
+        One row naming the issue, the pull request and the command, or no
+        row while no such report waits or it is younger than
+        `supervision.DEFAULT_WAIT_CEILING`.
+    """
+    found = _awaiting_integration(record)
+    if found is None:
+        return []
+    claim, seconds = found
+    if seconds <= supervision.DEFAULT_WAIT_CEILING:
+        return []
+    pull = claim["pull_request"]
+    shown = f"pull request #{pull['number']}"
+    if pull.get("url"):
+        shown += f" ({pull['url']})"
+    approval = record.get("approval")
+    if approval and approval.get("state") != approvals.APPROVED:
+        command = f"agent-parley approve {name} {repo}"
+    else:
+        command = (
+            f"review and merge {shown}, or agent-parley participant merge "
+            f"{name} {repo}"
+        )
+    return [
+        _row(
+            INTEGRATE,
+            f"issue #{claim['issue']} reported ready with open {shown} "
+            "awaiting integration",
+            command,
+            seconds,
+            name,
+            root,
+        )
+    ]
+
+
 def _retire_rows(
     record: dict, name: str, repo: str, root: str, ceiling: float
 ) -> list[dict]:
@@ -508,11 +596,15 @@ def _retire_rows(
 
     Returns:
         One row naming the orphaned claims and the age of the oldest
-        marker, or no row while the lane holds any claim not orphaned or
-        every marker is younger than the ceiling.
+        marker, or no row while the lane holds any claim not orphaned,
+        every marker is younger than the ceiling, or a ready report with an
+        open pull request waits for integration, since retiring would drop
+        the claim that pull request closes.
     """
     claims = record["claims"]
     if record["availability"].get("process_alive") is True:
+        return []
+    if _awaiting_integration(record):
         return []
     if not claims or not all(claim.get("orphaned") for claim in claims):
         return []
@@ -973,10 +1065,13 @@ def _lane_rows(
     rows.extend(
         _cap_rows(record, name, repo, root, config["max_claims_per_lane"])
     )
-    retire = _retire_rows(
-        record, name, repo, root, config["orphan_retire_after"]
-    )
-    rows.extend(retire or _orphan_rows(record, name, root, peer))
+    if _awaiting_integration(record):
+        rows.extend(_integrate_rows(record, name, repo, root))
+    else:
+        retire = _retire_rows(
+            record, name, repo, root, config["orphan_retire_after"]
+        )
+        rows.extend(retire or _orphan_rows(record, name, root, peer))
     rows.extend(_unresolved_rows(record, name, repo, root, now))
     rows.extend(_diverging_rows(record, name, repo, root))
     rows.extend(_ack_rows(record, name, repo, root, ack_after, waking))
