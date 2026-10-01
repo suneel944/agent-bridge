@@ -66,7 +66,7 @@ def machine(tmp_path):
     return install, calls, binary, home
 
 
-def test_install_then_rerun_upgrades_in_place(machine):
+def test_install_then_rerun_force_installs_the_latest(machine):
     install, calls, binary, home = machine
     stub(binary, "uv", UV)
     first = install()
@@ -84,8 +84,8 @@ def test_install_then_rerun_upgrades_in_place(machine):
     ]
     second = install()
     assert second.returncode == 0, second.stderr
-    assert "uv tool upgrade agent-parley" in calls()
-    assert calls().count("uv tool install agent-parley") == 1
+    assert "uv tool install --force agent-parley" in calls()
+    assert not any(call.startswith("uv tool upgrade") for call in calls())
     assert calls().count("agent-parley plugins install") == 2
     assert "export PATH" not in first.stdout + second.stdout
     assert list(home.iterdir()) == []
