@@ -2,8 +2,9 @@
 
 This directory holds the source of the Agent Parley launch video: a
 HyperFrames composition (`index.html`) and the terminal frames it shows
-(`frames.js`). The MP4 is attached to the release; only the animated WebP
-cut is checked in, as `docs/assets/launch.webp`, for the README first screen.
+(`frames.js`). The rendered MP4 is not checked in. It is attached to the
+release, and the README first screen plays a copy uploaded through the GitHub
+web editor, whose `user-attachments` URL GitHub renders as a video player.
 
 ## What is real and what is authored
 
@@ -28,18 +29,13 @@ from `agent_parley/demo_scenario.py`.
 
 Run from the repository root. The recorder needs the development environment
 (`uv sync`); the render needs Node.js with `npx`, and its first run downloads
-HyperFrames, its headless browser, GSAP and the two web fonts. The animated
-WebP needs an `ffmpeg` built with `libwebp`.
+HyperFrames, its headless browser, GSAP and the two web fonts.
 
 ```sh
 uv run --locked python scripts/record_demo.py --video
 npx --yes hyperframes@0.8.98 check docs/video
 npx --yes hyperframes@0.8.98 render docs/video --quality delivery --crf 23 \
   --output /tmp/launch/launch.mp4
-ffmpeg -y -i /tmp/launch/launch.mp4 \
-  -vf "fps=8,scale=1280:-2:flags=lanczos" \
-  -c:v libwebp_anim -lossless 0 -q:v 45 -compression_level 6 -loop 0 \
-  /tmp/launch/launch.webp
 ```
 
 The first command records the short tour again, keeps the steps whose

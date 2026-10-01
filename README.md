@@ -11,9 +11,7 @@
 curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
 ```
 
-<p align="center">
-  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.1/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
-</p>
+https://github.com/user-attachments/assets/1de399fc-4078-49da-a4f9-116789bccb7d
 
 <p align="center">
   Try it without an account: <code>agent-parley demo</code> runs the story this
