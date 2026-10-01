@@ -12,13 +12,13 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 ```
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo-short.svg" width="800" alt="A 24-second terminal recording: lane ada claims issue 41, lane grace asks to reserve the same paths and gets a conflict naming ada, grace accepts ada's handoff of issue 41 and the reservation moves with it, then agent-parley top shows both lanes">
+  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.0/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
 </p>
 
 <p align="center">
   Try it without an account: <code>agent-parley demo</code> runs the story this
-  recording is cut from, with stub lanes in a throwaway sandbox and no native
-  CLI, model or network.
+  video is cut from, with stub lanes in a throwaway sandbox and no native CLI,
+  model or network.
 </p>
 
 <p align="center">
@@ -76,8 +76,10 @@ Nine chapters: parallel lanes, the work order, claims and reservations, hook
 guardrails, handoffs, plan revisions, run budgets, unattended integration and
 the dashboard. Every frame is captured command output from the shipped
 coordination path; only the native client is a stand-in, so no model runs.
-The short recording at the top is four frames of the same harness running the
-`agent-parley demo` story. `make demo-stub` reproduces the full one with
+The launch video at the top is cut from the same harness running the
+`agent-parley demo` story, re-cut with
+[`docs/video`](https://github.com/suneel944/agent-parley/blob/main/docs/video/README.md).
+`make demo-stub` reproduces the full one with
 [`scripts/record_demo.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_demo.py);
 `make demo` records real `claude` and `codex` sessions with
 [`scripts/record_live.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_live.py).
