@@ -161,6 +161,15 @@ command begins with that interpreter and module and chains no second command.
 A prompt for any other command escalates as before. A participant entry
 overrides the project entry, so one lane can stay fully interactive.
 
+The client matches the CLI rule only against one plain command. A call that
+puts the prefix in a variable, changes directory first, chains a second
+command, pipes or redirects (`P=...; cd <lane> && $P issue accept ... | grep`)
+falls outside it and would stop on a prompt nobody answers in a resumed
+session. The `PreToolUse` hook therefore refuses any shell call that runs the
+CLI in such a form, recorded as `chained_cli`, and the reason tells the lane
+to run the command alone; the protocol prompt and the `coordinate` skill state
+the same rule.
+
 A lane the supervisor launches or resumes runs in the client's default
 permission mode unless you record `auto_mode`. A lane you started by hand and
 switched to the client's auto mode does not carry that choice into a

@@ -213,6 +213,7 @@ class Reason(StrEnum):
     UNREADABLE_PAYLOAD = "unreadable_payload"
     OUTSIDE_LANE = "outside_lane"
     PERMISSION_DENIED = "permission_denied"
+    CHAINED_CLI = "chained_cli"
 
 
 UNOBSERVED = frozenset(
@@ -1368,6 +1369,41 @@ def diagnosable(payload: dict) -> bool:
     return bool(segments) and all(map(bridge_invocation, segments))
 
 
+def chained_cli(payload: dict) -> bool:
+    """Reports whether a shell call wraps this bridge's CLI in other syntax.
+
+    A launch that records `approve_bridge_tools` allows `protocol.cli_rule`,
+    and the client matches that rule only against one plain command. A call
+    that also changes directory, expands a variable, chains a second
+    command, pipes or redirects falls outside it and raises a native prompt,
+    which nobody answers in a session the service resumed. Refusing the call
+    first costs one retype and tells the lane the form that runs.
+
+    Args:
+        payload: Native ``PreToolUse`` hook payload.
+
+    Returns:
+        True when the command runs the bridge's CLI and is not that single
+        plain command.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return False
+    command = str(tool_input.get("command", tool_input.get("cmd", "")))
+    segments = shell_segments(command)
+    calls = [
+        segment
+        for segment in segments
+        if bridge_invocation(invoked(segment))
+        or f"-m {protocol.CLI_MODULE}" in " ".join(segment)
+    ]
+    return bool(calls) and (
+        len(segments) > 1
+        or any(construct in command for construct in UNCHECKED_SHELL)
+        or any("$" in segment[0] or "=" in segment[0] for segment in calls)
+    )
+
+
 def bridge_invocation(words: list[str]) -> bool:
     """Reports whether one simple command runs this bridge's own CLI.
 
@@ -1631,10 +1667,12 @@ def hazard(
     """Finds the coordination hazard that makes one tool call unsafe.
 
     Pending mail and notices are context, never a reason to refuse a call.
-    Only two situations refuse: the call writes a path that overlaps an
-    exclusive reservation another lane holds, or an offer addressed to this
-    lane is about to expire unanswered. A call that only reads, and the
-    project's own coordination tools, are never refused for coordination.
+    Only three situations refuse: a shell call wraps this bridge's CLI in
+    syntax its pre-approval rule cannot match (`chained_cli`), the call
+    writes a path that overlaps an exclusive reservation another lane
+    holds, or an offer addressed to this lane is about to expire
+    unanswered. Otherwise a call that only reads, and the project's own
+    coordination tools, are never refused for coordination.
 
     Args:
         payload: Native ``PreToolUse`` hook payload.
@@ -1646,6 +1684,15 @@ def hazard(
     Returns:
         The denial cause and its reason text, or None when the call is safe.
     """
+    command = protocol.cli_command()
+    if chained_cli(payload):
+        return Reason.CHAINED_CLI, (
+            f"Run each Agent Parley CLI command alone, as `{command} ARGS` "
+            "from your worktree: no variable, `cd`, `;`, `&&`, `|`, "
+            "redirect or second command in the same call. Only that plain "
+            "form is pre-approved, so this call would wait on a permission "
+            "prompt. Change directory or filter output in a separate call."
+        )
     if exempt(payload):
         return None
     if conflict := reserved_conflict(payload, lane, mail):
@@ -1655,7 +1702,6 @@ def hazard(
             f"{held['holder']}. Coordinate with {held['holder']} or "
             "wait for the release; reservations are advisory."
         )
-    command = protocol.cli_command()
     now = time.time()
     for number, item in (issues.get("issues") or {}).items():
         offer = item.get("offer") or {}
@@ -2108,7 +2154,7 @@ def unscanned_hazard(
         The mailbox batch read and the hazard found, or None when the call
         is safe or coordination cannot be read.
     """
-    if exempt(payload):
+    if exempt(payload) and not chained_cli(payload):
         return None
     try:
         mail = mailbox(home, root, name)
