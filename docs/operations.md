@@ -1295,11 +1295,20 @@ competing reservation is judged by, and against the paths the lane itself
 holds: those committed on its branch and those still uncommitted in its
 worktree. A match is printed as an indented line under the lane's row in `top`,
 under the reservation count in `status`, and carried in the
-`base_advance_paths` field of `top --json` and `status --json`. The lane's
-lifecycle hook delivers one bounded advisory notice naming those paths and
-stating that nothing was rebased; the notice repeats only when the set of paths
-changes, which the hook records in the lane's activity state. Nothing rebases,
-pauses or reverts, and a Git failure or timeout reports nothing rather than an
+`base_advance_paths` field of `top --json` and `status --json`. The owning lane
+is told once per set of moved paths, through the path that already carries its
+coordination: the lifecycle hook at its next event, or the polled delivery file
+for a CLI without hooks. Neither path wakes the lane for it, so an idle lane
+reads it with its next wake and a working one at its next natural stop. The
+bounded notice names those paths, states that nothing was rebased, and gives
+the command that rebases the lane, `git -C <lane> rebase <base>`, where the
+base is the branch checked out in the base checkout or its commit when that is
+detached. It counts against the same injection budget as every other notice
+and repeats only when the set of paths changes. The delivery time is recorded
+in the lane's activity state, and the marker in `top` and `status` ends with
+`lane told <UTC time>` or `lane not told yet`; `top --json` and `status --json`
+carry it as `base_advance_told_at`. Nothing rebases, pauses or reverts, and a
+Git failure or timeout reports nothing rather than an
 error.
 
 Every recorded decision carries the failure that produced it, when one did, so
