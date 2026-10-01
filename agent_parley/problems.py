@@ -1920,14 +1920,11 @@ def derive(
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
         repo = f"--repo {shlex.quote(str(project['root']))}"
-<<<<<<< HEAD
         found: list[dict] = []
-=======
         states = {
             record["participant"]: record.get("lane_state")
             for record in project["participants"]
         }
->>>>>>> dbcfce1 (fix: name the operator's command for an orphan no live lane can take)
         for record in project["participants"]:
             found.extend(
                 _lane_rows(
