@@ -71,7 +71,7 @@ if [ "$spec" != agent-parley ]; then
     uv tool install --force "$spec"
 elif uv tool list 2>/dev/null | grep -q '^agent-parley '; then
     say "Upgrading agent-parley"
-    uv tool upgrade agent-parley
+    uv tool install --force agent-parley
 else
     say "Installing agent-parley"
     uv tool install agent-parley

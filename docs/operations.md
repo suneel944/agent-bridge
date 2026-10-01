@@ -10,8 +10,9 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 
 `install.sh` installs uv through its official installer only when uv is
 missing, with `UV_NO_MODIFY_PATH=1` so no shell startup file is edited. It then
-runs `uv tool install agent-parley`, or `uv tool upgrade agent-parley` when the
-tool is already installed, followed by `agent-parley plugins install` and
+runs `uv tool install agent-parley`, or `uv tool install --force agent-parley`
+when the tool is already installed, so a pinned or wheel install still moves
+to the latest release, followed by `agent-parley plugins install` and
 `agent-parley doctor`, and prints the next command. It never uses sudo. When
 uv's directory is not on PATH it prints the exact `export PATH=...` line to add.
 Re-running it upgrades in place. Setting `AGENT_PARLEY_SPEC` to another package
