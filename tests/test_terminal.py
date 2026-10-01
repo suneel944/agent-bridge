@@ -820,3 +820,48 @@ def test_the_status_line_command_prints_the_lane_summary():
             check=True,
         )
         assert outside.stdout == ""
+
+
+def test_stopping_a_launcher_without_a_terminal_ends_its_client(tmp_path):
+    """Stops the launcher the way `participant stop` does; no client remains.
+
+    A lane launched without a terminal records the launcher as its session
+    process. Signalling that recorded process must also end the native client
+    the launcher started, or the client keeps running orphaned (#844).
+    """
+    marker = tmp_path / "client.pid"
+    client = (
+        "import os, sys, time\n"
+        "path = sys.argv[1]\n"
+        "with open(path + '.tmp', 'w') as handle:\n"
+        "    handle.write(str(os.getpid()))\n"
+        "os.replace(path + '.tmp', path)\n"
+        "time.sleep(60)\n"
+    )
+    launcher = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from agent_parley import terminal\n"
+        "command = [sys.executable, '-c', sys.argv[1], sys.argv[2]]\n"
+        "terminal.call(command, Path(sys.argv[3]), {})\n"
+    )
+    source = str(Path(terminal.__file__).parents[1])
+    started = subprocess.Popen(
+        [sys.executable, "-c", launcher, client, str(marker), str(tmp_path)],
+        stdin=subprocess.DEVNULL,
+        env=dict(os.environ, PYTHONPATH=source),
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        client_pid = int(marker.read_text())
+        client_ticks = process.start_ticks(client_pid)
+        process.ServerProcess(
+            started.pid, process.start_ticks(started.pid)
+        ).stop()
+        assert started.wait(timeout=20) == 0
+        assert not process.alive(client_pid, client_ticks)
+    finally:
+        started.kill()
+        started.wait()

@@ -267,7 +267,6 @@ reported.
             shlex,
             shutil,
             store,
-            subprocess,
             supervision,
             terminal,
             write_json,
@@ -598,7 +597,7 @@ reported.
                             home=self.home,
                             titles=supervised["titles"],
                         )
-                    return subprocess.call(command, cwd=lane, env=env)
+                    return terminal.call(command, lane, env)
             finally:
                 with lock(lane.parent / f"{agent}-checkpoint.lock", timeout=1):
                     state = json.loads(activity_path.read_text())
