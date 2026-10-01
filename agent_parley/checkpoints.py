@@ -1399,8 +1399,39 @@ def chained_cli(payload: dict) -> bool:
     ]
     return bool(calls) and (
         len(segments) > 1
-        or any(construct in command for construct in UNCHECKED_SHELL)
+        or redirects(command)
+        or any(
+            construct in command
+            for construct in UNCHECKED_SHELL
+            if construct not in "<>"
+        )
         or any("$" in segment[0] or "=" in segment[0] for segment in calls)
+    )
+
+
+def redirects(command: str) -> bool:
+    """Reports whether a shell command redirects outside any quotes.
+
+    A quoted `<` or `>`, such as an arrow inside a message, is text the
+    shell passes through, not a redirect.
+
+    Args:
+        command: Shell text supplied to a native command tool.
+
+    Returns:
+        True when an unquoted redirect operator appears, or when the text
+        cannot be tokenized.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    return any(
+        token and not token.strip(";&|<>") and set(token) & set("<>")
+        for token in tokens
     )
 
 

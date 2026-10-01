@@ -346,6 +346,7 @@ def test_a_cli_call_the_pre_approval_cannot_match_is_refused(tmp_path, command):
     [
         f"{protocol.cli_command()} issue accept 7 --offer-id o1",
         "agent-parley status",
+        'agent-parley say codex "parser -> lexer, see <notes>"',
         "cd /lane && make check",
         "git log | grep agent_parley.cli",
     ],
