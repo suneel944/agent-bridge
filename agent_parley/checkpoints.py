@@ -332,6 +332,35 @@ def item_digest(item: str) -> str:
     return hashlib.blake2b(masked, digest_size=8).hexdigest()
 
 
+def base_advance_notice(paths: list[str], root: str, lane: str) -> str:
+    """Tells a lane the base branch moved over paths it holds.
+
+    The hook path and the polled delivery path both send this text once per
+    set of moved paths. It names the command that rebases the lane, and it
+    stays advisory: nothing was rebased, paused or reverted.
+
+    Args:
+        paths: Held paths the base branch changed since the lane forked.
+        root: Base checkout.
+        lane: The lane's worktree.
+
+    Returns:
+        The bounded notice text.
+    """
+    from agent_parley import supervision
+
+    command = supervision.rebase_command(root, lane)
+    return (
+        clip(
+            "The base branch advanced over paths you hold: " + ", ".join(paths),
+            300,
+        )
+        + "\nIt moved after this lane forked. Nothing was rebased or paused; "
+        "decide whether to rebase, merge, or coordinate before continuing."
+        + (f" To rebase: {clip(command, 300)}" if command else "")
+    )
+
+
 def fresh_notices(
     sections: list[tuple[str, str]],
     delivered: dict,
@@ -3410,6 +3439,7 @@ def checkpoint(
                 advanced = scanned["advanced"]
                 if not advanced:
                     state.pop("base_advance", None)
+                    state.pop("base_advance_at", None)
                 advance_notice = bool(advanced) and advanced != state.get(
                     "base_advance"
                 )
@@ -3529,15 +3559,9 @@ def checkpoint(
                         sections.append(
                             (
                                 "advance",
-                                clip(
-                                    "The base branch advanced over paths you "
-                                    "hold: " + ", ".join(advanced),
-                                    300,
-                                )
-                                + "\nIt moved after this lane forked. Nothing "
-                                "was rebased or paused; decide whether to "
-                                "rebase, merge, or coordinate before "
-                                "continuing.",
+                                base_advance_notice(
+                                    advanced, manifest["root"], str(lane)
+                                ),
                             )
                         )
                     if budget_notice:
@@ -3578,8 +3602,9 @@ def checkpoint(
                         settled["work_offer"] = offer["id"]
                     if edit_notice:
                         settled["operator_edits"] = edited
-                    if advance_notice:
+                    if "advance" in kinds:
                         settled["base_advance"] = advanced
+                        settled["base_advance_at"] = time.time()
                     if quiet or (
                         event == "Stop"
                         and (

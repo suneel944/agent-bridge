@@ -1037,8 +1037,8 @@ def lane_detail(record: dict, data: dict) -> None:
     )
     if edited := record["operator_edits"]:
         print("    " + supervision.operator_edit_marker(edited))
-    if advanced := record["base_advance_paths"]:
-        print("    " + supervision.base_advance_marker(advanced))
+    if record["base_advance_paths"]:
+        print("    " + record["base_advance"])
     if mail["named_resources"]:
         print("    Named resources held: " + ", ".join(mail["named_resources"]))
     if topics := mail.get("unread_topics"):

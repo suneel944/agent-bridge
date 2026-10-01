@@ -423,6 +423,7 @@ def _row(
     published = supervision.published_work(directory, agent)
     edited = context["operator_edits"].get(agent, [])
     advanced = context["base_advances"].get(agent, [])
+    told = supervision.base_advance_told(state, advanced)
     budget = budgets.report(
         home, directory, data, agent, context["usage"], context["records"]
     )
@@ -456,7 +457,8 @@ def _row(
         "operator_edits": edited,
         "operator_edit": supervision.operator_edit_marker(edited),
         "base_advance_paths": advanced,
-        "base_advance": supervision.base_advance_marker(advanced),
+        "base_advance": supervision.base_advance_marker(advanced, told),
+        "base_advance_told_at": told,
         "event_age": (
             tables.age(time.time() - events["last_ts"])
             if events["last_ts"]

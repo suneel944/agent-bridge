@@ -788,6 +788,7 @@ class StatusMixin(BridgeCore):
         participant = data["participants"][agent]
         name = participant["display"]
         state = activity(directory, agent)
+        told = supervision.base_advance_told(state, list(advanced))
         observed = supervision.presence(
             directory, agent, configuration["inactive_after"]
         )
@@ -980,6 +981,10 @@ class StatusMixin(BridgeCore):
             },
             "operator_edits": list(edited),
             "base_advance_paths": list(advanced),
+            "base_advance": supervision.base_advance_marker(
+                list(advanced), told
+            ),
+            "base_advance_told_at": views.timestamp(told),
             "idle_seconds": idle["seconds"],
             "idle_complete": idle["complete"],
             "budget": {

@@ -6,6 +6,7 @@ import contextvars
 import copy
 import hashlib
 import json
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1144,15 +1145,75 @@ def readings(
         return edits.result(), advances
 
 
-def base_advance_marker(paths: list[str]) -> str:
-    """Describes a base branch advance in one line, naming the paths."""
+def base_advance_marker(paths: list[str], told: float | None = None) -> str:
+    """Describes a base branch advance in one line, naming the paths.
+
+    Args:
+        paths: Held paths the base branch changed since the lane forked.
+        told: When the lane's hook delivered the notice for these paths, or
+            None when it has not been delivered yet.
+
+    Returns:
+        The marker, ending with when the lane was told, or an empty string
+        when no held path moved.
+    """
     if not paths:
         return ""
     plural = "" if len(paths) == 1 else "s"
+    delivery = (
+        time.strftime("lane told %Y-%m-%dT%H:%MZ", time.gmtime(told))
+        if told is not None
+        else "lane not told yet"
+    )
     return (
         f"base advanced over held path{plural} {', '.join(paths)} since this "
-        "lane forked; nothing was rebased"
+        f"lane forked; nothing was rebased; {delivery}"
     )
+
+
+def base_advance_told(state: dict, paths: list[str]) -> float | None:
+    """Reads when a lane's hook delivered the notice for these paths.
+
+    Args:
+        state: The lane's activity state.
+        paths: Held paths the base branch currently moved over.
+
+    Returns:
+        The delivery time, or None when the recorded notice named other
+        paths or none was recorded.
+    """
+    told = state.get("base_advance_at")
+    if (
+        not paths
+        or state.get("base_advance") != paths
+        or not isinstance(told, (int, float))
+    ):
+        return None
+    return float(told)
+
+
+def rebase_command(root: str, lane: str) -> str:
+    """Names the command that rebases a lane onto the current base head.
+
+    The base is named by the branch checked out in the base checkout, which
+    every lane worktree shares refs with, or by its commit when that checkout
+    is detached. Reading it is one Git call, taken only when a notice is
+    about to be delivered.
+
+    Args:
+        root: Base checkout.
+        lane: The lane's worktree.
+
+    Returns:
+        A shell command the lane can run, or an empty string when Git could
+        not name the base.
+    """
+    base = _read(root, "symbolic-ref", "--short", "-q", "HEAD") or _read(
+        root, "rev-parse", "HEAD"
+    )
+    if not base:
+        return ""
+    return shlex.join(["git", "-C", lane, "rebase", base])
 
 
 FIT_CHECKS = ("session", "capacity", "worktree", "mail")
