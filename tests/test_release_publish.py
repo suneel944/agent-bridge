@@ -656,7 +656,7 @@ def test_candidate_phase_reports_measured_eligibility(
     ("kind", "version"),
     [("patch", "0.1.2"), ("minor", "0.2.0"), ("major", "1.0.0")],
 )
-def test_a_requested_kind_releases_a_change_outside_the_package(
+def test_a_requested_kind_proposes_past_a_change_outside_the_package(
     counted_repo, local, kind, version
 ):
     product_commit(
@@ -692,7 +692,7 @@ def test_a_requested_kind_never_touches_the_measured_path(counted_repo, local):
 
 
 @pytest.mark.parametrize("kind", ["", "measured", "patch"])
-def test_candidate_phase_honours_a_requested_kind(
+def test_candidate_phase_refuses_a_documentation_only_tree(
     counted_repo, local, capsys, kind
 ):
     product_commit(
@@ -708,16 +708,37 @@ def test_candidate_phase_honours_a_requested_kind(
     emitted = dict(
         line.split("=", 1) for line in output.read_text().splitlines()
     )
+    assert emitted["eligible"] == "false"
     if kind == "patch":
-        assert emitted["eligible"] == "true"
-        assert emitted["version"] == "0.1.2"
         assert printed == (
-            "0 product issues and 0 product features since v0.1.1; "
-            "a patch release was requested, proposing 0.1.2."
+            "0 product issues and 0 product features since v0.1.1; a patch "
+            "release was requested but the package is unchanged since the "
+            "approved release."
         )
     else:
-        assert emitted["eligible"] == "false"
         assert emitted["version"] == ""
+
+
+def test_candidate_phase_honours_a_requested_kind_for_a_package_change(
+    counted_repo, local, capsys
+):
+    product_commit(counted_repo, "fix: a quiet repair", body="Refs #3")
+    output = counted_repo / ".git/candidate-output"
+    local.setenv("GITHUB_OUTPUT", str(output))
+    local.setenv("RELEASE_KIND", "patch")
+    local.chdir(counted_repo)
+    local.setattr(sys, "argv", ["release_publish", "candidate"])
+    release.main()
+    printed = capsys.readouterr().out.strip()
+    emitted = dict(
+        line.split("=", 1) for line in output.read_text().splitlines()
+    )
+    assert emitted["eligible"] == "true"
+    assert emitted["version"] == "0.1.2"
+    assert printed == (
+        "1 product issues and 0 product features since v0.1.1; "
+        "a patch release was requested, proposing 0.1.2."
+    )
 
 
 def test_candidate_phase_reports_a_requested_kind_on_an_unchanged_tree(
