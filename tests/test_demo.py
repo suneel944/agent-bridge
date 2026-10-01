@@ -35,9 +35,17 @@ def test_captured_output_keeps_its_lines_and_drops_trailing_blanks():
     assert demo.lines("one\ntwo\n\n\n") == ("one", "two")
 
 
-def test_a_line_wider_than_the_frame_wraps_the_way_a_terminal_wraps():
+def test_a_word_wider_than_the_frame_breaks_at_the_frame_edge():
     body = "x" * (demo.COLUMNS + 3)
     assert demo.lines(body) == ("x" * demo.COLUMNS, "xxx")
+
+
+def test_a_line_wider_than_the_frame_wraps_between_words():
+    first = "  " + "word " * 21 + "approve_bridge_tools"
+    body = first + " agent-parley ends"
+    wrapped = demo.lines(body)
+    assert wrapped == (first, "agent-parley ends")
+    assert len(wrapped[0]) <= demo.COLUMNS
 
 
 def test_the_tour_is_a_cut_of_the_recorded_story():
