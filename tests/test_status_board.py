@@ -540,3 +540,57 @@ def test_a_report_on_a_released_issue_is_labelled_and_silent_claims_named(
         "no report on held #43, #44; "
         "#42 (not held, reported 21m ago): Issue closed"
     )
+
+
+def test_a_held_blocked_report_followed_by_mail_on_its_issue_is_labelled(
+    bridge, repo, paired
+):
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "42")
+    bridge.report(
+        lane,
+        "blocked",
+        "Kit drafted; none posted",
+        "operator posts",
+        "",
+        issue="42",
+    )
+    path = bridge.project(repo)[1] / "claude-activity.json"
+    state = json.loads(path.read_text())
+    state["reported_at"] = time.time() - 3480
+    write_json(path, state)
+    assert lane_reading(bridge, repo)["current_task"] == (
+        "Kit drafted; none posted"
+    )
+    store.initialize(bridge.home)
+    actors = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    for key, sender, recipient, subject in (
+        ("posted", "codex", "claude", "Posted the #42 comments"),
+        ("decided", "claude", "codex", "Decision on #42"),
+        ("other", "codex", "claude", "Started #420"),
+    ):
+        store.call(
+            bridge.home,
+            actors[sender],
+            "send_message",
+            {
+                "to": [recipient],
+                "subject": subject,
+                "body_md": "Done.",
+                "idempotency_key": key,
+            },
+        )
+    record = lane_reading(bridge, repo)
+    assert record["report_newer_mail"] == 2
+    assert record["current_task"] == (
+        "#42 (reported 58m ago, 2 newer messages on it): "
+        "Kit drafted; none posted"
+    )

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 DORMANT_SECONDS = 86400.0
 ENDED_STATES = ("stopped", "dead", "reclaimed")
+OPEN_REPORTS = ("blocked", "partial")
 ATTENTION_LINES = 8
 FORGE_ISSUES = "forge-issues.json"
 FORGE_TTL = 300.0
@@ -142,11 +143,14 @@ def task_line(record: dict, fallback: str) -> str:
     current work. Such a report keeps its text, labelled with its issue and
     age, and open claims the lane has not reported on since claiming are
     named ahead of it, so a closed issue's summary never reads as the lane's
-    current task.
+    current task. A blocked or partial report on a held issue that mail
+    citing the issue has followed is labelled with its age and that mail's
+    count, because the mail may say its remaining work is done.
 
     Args:
         record: One lane record from the status reading, carrying its
-            claims, report summary, report issue and report age.
+            claims, report summary, report issue, report age and the count
+            of newer mail on a held open report.
         fallback: Registered or mailed task shown when no report exists.
 
     Returns:
@@ -157,7 +161,15 @@ def task_line(record: dict, fallback: str) -> str:
     summary = record["summary"]
     issue = record["report_issue"]
     if summary and record["report_held"]:
-        return summary[:240]
+        newer = record["report_newer_mail"]
+        if not newer:
+            return summary[:240]
+        reported = age(record["report_age_seconds"] or 0)
+        plural = "" if newer == 1 else "s"
+        return (
+            f"#{issue} (reported {reported} ago, {newer} newer "
+            f"message{plural} on it): {summary}"
+        )[:240]
     silent = ", ".join(
         f"#{claim['issue']}"
         for claim in record["claims"]
@@ -732,7 +744,9 @@ class StatusMixin(BridgeCore):
             `current_task` is the lane's own last report or registered task,
             never the operator's last prompt, built by `task_line`, with
             `report_issue` naming the issue that report was about and
-            `report_held` whether the lane still holds it; each claim
+            `report_held` whether the lane still holds it and
+            `report_newer_mail` how many messages citing a held issue
+            followed a blocked or partial report on it; each claim
             carries whether it was reported on since claiming, and its
             recorded title, whether it ended on the forge, the seconds since
             it last progressed and its cached pull request. `self_wait` names
@@ -786,6 +800,13 @@ class StatusMixin(BridgeCore):
             and latest.get("summary") == state.get("summary")
             else None
         )
+        open_issue = (
+            report_issue
+            if state.get("outcome") in OPEN_REPORTS
+            and (ledger["issues"].get(str(report_issue)) or {}).get("owner")
+            == agent
+            else None
+        )
         stalled = supervision.stall(
             self.home,
             directory,
@@ -805,8 +826,15 @@ class StatusMixin(BridgeCore):
                 condition = lanes.read(db, data["root"], agent)
                 accounts = lanes.read_accounts(db, data["root"])
                 wake = lanes.read_wake(db, data["root"], agent)
+                newer = (
+                    store.issue_mail(
+                        db, data["root"], name, open_issue, reported_at
+                    )
+                    if open_issue is not None and reported_at
+                    else 0
+                )
         except (sqlite3.Error, BridgeError, OSError, ValueError):
-            condition, accounts, wake = None, {}, {}
+            condition, accounts, wake, newer = None, {}, {}, 0
         provenance = lanes.provenance(
             condition, supervision.hook_gaps(self.home, participant)
         )
@@ -971,6 +999,7 @@ class StatusMixin(BridgeCore):
             "wake": None,
             "mail": None,
             "report_issue": report_issue,
+            "report_newer_mail": newer,
         }
         record["report_held"] = report_issue is not None and any(
             claim["issue"] == report_issue for claim in record["claims"]
