@@ -162,7 +162,11 @@ service that is not refreshing it. With no reading at all, or no GitHub forge,
 the `Forge:` line says so and claims on closed issues are not hidden.
 Last, `Needs action:` lists each orphaned or overdue claim with the
 command that resolves it, `agent-parley issue claim N --take-orphaned` run from
-a peer lane or `agent-parley issue assign N LANE --reason TEXT`.
+a peer lane or `agent-parley issue assign N LANE --reason TEXT`. When the
+project has no live lane besides the holder, the orphaned line names the
+operator's command instead: start a lane with `agent-parley run NAME --repo
+ROOT` and have it take the claim, or `agent-parley issue release N`. `top`
+notes and the `orphaned claims` row of `problems` follow the same rule.
 
 `status --table`, a participant name, or any lane filter prints the full lane
 table instead: the server line, the code line, the state directory, and then
@@ -485,6 +489,7 @@ condition, that count, its age and what clears it:
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
+| `orphaned claims` | The lane's session process is gone and the supervisor marked claims it holds orphaned, and the lane is not yet `ready to retire`. The row is derived from the ledger, so it shows whether or not a notification transport is configured. | `agent-parley issue claim N --take-orphaned` from a live peer lane; with no live lane besides the holder, start one with `agent-parley run NAME` and have it take the claim, or `agent-parley issue release N`. |
 | `ready to retire` | The lane's session process is gone, every claim it holds has been orphaned for longer than `orphan_retire_after` and no peer took it. | `agent-parley participant retire NAME` |
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
 | `dirty worktree` | The lane holds uncommitted work, is not active and its session process is gone, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |

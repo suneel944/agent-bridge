@@ -1477,6 +1477,46 @@ def orphaned_lane(availability, monkeypatch, condition, dirty=()):
     ]
 
 
+@pytest.mark.parametrize("peer", [True, False])
+def test_an_orphaned_claim_names_who_can_move_it(monkeypatch, peer):
+    monkeypatch.setattr(supervision, "dirty_paths", lambda lane: [])
+    claims = [{**ORPHANED[0], "orphan_recorded_seconds": 60}]
+    found = problems._lane_rows(
+        lane_record(claims=claims, availability=GONE),
+        {"lane": "/lane", "branch": "work"},
+        "/root",
+        {**supervision.DEFAULTS, "wake": False},
+        600,
+        time.time(),
+        None,
+        peer,
+    )
+    [row] = [row for row in found if row["condition"] == problems.ORPHANED]
+    assert row["detail"] == "claims #42 orphaned (no reason recorded)"
+    assert row["seconds"] == 60
+    assert row["command"] == supervision.orphan_remedy("42", "/root", peer)
+    assert ("no live lane" in row["command"]) is not peer
+    assert not [row for row in found if row["condition"] == problems.READY]
+
+
+def test_live_peer_counts_only_other_lanes_that_take_turns():
+    states = {"claude": supervision.IDLE, "codex": "dead", "gemini": None}
+    assert not supervision.live_peer(states, "claude")
+    assert supervision.live_peer(states, "codex")
+    assert not supervision.live_peer({**states, "claude": "retired"}, "gemini")
+    marker = supervision.orphan_marker(["42"], ["a.py"], "/root", peer=False)
+    assert marker == (
+        "orphaned claims #42; holds a.py; "
+        + supervision.orphan_remedy("42", "/root", False)
+    )
+
+
+def test_a_lane_ready_to_retire_carries_no_separate_orphan_row(monkeypatch):
+    assert orphaned_lane(GONE, monkeypatch, problems.READY)
+    assert not orphaned_lane(GONE, monkeypatch, problems.ORPHANED)
+    assert not orphaned_lane(LIVE, monkeypatch, problems.ORPHANED)
+
+
 def test_a_live_lane_with_orphan_markers_is_never_offered_retirement(
     monkeypatch,
 ):

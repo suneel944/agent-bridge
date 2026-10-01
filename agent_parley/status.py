@@ -264,18 +264,24 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
     }
 
 
-def attention(claim: dict, owner: str) -> list[str]:
+def attention(
+    claim: dict, owner: str, root: str = "", peer: bool = True
+) -> list[str]:
     """States what an open claim needs and the command that resolves it.
 
     Args:
         claim: One open claim from a lane record of the status snapshot.
         owner: Participant holding the claim.
+        root: Canonical project key the operator's commands name.
+        peer: Whether a live lane besides the owner exists to take an
+            orphaned claim; without one the operator's command is named.
 
     Returns:
         One line for a claim whose owner the supervisor marked orphaned and
         one for a claim past its deadline, each naming the single command
         that resolves it; nothing for a claim that needs no action.
     """
+    from agent_parley import supervision
     from agent_parley.tables import age
 
     number = claim["issue"]
@@ -283,8 +289,8 @@ def attention(claim: dict, owner: str) -> list[str]:
     if claim.get("orphaned"):
         lines.append(
             f"#{number} orphaned from {owner} "
-            f"({claim.get('orphan_reason') or 'no reason'}); a peer lane runs "
-            f"agent-parley issue claim {number} --take-orphaned"
+            f"({claim.get('orphan_reason') or 'no reason'}); "
+            + supervision.orphan_remedy(str(number), root, peer)
         )
     if claim.get("overdue"):
         lines.append(
@@ -1357,6 +1363,7 @@ class StatusMixin(BridgeCore):
             width: Columns the tables may use, or None for whole lines.
             every_claim: Also list claims whose work ended on the forge.
         """
+        from agent_parley import supervision
         from agent_parley.cli import supervision_failure, tables
 
         dormancy = " (dormant)" if project["dormant"] else ""
@@ -1371,8 +1378,13 @@ class StatusMixin(BridgeCore):
         lanes: list[tuple[str, ...]] = []
         notes: list[str] = []
         ended: list[int] = []
+        states = {
+            record["participant"]: record["lane_state"]
+            for record in project["participants"]
+        }
         for record in project["participants"]:
             owner = record["participant"]
+            peer = supervision.live_peer(states, owner)
             live = 0
             for claim in record["claims"]:
                 entry = (opened or {}).get(str(claim["issue"])) or {}
@@ -1383,7 +1395,7 @@ class StatusMixin(BridgeCore):
                     ended.append(claim["issue"])
                 else:
                     live += 1
-                    notes.extend(attention(claim, owner))
+                    notes.extend(attention(claim, owner, project["root"], peer))
                 if every_claim or not closed:
                     shown = {
                         **claim,

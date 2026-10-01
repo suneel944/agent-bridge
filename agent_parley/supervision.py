@@ -86,6 +86,7 @@ DEAD_MAIL_LISTED = 10
 ACTIVE = "active"
 IDLE = "idle"
 STOPPED = "stopped"
+TAKES_TURNS = lanes.LIVE | {ACTIVE}
 STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
@@ -4170,16 +4171,74 @@ def orphan_reason(name: str, record: dict) -> str:
     return f"{name} is dead and has no running session process{seen}"
 
 
-def orphan_marker(numbers: list[str], keys: list[str]) -> str:
-    """Describes one lane's orphaned claims in one line, naming its keys."""
+def live_peer(states: dict[str, str | None], owner: str) -> bool:
+    """Reports whether any lane besides the owner could take its claims.
+
+    Args:
+        states: Each lane's state as a status reading names it, such as
+            ``working``, ``dead`` or ``retired``, or None when unknown.
+        owner: Lane whose orphaned claims need a new holder.
+
+    Returns:
+        Whether another lane reads in a state that still takes turns. A
+        stopped, dead, reclaimed, retired or paused lane, or one whose state
+        is unknown, cannot run `issue claim --take-orphaned` now.
+    """
+    return any(
+        state in TAKES_TURNS for name, state in states.items() if name != owner
+    )
+
+
+def orphan_remedy(issue: str, root: str, peer: bool) -> str:
+    """Names who moves an orphaned claim and the command that does it.
+
+    Args:
+        issue: Issue number, or ``NUMBER`` for a remedy covering several.
+        root: Canonical project key the commands name.
+        peer: Whether a live lane besides the owner exists to take it.
+
+    Returns:
+        The peer's take command while one is live, else the operator's
+        choice of starting a lane that takes the claim or releasing it,
+        since a remedy naming a lane that does not exist moves nothing.
+    """
+    take = f"agent-parley issue claim {issue} --take-orphaned"
+    if peer:
+        return f"a peer lane runs {take}"
+    repo = f"--repo {shlex.quote(str(root))}"
+    return (
+        f"no live lane can take it: start one with agent-parley run NAME "
+        f"{repo} and have it run {take}, or run agent-parley issue release "
+        f"{issue} {repo}"
+    )
+
+
+def orphan_marker(
+    numbers: list[str], keys: list[str], root: str = "", peer: bool = True
+) -> str:
+    """Describes one lane's orphaned claims in one line, naming its keys.
+
+    Args:
+        numbers: Issue numbers the lane holds that are marked orphaned.
+        keys: Reservations the lane still holds for those claims.
+        root: Canonical project key the operator's commands name.
+        peer: Whether a live lane besides the owner exists to take them.
+
+    Returns:
+        The marker naming the claims, their keys and the remedy, or an
+        empty string when the lane holds no orphaned claim.
+    """
     if not numbers:
         return ""
     listed = ", ".join(f"#{number}" for number in numbers)
     held = f"; holds {', '.join(keys)}" if keys else ""
-    return (
-        f"orphaned claims {listed}{held}; still owned until a peer runs "
-        "issue claim --take-orphaned"
-    )
+    if peer:
+        return (
+            f"orphaned claims {listed}{held}; still owned until a peer runs "
+            "issue claim --take-orphaned"
+        )
+    issue = numbers[0] if len(numbers) == 1 else "NUMBER"
+    return f"orphaned claims {listed}{held}; {orphan_remedy(issue, root, peer)}"
 
 
 def orphan_decision(

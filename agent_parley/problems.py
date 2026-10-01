@@ -68,6 +68,7 @@ WAKE = "wake attention"
 APPROVAL = "waiting on approval"
 HELD = "held by a native dialog"
 READY = "ready to retire"
+ORPHANED = "orphaned claims"
 HOLDING = "holding a refused key"
 FOREIGN = "second session"
 REFUSED = "recovery refused"
@@ -535,6 +536,51 @@ def _retire_rows(
     ]
 
 
+def _orphan_rows(record: dict, name: str, root: str, peer: bool) -> list[dict]:
+    """Reports a lane's orphaned claims with who can move them.
+
+    The supervisor's orphan decision is also sent through notification
+    transports, which may be off. This row is derived from the ledger
+    alone, so the remedy reaches the operator either way. With no live
+    lane besides the holder, it names the operator's command rather than
+    a peer that does not exist.
+
+    Args:
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        root: Canonical project key.
+        peer: Whether a live lane besides this one exists to take them.
+
+    Returns:
+        One row naming the orphaned claims and the age of the oldest marker,
+        or no row while the lane's session process is alive or it holds no
+        orphaned claim.
+    """
+    if record["availability"].get("process_alive") is True:
+        return []
+    orphaned = [claim for claim in record["claims"] if claim.get("orphaned")]
+    if not orphaned:
+        return []
+    numbers = ", ".join(f"#{claim['issue']}" for claim in orphaned)
+    issue = str(orphaned[0]["issue"]) if len(orphaned) == 1 else "NUMBER"
+    reason = orphaned[0].get("orphan_reason") or "no reason recorded"
+    return [
+        _row(
+            ORPHANED,
+            f"claims {numbers} orphaned ({reason})",
+            supervision.orphan_remedy(issue, root, peer),
+            max(
+                int(claim.get("orphan_recorded_seconds") or 0)
+                for claim in orphaned
+            ),
+            name,
+            root,
+            BY_OPERATOR,
+            len(orphaned),
+        )
+    ]
+
+
 def _unresolved_rows(
     record: dict, name: str, repo: str, root: str, now: float
 ) -> list[dict]:
@@ -742,6 +788,7 @@ def _lane_rows(
     ack_after: float,
     now: float,
     directory: Path | None = None,
+    peer: bool = True,
 ) -> list[dict]:
     """Derives the rows one lane record carries, one per cause.
 
@@ -754,6 +801,8 @@ def _lane_rows(
         now: Unix time the observation ages are measured against.
         directory: Private project state directory holding the lane's
             key-hold deadline, or None to read no deadline.
+        peer: Whether a live lane besides this one exists to take its
+            orphaned claims.
 
     Returns:
         Zero or more rows, one per cause the record shows, each carrying how
@@ -924,9 +973,10 @@ def _lane_rows(
     rows.extend(
         _cap_rows(record, name, repo, root, config["max_claims_per_lane"])
     )
-    rows.extend(
-        _retire_rows(record, name, repo, root, config["orphan_retire_after"])
+    retire = _retire_rows(
+        record, name, repo, root, config["orphan_retire_after"]
     )
+    rows.extend(retire or _orphan_rows(record, name, root, peer))
     rows.extend(_unresolved_rows(record, name, repo, root, now))
     rows.extend(_diverging_rows(record, name, repo, root))
     rows.extend(_ack_rows(record, name, repo, root, ack_after, waking))
@@ -1775,7 +1825,14 @@ def derive(
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
         repo = f"--repo {shlex.quote(str(project['root']))}"
+<<<<<<< HEAD
         found: list[dict] = []
+=======
+        states = {
+            record["participant"]: record.get("lane_state")
+            for record in project["participants"]
+        }
+>>>>>>> dbcfce1 (fix: name the operator's command for an orphan no live lane can take)
         for record in project["participants"]:
             found.extend(
                 _lane_rows(
@@ -1786,6 +1843,7 @@ def derive(
                     after,
                     stamp,
                     directory,
+                    supervision.live_peer(states, record["participant"]),
                 )
             )
             aged.extend(
