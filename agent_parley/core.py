@@ -269,12 +269,28 @@ class BridgeCore:
 
         Returns:
             Main worktree and shared state directory paths.
+
+        Raises:
+            BridgeError: If ``repo`` is not inside a Git checkout, naming
+                ``--repo`` instead of repeating Git's own refusal, or if the
+                repository is bare.
         """
         from agent_parley.cli import git, hashlib
 
-        common = Path(
-            git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        )
+        try:
+            common = Path(
+                git(
+                    repo,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                )
+            )
+        except BridgeError as error:
+            raise BridgeError(
+                "not inside a Git repository; pass --repo PATH or run from "
+                "the checkout"
+            ) from error
         if git(repo, "rev-parse", "--is-bare-repository") == "true":
             raise BridgeError(
                 "Use a non-bare repository with an initial commit."

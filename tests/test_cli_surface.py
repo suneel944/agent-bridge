@@ -133,6 +133,61 @@ def test_grouped_help_lists_every_declared_command(monkeypatch, capsys):
     assert "__complete" not in printed
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("issue", "show", "829"),
+        ("participant", "show", "claude-2"),
+        ("gc", "--dry-run"),
+        ("issue", "release", "829"),
+    ),
+)
+def test_outside_a_checkout_names_repo(
+    tmp_path, monkeypatch, capsys, arguments
+):
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    assert cli.main() == 1
+    assert capsys.readouterr().err == (
+        "agent-parley: not inside a Git repository; pass --repo PATH or "
+        "run from the checkout\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "usage"),
+    (
+        (("say",), "usage: agent-parley say "),
+        (("report",), "usage: agent-parley report "),
+        (("history",), "usage: agent-parley history "),
+        (("mail", "send"), "usage: agent-parley mail send "),
+    ),
+)
+def test_missing_argument_prints_the_command_usage(
+    tmp_path, monkeypatch, capsys, arguments, usage
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 2
+    printed = capsys.readouterr().err
+    assert printed.startswith(usage)
+    assert f"\nagent-parley {arguments[0]}" in printed
+
+
 def test_every_subcommand_action_carries_help():
     parser, _ = cli.root_parser(None)
     pending = [((), parser)]

@@ -3377,6 +3377,39 @@ def add_say_arguments(command: argparse.ArgumentParser) -> None:
     add_selector(command)
 
 
+def typed_parser(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.ArgumentParser:
+    """Finds the parser of the command the parsed arguments name.
+
+    A usage error raised through it prints that command's usage rather
+    than the root parser's.
+
+    Args:
+        parser: Root parser the arguments were parsed with.
+        args: Parsed arguments.
+
+    Returns:
+        The deepest subcommand parser the arguments selected.
+    """
+    current = parser
+    while True:
+        nested = next(
+            (
+                action
+                for action in current._actions
+                if isinstance(action, argparse._SubParsersAction)
+            ),
+            None,
+        )
+        if nested is None:
+            return current
+        chosen = getattr(args, nested.dest, None)
+        if chosen not in nested.choices:
+            return current
+        current = nested.choices[chosen]
+
+
 def spoken(
     bridge: Bridge, parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
@@ -3384,7 +3417,8 @@ def spoken(
 
     Args:
         bridge: Launcher holding the private coordination state.
-        parser: Root parser, used to report a usage error.
+        parser: Root parser, whose `say` or `mail send` parser reports a
+            usage error.
         args: Parsed `say` or `mail send` arguments.
 
     Returns:
@@ -3394,7 +3428,7 @@ def spoken(
     if selected(args):
         return spoken_lanes(bridge, repo, args)
     if not args.participant or not args.text:
-        parser.error(
+        typed_parser(parser, args).error(
             "say needs a participant and a message, or a lane selector and "
             "a message."
         )
@@ -5167,7 +5201,10 @@ def root_parser(
     )
     commands = CommandIndex(
         parser.add_subparsers(
-            dest="command", metavar="COMMAND", help=argparse.SUPPRESS
+            dest="command",
+            metavar="COMMAND",
+            help=argparse.SUPPRESS,
+            prog="agent-parley",
         ),
         typed,
     )
@@ -5394,7 +5431,9 @@ def main() -> int:
             )
         elif args.command == "history":
             if args.subject is None:
-                parser.error("history takes issue, participant or claim.")
+                typed_parser(parser, args).error(
+                    "history takes issue, participant or claim."
+                )
             reported = bridge.history(
                 args.repo.resolve(),
                 args.subject,
@@ -5500,7 +5539,9 @@ def main() -> int:
             )
         elif args.command == "report":
             if not args.state or not args.summary:
-                parser.error("report needs --state and --summary.")
+                typed_parser(parser, args).error(
+                    "report needs --state and --summary."
+                )
             if args.state == "waiting" and args.until <= 0:
                 parser.error("report --state waiting needs --until SECONDS.")
             owed = bridge.report(
