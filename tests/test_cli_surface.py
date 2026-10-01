@@ -1,5 +1,6 @@
 """Checks the version, show and list verbs the command surface offers."""
 
+import argparse
 import json
 import sys
 
@@ -130,6 +131,103 @@ def test_grouped_help_lists_every_declared_command(monkeypatch, capsys):
     for name in grouped:
         assert f"  {name} " in printed
     assert "__complete" not in printed
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("issue", "show", "829"),
+        ("participant", "show", "claude-2"),
+        ("gc", "--dry-run"),
+        ("issue", "release", "829"),
+    ),
+)
+def test_outside_a_checkout_names_repo(
+    tmp_path, monkeypatch, capsys, arguments
+):
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    assert cli.main() == 1
+    assert capsys.readouterr().err == (
+        "agent-parley: not inside a Git repository; pass --repo PATH or "
+        "run from the checkout\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "usage"),
+    (
+        (("say",), "usage: agent-parley say "),
+        (("report",), "usage: agent-parley report "),
+        (("history",), "usage: agent-parley history "),
+        (("mail", "send"), "usage: agent-parley mail send "),
+    ),
+)
+def test_missing_argument_prints_the_command_usage(
+    tmp_path, monkeypatch, capsys, arguments, usage
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 2
+    printed = capsys.readouterr().err
+    assert printed.startswith(usage)
+    assert f"\nagent-parley {arguments[0]}" in printed
+
+
+def test_every_subcommand_action_carries_help():
+    parser, _ = cli.root_parser(None)
+    pending = [((), parser)]
+    bare = []
+    while pending:
+        path, current = pending.pop()
+        for action in current._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            helped = {
+                id(action.choices[choice.dest])
+                for choice in action._choices_actions
+            }
+            for name, child in action.choices.items():
+                if id(child) not in helped:
+                    bare.append(" ".join((*path, name)))
+                pending.append(((*path, name), child))
+    assert bare == []
+
+
+@pytest.mark.parametrize(
+    ("command", "described"),
+    (
+        ("issue", "Ask the holder of an issue to hand it to this lane."),
+        ("participant", "Push the lane branch and open or locate its pull"),
+        ("mail", "Search this lane's mail."),
+        ("unattended", "Integrate one eligible lane under the policy."),
+        ("approval", "Show which steps require a recorded approval first."),
+        ("decision", "List or search the decisions recorded for this"),
+    ),
+)
+def test_group_help_describes_each_action(
+    monkeypatch, capsys, command, described
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys, "argv", ["agent-parley", command, "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert described in " ".join(capsys.readouterr().out.split())
 
 
 def test_status_accepts_repo_as_the_project_selector(
