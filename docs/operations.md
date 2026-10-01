@@ -2321,9 +2321,11 @@ never seen, and a profile is the supported way to say the same thing.
 ### Notifications
 
 The service and the launcher can forward the coordination changes an absent
-operator waits on to a Telegram bot, an email address, or both. Delivery is
-outbound only: no command arrives over the channel, and a native permission
-prompt is still answered only in the lane's terminal. Settings come from the
+operator waits on to a Telegram bot, an email address, or both. Email is
+outbound only. The Telegram bot also carries status queries and decision
+answers back once inbound is on, as described below; with inbound off, no
+command arrives over the channel and a native permission prompt is answered
+only in the lane's terminal. Settings come from the
 environment or from `notify.json` in the state directory, which
 `agent-parley notify setup` writes owner-only. No token or password is written
 into coordination state or copied into a lane's environment.
