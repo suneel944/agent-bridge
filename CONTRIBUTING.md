@@ -73,7 +73,10 @@ Documentation, templates and other workflows run only the Ubuntu 3.12 leg. A
 path no list recognises, a push to `main` and a manual run select every leg.
 Skipped legs still report their required check names. The `check` job fails
 if a needed Python or macOS leg did not succeed; `wsl` reports as its own
-required check.
+required check and gates the merge, so it carries no `continue-on-error`.
+Each of its steps has its own `timeout-minutes`, and a failed or hung WSL
+setup is retried once inside the job, so a stuck runner fails within the
+step's ceiling instead of holding a green pull request at the job's.
 
 Open a focused issue before proposing a substantial behavior change. Branch from
 current `main`, keep commits reviewable, and use the PR template. Explain the

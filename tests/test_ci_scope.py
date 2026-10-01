@@ -125,3 +125,22 @@ def test_required_checks_keep_their_names_and_gate_the_aggregator():
     assert workflow["concurrency"]["cancel-in-progress"] == (
         "${{ github.ref != 'refs/heads/main' }}"
     )
+
+
+def test_the_required_wsl_job_gates_and_bounds_each_step():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/check.yml").read_text()
+    )
+    job = workflow["jobs"]["wsl"]
+    steps = job["steps"]
+    assert "continue-on-error" not in job
+    assert all("timeout-minutes" in step for step in steps)
+    bounded = sum(step["timeout-minutes"] for step in steps)
+    assert bounded <= job["timeout-minutes"]
+    setup, retry = (
+        step for step in steps if "setup-wsl" in step.get("uses", "")
+    )
+    assert setup["continue-on-error"] is True
+    assert retry["if"] == f"steps.{setup['id']}.outcome != 'success'"
+    assert "continue-on-error" not in retry
+    assert retry["with"] == setup["with"]
