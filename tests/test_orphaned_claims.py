@@ -243,7 +243,7 @@ def test_a_native_exit_retains_the_generation_needed_for_recovery(
     monkeypatch.setattr(bridge, "up", lambda: None)
     monkeypatch.setattr(bridge, "identity", identity)
     monkeypatch.setattr(cli.shutil, "which", lambda command: sys.executable)
-    monkeypatch.setattr(cli.subprocess, "call", exit_native)
+    monkeypatch.setattr(cli.terminal, "call", exit_native)
     monkeypatch.setattr(
         cli.sys, "stdin", types.SimpleNamespace(isatty=lambda: False)
     )
