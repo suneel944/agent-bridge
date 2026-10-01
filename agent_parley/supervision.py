@@ -64,6 +64,7 @@ DEFAULTS = {
     "wake": True,
     "reclaim": True,
     "titles": True,
+    "rerun_cancelled": True,
 }
 
 MAX_COMPLETION_REMINDERS = 100
@@ -201,7 +202,7 @@ def settings(value: dict) -> dict:
             "completion_reminders must be between 1 and "
             f"{MAX_COMPLETION_REMINDERS} reminders."
         )
-    for field in ("prompts", "wake", "reclaim", "titles"):
+    for field in ("prompts", "wake", "reclaim", "titles", "rerun_cancelled"):
         if type(result[field]) is not bool:
             raise BridgeError(f"{field} must be a boolean.")
     return result
@@ -5139,6 +5140,7 @@ PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
 CHECKS_STALLED_SECONDS = 3600.0
 CHECKS_STALLED_FACTOR = 2
+RERUN_CONCLUSIONS = frozenset({"cancelled", "timed_out"})
 
 
 def checks_ceiling(root: Path) -> float:
@@ -5157,7 +5159,9 @@ def checks_ceiling(root: Path) -> float:
     return CHECKS_STALLED_FACTOR * timeout
 
 
-def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
+def pull_request_wakes(
+    home: Path, directory: Path, manifest: dict, rerun: bool = True
+) -> None:
     """Tells a lane once when its open pull request's checks or reviews change.
 
     A lane that opens a pull request ends its turn to wait, and nothing used
@@ -5197,10 +5201,20 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     for is recorded and announced to nobody. A forge that is missing,
     offline or unreadable leaves the record as it was and wakes nobody.
 
+    A red head whose every failing check ended `cancelled` or `timed_out`
+    with an Actions run and job named has nothing to fix, so its jobs are
+    re-run once through `forge.rerun_job`, whether or not the owning lane
+    is alive. The request is recorded on the reading for that head commit
+    and never repeated for it, and the lane is told a re-run was requested
+    so it does not push an empty commit. A check that ended `failure` is
+    never re-run.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
         manifest: Current participant manifest.
+        rerun: Whether a cancelled or timed-out run is re-run once; the
+            `rerun_cancelled` supervision setting.
     """
     path = directory / PULL_REQUEST_RECORD
     try:
@@ -5223,11 +5237,18 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
         record = _checks_clock(previous, record, now)
+        if previous.get("sha") == record["sha"] and previous.get("rerun"):
+            record["rerun"] = previous["rerun"]
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
         stalled = _stalled_checks(record, now, ceiling)
         if stalled:
             changes.append(stalled)
+        requested = _rerun_cancelled(
+            Path(manifest["root"]), previous, record, now, rerun
+        )
+        if requested:
+            changes.append(requested)
         watched = changes or record["checks"] in {"pending", "red"}
         name = _pull_request_lane(manifest, ledger, reading) if watched else ""
         if name:
@@ -5363,6 +5384,75 @@ def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
         "Re-run once: `gh run rerun --failed` for a run that ended without "
         "a conclusion, or cancel and re-run one still in progress past its "
         "job timeout; after one re-run it is an operator decision"
+    )
+
+
+def _rerun_cancelled(
+    root: Path, before: dict, record: dict, now: float, enabled: bool
+) -> str:
+    """Re-runs a red head's cancelled jobs once and describes the request.
+
+    Args:
+        root: Repository checkout that selects the forge project.
+        before: The previous reading, or an empty mapping for a first one.
+        record: This poll's reading, carrying any earlier request on the
+            same head; gains a `rerun` entry when one is requested now.
+        now: Unix time of this poll.
+        enabled: Whether an automatic re-run may be requested.
+
+    Returns:
+        One phrase for the lane naming the re-run requested, the forge's
+        refusal with the exact command, or a repeat cancellation after the
+        one re-run with the same command. Empty when re-runs are disabled,
+        when the head is not red only through cancelled or timed-out jobs
+        with a named run and job, or when this red reading was already
+        described.
+    """
+    failed = record.get("failed") or []
+    if (
+        not enabled
+        or record["checks"] != "red"
+        or not failed
+        or any(
+            check.get("conclusion") not in RERUN_CONCLUSIONS
+            or not check.get("run")
+            or not check.get("job")
+            for check in failed
+        )
+    ):
+        return ""
+    names = ", ".join(
+        f"{check['name']} {check['conclusion']}" for check in failed
+    )
+    earlier = record.get("rerun")
+    if earlier:
+        if before.get("checks") == "red":
+            return ""
+        return (
+            f"{names} again after the one automatic re-run on this head; "
+            f"run `{'; '.join(earlier['commands'])}` yourself or fix and push"
+        )
+    requests = [
+        forge.rerun_job(root, str(check["run"]), str(check["job"]))
+        for check in failed
+    ]
+    accepted = all(ok for _, ok in requests)
+    record["rerun"] = {
+        "at": now,
+        "checks": names,
+        "attempt": int(record.get("red_attempts") or 1),
+        "commands": [command for command, _ in requests],
+        "accepted": accepted,
+    }
+    if accepted:
+        return (
+            f"{names} while every other check passed; one re-run was "
+            "requested for you, so do not push an empty commit"
+        )
+    return (
+        f"{names} while every other check passed; the forge refused the "
+        f"automatic re-run, so run `{'; '.join(record['rerun']['commands'])}`"
+        " yourself"
     )
 
 
@@ -5959,7 +6049,14 @@ def _poll(home: Path, directory: Path) -> None:
             stage,
         )
         stage("work", work, home, directory, manifest, config)
-        stage("pull requests", pull_request_wakes, home, directory, manifest)
+        stage(
+            "pull requests",
+            pull_request_wakes,
+            home,
+            directory,
+            manifest,
+            config["rerun_cancelled"],
+        )
         stage(
             "overdue claims",
             overdue_claims,

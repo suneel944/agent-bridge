@@ -1536,7 +1536,10 @@ def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
 
     Returns:
         One row per open pull request whose checks are red and report at
-        least one check the forge ran and failed.
+        least one check the forge ran and failed, or whose head is pending
+        on the one automatic re-run `supervision.pull_request_wakes`
+        requested for it. A red head after that re-run, or after the forge
+        refused it, names the exact re-run command as its remedy.
     """
     try:
         cached = json.loads(
@@ -1547,7 +1550,23 @@ def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
         return []
     rows = []
     for reading in readings:
-        if not isinstance(reading, dict) or reading.get("checks") != "red":
+        if not isinstance(reading, dict):
+            continue
+        rerun = reading.get("rerun") or {}
+        if reading.get("checks") == "pending" and rerun.get("accepted"):
+            rows.append(
+                _row(
+                    CHECKS_FAILED,
+                    f"pull request #{reading.get('number')} re-run "
+                    f"requested: {rerun.get('checks')}",
+                    "wait for the re-run's conclusion; nothing to push",
+                    _age(rerun.get("at"), now),
+                    str(reading.get("lane") or ""),
+                    root,
+                )
+            )
+            continue
+        if reading.get("checks") != "red":
             continue
         ran = [
             check
@@ -1556,16 +1575,29 @@ def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
         ]
         if not ran:
             continue
+        attempt = int(reading.get("red_attempts") or 1)
+        waiting = bool(rerun.get("accepted")) and attempt <= int(
+            rerun.get("attempt") or 1
+        )
+        remedy = (
+            f"gh pr checks {reading.get('url')}, then fix and push or re-run"
+        )
+        if waiting:
+            remedy = "wait for the re-run's conclusion; nothing to push"
+        elif rerun:
+            commands = "; ".join(rerun.get("commands") or [])
+            remedy = f"run `{commands}` yourself, or fix and push"
         rows.append(
             _row(
                 CHECKS_FAILED,
                 f"pull request #{reading.get('number')} checks failed "
-                f"(attempt {reading.get('red_attempts') or 1}): "
+                f"(attempt {attempt}"
+                + (", re-run requested" if waiting else "")
+                + "): "
                 + ", ".join(
                     f"{check['name']} {check['conclusion']}" for check in ran
                 ),
-                f"gh pr checks {reading.get('url')}, then fix and push or "
-                "re-run",
+                remedy,
                 _age(reading.get("red_since"), now),
                 str(reading.get("lane") or ""),
                 root,
