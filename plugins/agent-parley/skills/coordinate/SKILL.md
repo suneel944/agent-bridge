@@ -7,7 +7,12 @@ description: Inspect Agent Parley status, claim repository issues, and manage ex
 
 In a launcher-managed session, use the exact Agent Parley CLI prefix supplied
 by the injected protocol for every shell command; it pins the launcher's
-running installation. The bare `agent-parley` examples below are shorthand
+running installation. Run each such command alone, as one plain command from
+the lane worktree: no variable holding the prefix, no `cd`, `;`, `&&`, pipe or
+redirect in the same call. Only that plain form is pre-approved, so the hook
+refuses a combined call before it can stop on a permission prompt; change
+directory or filter output in a separate call. The bare `agent-parley`
+examples below are shorthand
 only when no launcher prefix was supplied. Honor `AGENT_PARLEY_HOME` when set;
 all participants must use the same private state root.
 

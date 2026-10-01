@@ -4791,6 +4791,29 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     requiring.add_argument("--repo", type=Path, default=Path.cwd())
+    resuming = requirements.add_parser(
+        "resume",
+        help=(
+            "Show or record whether the service may resume a claude lane "
+            "without a terminal."
+        ),
+    )
+    resuming.add_argument(
+        "--bridge-tools",
+        choices=("on", "off"),
+        help="Record approve_bridge_tools: allow this bridge's own tools.",
+    )
+    resuming.add_argument(
+        "--auto-mode",
+        choices=("on", "off"),
+        help="Record auto_mode: start in the client's auto permission mode.",
+    )
+    resuming.add_argument(
+        "--participant",
+        default="",
+        help="Lane to record on; the project default when omitted.",
+    )
+    resuming.add_argument("--repo", type=Path, default=Path.cwd())
     gate = commands.add_parser(
         "verify",
         help="Show or set the command a repository requires before a merge.",
@@ -6053,7 +6076,24 @@ def main() -> int:
             )
         elif args.command == "approval":
             repository = args.repo.resolve()
-            if getattr(args, "json", False):
+            if args.action == "resume":
+                print(
+                    bridge.resume_opt_in(
+                        repository,
+                        args.participant,
+                        (
+                            None
+                            if args.bridge_tools is None
+                            else args.bridge_tools == "on"
+                        ),
+                        (
+                            None
+                            if args.auto_mode is None
+                            else args.auto_mode == "on"
+                        ),
+                    )
+                )
+            elif getattr(args, "json", False):
                 _, directory = bridge.project(repository, create=False)
                 data = roster.read(directory)
                 print(

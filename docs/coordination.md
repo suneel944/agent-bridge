@@ -99,11 +99,14 @@ repair. Branch drift blocks completion once; a Stop retry can end the session
 while status continues to show the drift.
 
 Pending mail and notices ride on the call as context and never refuse it. Only
-two coordination hazards deny a tool call: a write to a path that overlaps an
-exclusive reservation a peer holds (`reserved_path`, whose text says
-reservations are advisory), and an offer to this lane that expires unanswered
-within 120 seconds (`offer_expiring`, which names the accept and decline
-commands). A call that only reads, and Agent Parley's own commands, are never
+three hazards deny a tool call: a shell call that runs Agent Parley's CLI
+together with a variable, `cd`, `;`, `&&`, a pipe or a redirect
+(`chained_cli`, whose text asks for the command alone, the only form the
+launch pre-approves), a write to a path that overlaps an exclusive
+reservation a peer holds (`reserved_path`, whose text says reservations are
+advisory), and an offer to this lane that expires unanswered within 120
+seconds (`offer_expiring`, which names the accept and decline commands).
+Otherwise a call that only reads, and Agent Parley's own commands, are never
 refused for coordination.
 
 Overlap is shown before the work, not found as a merge conflict after it.

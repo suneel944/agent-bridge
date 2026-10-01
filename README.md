@@ -435,9 +435,13 @@ inbound status queries are off.
 - **No silent merges.** A lane integrates only through `participant merge`, or
   `unattended run` for an issue a recorded `unattended` policy lists.
 - **No approvals on your behalf.** Two opt-ins exist for `claude` lanes:
-  `approve_bridge_tools` allows this project's own MCP tools and CLI, and
-  `auto_mode` starts the client's own auto permission mode, whose classifier
-  still decides each command.
+  `approve_bridge_tools` allows this project's own MCP tools and the CLI run
+  as one plain command, and `auto_mode` starts the client's own auto
+  permission mode, whose classifier still decides each command. Record either
+  with `agent-parley approval resume --bridge-tools on` or
+  `--auto-mode on`. A CLI call combined with a variable, `cd`, `;`, `&&`, a
+  pipe or a redirect is refused with that one-command rule instead of
+  stopping on a prompt.
 - **No unbounded wakes.** Waking an idle lane for mail, pull request changes or
   authorized work has opt-outs, a bounded attempt count and the optional run
   budget.

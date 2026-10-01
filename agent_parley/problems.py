@@ -288,8 +288,8 @@ def _remedy(
         )
     if wake.get("result") == supervision.OPT_IN_MISSING:
         return (
-            f"{supervision.OPT_IN_REMEDY}: agent-parley run {name} --resume "
-            f"{repo}",
+            f"{supervision.OPT_IN_COMMAND} --participant {name} {repo}, or "
+            f"agent-parley run {name} --resume {repo} in your own terminal",
             BY_OPERATOR,
         )
     if blocked == supervision.STOPPED:
@@ -1659,6 +1659,45 @@ def _checks_refused_rows(directory: Path, root: str, now: float) -> list[dict]:
     return rows
 
 
+def _grouped_gaps(found: list[dict], repo: str) -> list[dict]:
+    """Folds one project's withheld-resume rows into a single row.
+
+    The missing resume opt-in is one project setting, so five lanes that
+    lack it are one decision for the operator, not five rows. A project
+    with one such lane keeps its lane-scoped row.
+
+    Args:
+        found: Lane rows of one project.
+        repo: Rendered `--repo` argument naming the project.
+
+    Returns:
+        The same rows, with every withheld-resume row replaced by one row
+        that names the lanes and the project-wide opt-in command.
+    """
+    detail = WAKE_DETAILS[supervision.OPT_IN_MISSING]
+    gaps = [
+        row
+        for row in found
+        if row["condition"] == WAKE and row["detail"] == detail
+    ]
+    if len(gaps) < 2:
+        return found
+    names = ", ".join(row["participant"] for row in gaps)
+    return [row for row in found if all(row is not gap for gap in gaps)] + [
+        _row(
+            WAKE,
+            f"{detail}; lanes: {names}",
+            f"{supervision.OPT_IN_COMMAND} {repo}, or resume each lane in "
+            f"your own terminal with agent-parley run NAME --resume {repo}",
+            max(row["seconds"] or 0 for row in gaps),
+            "",
+            gaps[0]["project"],
+            BY_OPERATOR,
+            len(gaps),
+        )
+    ]
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1713,8 +1752,9 @@ def derive(
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
         repo = f"--repo {shlex.quote(str(project['root']))}"
+        found: list[dict] = []
         for record in project["participants"]:
-            aged.extend(
+            found.extend(
                 _lane_rows(
                     record,
                     data["participants"][record["participant"]],
@@ -1737,6 +1777,7 @@ def derive(
                     stamp,
                 )
             )
+        aged.extend(_grouped_gaps(found, repo))
         aged.extend(_offer_rows(project, stamp))
         aged.extend(_request_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
