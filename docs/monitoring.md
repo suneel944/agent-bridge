@@ -193,12 +193,17 @@ lane. The supervision key `titles` turns the tab title off; the details are in
 per project, the open work: each live claim's issue, title, owner, lane state,
 last event and pull request, then one line per lane with its state, live claim
 count and current task. The task is the lane's last report while the lane still
-holds the issue that report named. A report on an issue the lane no longer
-holds is labelled with that issue and its age, such as `#1017 (not held,
-reported 21m ago): ...`, and open claims with no report since they were
-claimed are named first, such as `no report on held #1500, #1695`; `--json`
-carries the same reading as `report_issue`, `report_held` and each claim's
-`reported_since_claim`. Inside a project checkout it reports that project only;
+holds the issue that report named. A blocked or partial report that mail
+citing its issue has followed is labelled with its age and that mail's count,
+such as `#782 (reported 58m ago, 2 newer messages on it): ...`, because the
+mail may say the remaining work is done; the count covers messages the lane
+sent, received or can read on the project feed that cite the issue as `#N`.
+A report on an issue the lane no longer holds is labelled with that issue and
+its age, such as `#1017 (not held, reported 21m ago): ...`, and open claims
+with no report since they were claimed are named first, such as `no report on
+held #1500, #1695`; `--json` carries the same reading as `report_issue`,
+`report_held`, `report_newer_mail` and each claim's `reported_since_claim`.
+Inside a project checkout it reports that project only;
 `--all-projects` adds the rest, dormant ones last, and `--all` adds claims whose
 issue is closed or whose pull request ended. Titles and open state come from
 `forge-issues.json` in the project state directory, which the service's poll

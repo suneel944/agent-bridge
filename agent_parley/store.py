@@ -993,6 +993,45 @@ def mentions(text: str, name: str) -> bool:
     return bool(re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text, re.I))
 
 
+def issue_mail(
+    db: sqlite3.Connection, root: str, name: str, issue: int, after: float
+) -> int:
+    """Counts the mail one lane can read that cites an issue after a time.
+
+    A blocked or partial report names remaining work, often a step a peer or
+    the operator must take. The mail that says the step is done, and the mail
+    the lane itself sends about the issue later, are newer coordination state
+    than the report, so status counts them to mark the report as older.
+
+    Args:
+        db: Open transaction on the coordination store.
+        root: Canonical project key.
+        name: Registered identity of the lane.
+        issue: Issue number the report named.
+        after: Unix time of the report; only mail stored later counts.
+
+    Returns:
+        How many messages the lane sent, received or can read on the project
+        feed after that time whose subject or body cites the issue as
+        ``#N``.
+    """
+    cited = re.compile(rf"#{issue}\b")
+    rows = db.execute(
+        "SELECT DISTINCT m.id,m.subject,m.body_md FROM messages m "
+        "JOIN projects p ON p.id=m.project_id "
+        "JOIN agents sender ON sender.id=m.sender_id "
+        "LEFT JOIN message_recipients r ON r.message_id=m.id "
+        "LEFT JOIN agents recipient ON recipient.id=r.agent_id "
+        "WHERE p.human_key=? AND m.created_ts>datetime(?,'unixepoch') "
+        "AND (sender.name=? OR recipient.name=? OR m.feed=1) "
+        "AND (m.subject LIKE ? OR m.body_md LIKE ?)",
+        (root, after, name, name, f"%#{issue}%", f"%#{issue}%"),
+    ).fetchall()
+    return sum(
+        1 for row in rows if cited.search(f"{row['subject']}\n{row['body_md']}")
+    )
+
+
 def reservation_stem(pattern: str) -> str:
     """Returns the literal part of a reservation key a message could quote.
 
