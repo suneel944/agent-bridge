@@ -12,7 +12,7 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 ```
 
 <p align="center">
-  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.0/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
+  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.1/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
 </p>
 
 <p align="center">
@@ -68,18 +68,11 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 
 ## See it
 
-<p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A nine-chapter terminal recording of Agent Parley: parallel claude and codex lanes, a shared work order, claims and a reservation collision, a native hook refusing a branch switch, a handoff, a plan revision, a run budget, unattended integration and the agent-parley top dashboard">
-</p>
-
-Nine chapters: parallel lanes, the work order, claims and reservations, hook
-guardrails, handoffs, plan revisions, run budgets, unattended integration and
-the dashboard. Every frame is captured command output from the shipped
-coordination path; only the native client is a stand-in, so no model runs.
-The launch video at the top is cut from the same harness running the
-`agent-parley demo` story, re-cut with
+Every terminal frame in the launch video at the top is captured command output
+from the shipped coordination path; only the native client is a stand-in, so
+no model runs. It is re-cut with
 [`docs/video`](https://github.com/suneel944/agent-parley/blob/main/docs/video/README.md).
-`make demo-stub` reproduces the full one with
+`make demo-stub` records the full nine-chapter walkthrough with
 [`scripts/record_demo.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_demo.py);
 `make demo` records real `claude` and `codex` sessions with
 [`scripts/record_live.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_live.py).

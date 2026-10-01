@@ -177,13 +177,10 @@ def test_the_video_timeline_uses_the_recording_timing_and_framing():
     assert document["columns"] == record_demo.COLUMNS
 
 
-def test_the_committed_asset_is_the_one_the_readme_points_at():
+def test_the_committed_asset_is_animated_and_private_path_free():
     root = Path(__file__).resolve().parents[1]
     asset = root / "docs" / "assets" / "demo.svg"
-    readme = (root / "README.md").read_text()
     assert asset.exists()
-    assert "docs/assets/demo.svg" in readme
-    assert "cdn.jsdelivr.net/gh/suneel944/agent-parley@main" in readme
     drawn = asset.read_text()
     assert "<animate" in drawn
     assert str(Path.home()) not in drawn

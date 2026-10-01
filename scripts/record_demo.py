@@ -39,13 +39,12 @@ Regenerate with ``make demo-stub``, or::
 
     uv run --locked python scripts/record_demo.py
 
-The result is written to ``docs/assets/demo.svg`` and is the published
-asset; ``--short`` writes the README's first-screen cut to
-``docs/assets/demo-short.svg`` instead. ``scripts/record_live.py``
-(``make demo``) records real clients instead and needs model quota. The asset is
-referenced from ``README.md`` through a pinned jsdelivr URL, because the
-README is also the PyPI long description and relative image paths do not
-resolve there.
+The result is written to ``docs/assets/demo.svg``, the full nine-chapter
+walkthrough; ``--short`` writes the short cut to
+``docs/assets/demo-short.svg`` instead, and ``--video`` writes the launch
+video's frames to ``docs/video/frames.js``. ``scripts/record_live.py``
+(``make demo``) records real clients instead and needs model quota. The
+README shows the launch video, not these SVGs.
 
 ``--video`` records the short tour and writes no SVG. It keeps the steps
 named in ``VIDEO``, each after its chapter card, and writes their text,
