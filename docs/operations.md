@@ -367,9 +367,14 @@ metadata is used only for a package installed without one.
 
 `doctor` prints the launcher version and protocol, the protocol each shipped
 plugin manifest declares, the store's schema against the schema this build
-writes, and the `service` component naming the code a running service answers
-from, then a verdict line. Each line carries the state this build puts that
-component in, printed in upper case when the build does not accept it.
+writes, the `service` component naming the code a running service answers
+from, `projects` (each registered root that no longer exists), `notify`
+(whether outbound and inbound notification are active) and `approvals` (each
+lane lacking the resume opt-in), the host platform, then a verdict line. A
+missing root, or notification configured but unable to send, makes the verdict
+not consistent; notification that is off and an `approvals` setup gap do not.
+Each line carries the state this build puts that component in, printed in
+upper case when the build does not accept it.
 
 The `service` component has three states. `not running` means nothing answered
 on the configured port, which is no drift. It is still an outage wherever a
@@ -492,6 +497,10 @@ condition, that count, its age and what clears it:
 | `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
 | `integration unverified` | The base checkout carries a merge that failed its gate, conflicted or was interrupted, or the record of one cannot be read. One row per project, on the lane that may repair it, naming the kind, the attempt and the gate result; every further merge is held. | The step the row names: rerun `agent-parley participant merge NAME` after the repair, `--renew-recovery` once attempts are used, or `agent-parley participant merge --verify-recovery` when no lane may repair it. See [Recovering an unverified integration](#recovering-an-unverified-integration). |
 | `crossing ready` | The project records an integration base, no claim is held, at least one issue landed there by a merged pull request is still open on the forge, and the cached reading holds every open issue. One row per project names the landed issues still open and ages from the newest landing or the newest claim end, whichever is later; with notifications configured it opens one decision, which never applies anything. The decision opens only while that age is under one day. | `gh pr create --head BRANCH`, naming each landed issue as `Closes #N`; review and merge it yourself, since that merge cannot be undone. |
+| `checks stalled` | Supervision marked an open pull request's pending head stalled; the lane was already told once. The row names the pending checks and clears when the head finishes or changes. | `gh pr checks URL`, then re-run once with `gh run rerun RUN --failed`, cancelling first a run still in progress past its job timeout. |
+| `checks failed` | An open pull request's checks are red with at least one check the forge ran and failed, or its head is pending on the one automatic re-run supervision requested. The row names the attempt and the failed checks. | `gh pr checks URL`, then fix and push or re-run; while the automatic re-run is pending, wait for its conclusion; after it, run the re-run command the row names yourself, or fix and push. |
+| `checks refused` | A required check the forge never started blocks one or more open pull requests. One row per check name and forge conclusion names every pull request it blocks. | Resolve it at the forge (billing, spending limit or manual approval), then re-run once. |
+| `session outliving its claim` | The lane holds no claim, yet a native session in a worktree the lane made showed activity in the last 60 seconds. | `agent-parley status NAME`; Agent Parley never stops such a session. |
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
@@ -3286,12 +3295,16 @@ when you push the target branch, not at the local merge, and each decision
 records `forge: "deferred to push"`. The supervision service does not
 dispatch it automatically.
 
-`participant retire` removes one lane: it refuses while a session is running or
-the worktree is dirty, removes the worktree, invalidates that participant's
-coordination credential, and drops its manifest entry. Removing the worktree
-deletes its ignored files, such as a local `.env` or build output, so retire
-lists them and asks first; `--yes` answers in advance, and a declined or
-unanswered question retires nothing and exits non-zero. `gc --apply` reclaims
+`participant retire` removes one lane: it refuses while a session is running,
+the worktree is dirty or the lane holds ready work awaiting integration, then
+returns the lane's issue claims to the pool, releases its advisory
+reservations and grants any key a peer was queued for, marks mail it has not
+read or acknowledged as superseded, removes the worktree, invalidates that
+participant's coordination credential, and drops its manifest entry. Removing
+the worktree deletes its ignored files, such as a local `.env` or build
+output, so retire lists them and asks first; `--yes` answers in advance, and a
+declined or unanswered question retires nothing and exits non-zero.
+`gc --apply` reclaims
 only lanes whose work has already landed, so it removes their ignored files
 without asking. The branch is deleted
 only when it adds no commits to the project base; otherwise the branch is kept

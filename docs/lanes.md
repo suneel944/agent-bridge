@@ -366,3 +366,20 @@ operating-system one: a program running as you can write coordination state
 directly. The decision also records that a human decided, not that the code is
 correct; the verification command, the attribution scan and GitHub's own
 checks all still run.
+
+A separate opt-in decides whether the coordination service may resume a
+`claude` lane without a terminal:
+
+```sh
+agent-parley approval resume                          # show what is recorded
+agent-parley approval resume --bridge-tools on        # allow the bridge's tools
+agent-parley approval resume --auto-mode on --participant claude-2
+```
+
+`--bridge-tools on|off` records `approve_bridge_tools`, which allows this
+bridge's own tools, and `--auto-mode on|off` records `auto_mode`, which starts
+the lane in the client's auto permission mode. Without `--participant NAME`
+the setting is the project default. A `claude` lane with neither recorded is
+not resumed by the service, because the resume would stop at a permission
+prompt nobody sees; `participant add`, `problems` and `doctor` name it as a
+setup gap with this command.

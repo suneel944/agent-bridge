@@ -103,6 +103,9 @@ It installs [uv](https://docs.astral.sh/uv/) only when uv is missing, then
 installs or upgrades `agent-parley`, adds the plugin to each of `claude` and
 `codex` found on PATH with `agent-parley plugins install`, and runs
 `agent-parley doctor`. It never uses sudo, and re-running it upgrades in place.
+It ends with the next command, such as
+`Next: cd your-repo && agent-parley run claude`. With neither `claude` nor
+`codex` on PATH it says to install one first and offers `agent-parley demo`.
 
 To install by hand instead:
 
@@ -176,6 +179,14 @@ Next:
 
 Full reference: agent-parley --help
 ```
+
+Once the project is registered and its service runs, the screen also reads
+what `agent-parley problems` would list. A line such as
+`Needs you 2 problems: …` gives the count and the two most urgent rows, and
+`agent-parley problems` then leads the next commands. With lanes but no
+outbound notification transport, a `Notify    off` line appears and
+`agent-parley notify setup` joins the next commands. A project with nothing
+pending shows neither line.
 
 From a committed, clean checkout, one terminal per agent:
 
@@ -332,8 +343,9 @@ queries and decision answers back once inbound is on, as described in
 inbound off, nothing arrives over the channel and a permission prompt is
 answered only in your terminal.
 
-Thirteen changes notify, and nothing else: a handoff offered to a lane, a lane
-blocked on a permission prompt, a lane held by a native dialog, a lane still
+Fourteen changes notify, and nothing else: a handoff offered to a lane, a lane
+blocked on a permission prompt, a lane's tool call denied by its native
+permission check, a lane held by a native dialog, a lane still
 blocked past the escalation bound, a lane idle with no claim past
 `stalled_after`, issues waiting on an idle claim, a dead lane's claims waiting
 on your decision, a lane keeping a key refused to a peer past its deadline, an
@@ -425,8 +437,8 @@ With the passcode unset or short, the reader refuses to start and
 `agent-parley status` says so:
 
 ```
-Inbound: AGENT_PARLEY_INBOUND_PASSCODE must be set and at least 12 characters;
-inbound status queries are off.
+Notify: outbound on (telegram); inbound off: AGENT_PARLEY_INBOUND_PASSCODE must
+be set and at least 12 characters; inbound status queries are off.
 ```
 
 ## What it does not do

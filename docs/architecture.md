@@ -1192,8 +1192,17 @@ signaling. It does not kill arbitrary PIDs.
 
 The `process` module selects one bundle of operating-system primitives at
 import and every caller goes through that bundle, so no call site tests the
-platform. Each bundle supplies a creation-identity reader, an existence check,
-a command-line match and a terminate step.
+platform. Each bundle supplies a creation-identity reader, a hook's foreground
+process group reader, a parent process reader for walking a hook's ancestry
+without a controlling terminal, an existence check, a zombie check, a
+command-line match, a terminate step and a boot identifier, so a process
+record written before a restart is known to be from an earlier boot.
+
+A zombie counts as exited. A process that has exited but is not yet reaped
+keeps its process ID and its creation identity, so neither alone tells it from
+a running one; `alive` reports such a process as gone, and macOS shutdown
+stops polling once the target is a zombie. Linux reads the state field of
+`/proc/<pid>/stat` and macOS the `ps -o stat=` field, where `Z` marks a zombie.
 
 On Linux the bundle reads `/proc/<pid>/stat` for creation ticks and
 `/proc/<pid>/cmdline` for the argument vector, and shutdown pins the process
