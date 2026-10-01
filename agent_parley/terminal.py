@@ -895,7 +895,7 @@ def _session(
                 control_at = time.monotonic()
                 pending_input = pending(operator, pending_input)
                 os.write(master, entered)
-                if watch.holding and ANSWERING.search(entered):
+                if watch.holding and ANSWERING.search(operator):
                     watch.answered()
             if (
                 pending_control
