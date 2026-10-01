@@ -405,10 +405,11 @@ The verdict names one command per distinct cause, because a store behind this
 build and a plugin speaking another protocol need different commands. A behind
 store is resolved by `agent-parley up`, which migrates it in place and leaves
 a running service and every lane running; a newer store by installing the
-build that wrote it; a plugin mismatch by reinstalling the plugin. Its exit
-status is non-zero on a mismatch, so a
-script can gate on it. It reads only: it opens no lane, writes no configuration,
-repairs nothing, and prints no credential or profile path.
+build that wrote it; a plugin mismatch by `agent-parley plugins install`,
+restarting any lane already running on the old one. Its exit status is
+non-zero on a mismatch, so a script can gate on it. It reads only: it opens no
+lane, writes no configuration, repairs nothing, and prints no credential or
+profile path.
 
 Drift is refused where the call already crosses a boundary, not discovered
 mid-turn:
@@ -419,7 +420,10 @@ mid-turn:
   wrote, so the hook boundary is checked locally and no hook reaches the network
   to learn a version.
 - A served call declaring an unaccepted protocol in its `Agent-Parley-Protocol`
-  header is denied with both numbers, and `top` counts that denial.
+  header is denied with both numbers and the command that reinstalls the
+  plugin, and `top` counts that denial; that lane is already running on the
+  old plugin, so it must be restarted after the reinstall, not merely
+  retried.
 - Opening a store written by a newer schema is refused, never migrated
   downwards, exactly as a newer project manifest already is.
 - A hook whose read fails on a store behind its build migrates the store in
