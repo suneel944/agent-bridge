@@ -52,8 +52,10 @@ FORGES = ("github", "beads", "null")
 DEFAULT_FORGE = "github"
 
 GITHUB_REMOTE = re.compile(
-    r"^(?:https://|ssh://git@|git@)github\.com[:/]"
-    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$"
+    r"^(?:https://(?:[^@/]+@)?|ssh://git@|git@)"
+    r"(?:ssh\.)?github\.com(?::443)?[:/]"
+    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
 )
 
 _selected: dict[str, str] = {}
