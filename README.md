@@ -332,8 +332,11 @@ permission settings still apply.
 ## Notifications when you step away
 
 Agent Parley can forward the moments that need you to a Telegram bot or an
-email address. Outbound only: no command arrives over the channel, and a
-permission prompt is still answered only in your terminal.
+email address. Email is outbound only. The Telegram bot can also take status
+queries and decision answers back once inbound is on, as described in
+[Asking for status from the chat](#asking-for-status-from-the-chat). With
+inbound off, nothing arrives over the channel and a permission prompt is
+answered only in your terminal.
 
 Thirteen changes notify, and nothing else: a handoff offered to a lane, a lane
 blocked on a permission prompt, a lane held by a native dialog, a lane still

@@ -8,10 +8,10 @@ Configuration and every secret come from `notify setup`, stored owner-only in
 the state root as `STORED_NAME`, or from environment variables, which override
 the stored value for one process. Neither is written into coordination state,
 and the stored file is read by the process that sends, never exported into a
-lane's environment. Delivery is outbound only: no transport
-answers a native permission prompt or opens a port. The Telegram calls this
-module makes are shared with the read-only reader in `inbound`, which can ask
-for a status reading and can carry no other command back.
+lane's environment. Delivery from this module is outbound only: no transport
+here answers a native permission prompt or opens a port. The Telegram calls
+this module makes are shared with the reader in `inbound`, which carries
+status queries and decision answers back from the configured chat.
 """
 
 import hashlib

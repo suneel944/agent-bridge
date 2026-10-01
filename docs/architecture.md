@@ -106,15 +106,23 @@ on a network round trip. A hook process that exits first abandons the send, and
 a transport can refuse it; either way the situation stays unmarked and the next
 observation of it sends again, so there is no separate retry queue. Two
 processes observing one situation at once can each send it.
-Notification is outbound only: no transport carries a command back, and none of
-them can answer a native permission prompt.
+Notification is outbound only: no transport in `notify` carries a command back,
+and none of them can answer a native permission prompt.
 
-The one path that carries anything back is `inbound`, and it is limited to
-reads. It long-polls the Telegram Bot API from the service process, so it opens
-no port and registers no webhook, and it serves exactly one verb: `status`, with
-the filters `add_status_filters` declares for the command line and both readers
-share. No claim, handoff, wake, permission approval or free text reaches a
-session through it, and it writes nothing to coordination state. Admission is
+The one path that carries anything back is `inbound`. It long-polls the
+Telegram Bot API from the service process, so it opens no port and registers
+no webhook, and it carries two things. The `status` verb takes the filters
+`add_status_filters` declares for the command line and both readers share. An
+answer to an open decision, given by a button tap, by `decide ID OPTION
+[NOTE]` or by a reply to a one-decision message, is written onto that
+decision's record and reaches the waiting lane as supervisor mail, which wakes
+it. An answer to a native dialog is not mailed: the launcher presses the
+chosen option only while it still draws that same dialog. An irreversible
+option, or one that widens a permission, takes a confirming tap. No claim or
+handoff is made through it, a note reaches a lane only quoted, and no chat
+text is typed into a session. A button tap carries no passcode and is
+admitted only from the configured chat and only for an open decision this
+state root issued. Admission of a typed message is
 two independent checks, the configured chat identifier and a passcode read from
 the environment at service start; only a salted digest of that passcode is held
 in memory, it is compared with `hmac.compare_digest`, and it is never written to
