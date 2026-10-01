@@ -604,3 +604,12 @@ reported.
                     state = json.loads(activity_path.read_text())
                     state.update(activity="stopped", updated=time.time())
                     write_json(activity_path, state)
+                with contextlib.suppress(sqlite3.OperationalError):
+                    with store.connect(self.home, write=True) as db:
+                        lanes.transition(
+                            db,
+                            data["root"],
+                            agent,
+                            lanes.STOPPED,
+                            evidence="launch: session exited",
+                        )
