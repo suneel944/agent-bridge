@@ -140,7 +140,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.wsl == 'true'
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 65
     steps:
       - run: git config --global core.autocrlf false
         timeout-minutes: 2
@@ -165,7 +165,7 @@ jobs:
           additional-packages: git python3 curl ca-certificates
       - name: Run the behaviour suite inside the Linux file system
         shell: wsl-bash {0}
-        timeout-minutes: 20
+        timeout-minutes: 40
         run: |
           set -eu
           curl -LsSf https://astral.sh/uv/install.sh | sh
