@@ -282,10 +282,12 @@ def test_process_platform_is_chosen_once_for_the_running_system():
     assert linux.foreground_pid is process.linux_foreground_pid
     assert linux.parent_pid is process.linux_parent_pid
     assert linux.running is process.linux_running
+    assert linux.zombie is process.linux_zombie
     assert linux.matches_command is process.linux_matches_command
     assert linux.terminate is process.linux_terminate
     darwin = process.platform_for("darwin")
     assert darwin.running is process.darwin_running
+    assert darwin.zombie is process.darwin_zombie
     assert darwin.start_ticks.func is process.darwin_start_ticks
     assert darwin.foreground_pid.func is process.darwin_foreground_pid
     assert darwin.parent_pid.func is process.darwin_parent_pid
@@ -424,6 +426,30 @@ def test_macos_shutdown_signals_only_the_recorded_process(monkeypatch):
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_a_zombie_session_process_is_not_alive():
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen(['sleep', '60']);"
+            "print(child.pid, flush=True);"
+            "time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert parent.stdout is not None
+        pid = int(parent.stdout.readline())
+        ticks = process.start_ticks(pid)
+        process.ServerProcess(pid, ticks).stop()
+        assert process.alive(pid, ticks) is False
+    finally:
+        parent.kill()
+        parent.wait(timeout=5)
 
 
 def test_changed_lane_branch_is_rejected_without_resetting(
