@@ -2,7 +2,8 @@
 
 This directory holds the source of the Agent Parley launch video: a
 HyperFrames composition (`index.html`) and the terminal frames it shows
-(`frames.js`). Rendered files are not checked in.
+(`frames.js`). The MP4 is attached to the release; only the animated WebP
+cut is checked in, as `docs/assets/launch.webp`, for the README first screen.
 
 ## What is real and what is authored
 
