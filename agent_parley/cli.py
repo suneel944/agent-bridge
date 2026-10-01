@@ -2184,12 +2184,17 @@ class Bridge(
 
         Deliveries still unread or unacknowledged by the lane are marked
         superseded, because a lane that left answers nothing; the messages
-        themselves stay readable. Removing the worktree deletes its ignored
-        files, which `git status` never reports, so they are deleted only
-        when every one of them was named in ``discard``. The lane's session
-        and checkpoint locks are both taken before the first irreversible
-        step, so a busy lane refuses the retirement with its worktree,
-        branch, credential and record intact rather than failing halfway.
+        themselves stay readable. The lane's issue claims return to the pool
+        and its advisory reservations are released, granting what peers
+        queued, as a self-retirement does; a retired name is never swept
+        later, so anything it kept would stay held. Ready work refuses the
+        retirement before anything is removed. Removing the worktree deletes
+        its ignored files, which `git status` never reports, so they are
+        deleted only when every one of them was named in ``discard``. The
+        lane's session and checkpoint locks are both taken before the first
+        irreversible step, so a busy lane refuses the retirement with its
+        worktree, branch, credential and record intact rather than failing
+        halfway.
 
         Args:
             repo: Any checkout of the target repository.
@@ -2200,9 +2205,12 @@ class Bridge(
             An account of what was removed and what was kept.
 
         Raises:
-            BridgeError: If the lane is busy, holds uncommitted changes, or
-                holds an ignored file ``discard`` does not name.
+            BridgeError: If the lane is busy, holds uncommitted changes,
+                holds an ignored file ``discard`` does not name, or holds
+                ready work awaiting integration.
         """
+        from agent_parley import retirement
+
         root, directory = self.project(repo, create=False)
         roster.read(directory)
         with lock(directory / "setup.lock"):
@@ -2242,6 +2250,8 @@ class Bridge(
                             "them first, or run `agent-parley participant "
                             f"retire {name}` to confirm deleting them."
                         )
+                retirement.return_work(directory, data, name)
+                if lane.exists():
                     git(root, "worktree", "remove", str(lane))
                 git(root, "worktree", "prune")
                 note = f"Branch {branch} was already gone."
@@ -2259,6 +2269,12 @@ class Bridge(
                     else:
                         git(root, "branch", "-d", branch)
                         note = f"Branch {branch} deleted; it added no commits."
+                store.release_dead_holder(
+                    self.home,
+                    data["root"],
+                    participant["display"],
+                    f"{name} was retired by the operator",
+                )
                 store.revoke(self.home, data["root"], participant["display"])
                 store.supersede_recipient(
                     self.home,
