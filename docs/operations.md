@@ -396,7 +396,13 @@ The `projects` component is `ok` while every registered project's root
 checkout exists. A project whose root is gone, such as a probe run from a
 temporary directory, puts it in `root gone`, names each such root, and makes
 the verdict not consistent until the checkout is restored or that project's
-state folder is removed.
+state folder is removed. The remedy names the command for each root:
+`agent-parley gc --project ROOT` reports the removal and `--apply` performs
+it. It refuses while the root exists, while any lane's session process may
+still run, and before the service has retired the project's lanes, which it
+does one supervision interval after it finds the root gone. The project's
+recovery checkpoints move to `recovered/` under the state root, named by the
+project's key, unless `--yes` deletes them with the rest.
 
 The store has four states. `absent` means no store has been created yet, which
 is consistent because the service writes it at the current schema. `ok` means

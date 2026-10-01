@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -75,6 +76,7 @@ ENDED = issues.ENDED
 RECLAIM_INTERVAL = 900.0
 RECLAIM_PUBLICATION = "reclaim.json"
 ROOT_PUBLICATION = "root-missing.json"
+RECOVERED_FOLDER = "recovered"
 BOOT_RECORD = "boot.json"
 READINGS_PUBLICATION = "git-readings.json"
 GIT_WORKERS = 8
@@ -5973,9 +5975,9 @@ def missing_root(
     publication names, per lane, the claims released and the checkpoint
     each one left, fresh or from an earlier capture, so whoever takes the
     issue next can restore the work. It names the state directory for the
-    operator to remove;
-    nothing here deletes it. A root that reappears clears the record on the
-    next poll.
+    operator to remove with `agent-parley gc --project ROOT --apply`
+    (`forget`); nothing here deletes it. A root that reappears clears the
+    record on the next poll.
 
     A lane whose session process is still alive is never retired here: a
     moved repository or a dropped mount leaves its client running, and
@@ -6054,6 +6056,126 @@ def missing_root(
             "live": live,
         },
     )
+
+
+def forget(
+    home: Path, root: str, *, apply: bool = False, discard: bool = False
+) -> dict:
+    """Removes the private state of a project whose root checkout is gone.
+
+    The removal is the operator's half of `missing_root`: that poll retires
+    the lanes and records the state directory, and only this deletes it. A
+    project whose root still exists is never touched, nor one with a lane
+    whose session process is alive or unreadable, nor one the supervisor
+    has not recorded retired. The state directory is first renamed out of
+    the projects folder in one step, so no reader ever sees half of it.
+    The recovery checkpoints `missing_root` captured are moved to
+    `RECOVERED_FOLDER` under the state root, beside the project's key,
+    unless ``discard`` asks for them to be deleted with the rest.
+
+    Args:
+        home: Private bridge state root.
+        root: Recorded root checkout of the project to remove.
+        apply: Whether to remove; without it only the plan is reported.
+        discard: Whether to delete the recovery checkpoints too.
+
+    Returns:
+        The root, its state directory, whether it was removed, where the
+        recovery checkpoints were or would be kept, empty when none remain,
+        and whether they were or would be deleted.
+
+    Raises:
+        BridgeError: If no registered project names the root, the root
+            exists, a lane's session process is alive or unreadable, or the
+            supervisor has not retired the project yet.
+    """
+    wanted = {root, str(Path(root).expanduser().absolute())}
+    found = None
+    for path in sorted((home / "projects").glob("*/project.json")):
+        data = roster.normalize(json.loads(path.read_text()))
+        if str(data["root"]) in wanted:
+            found = path.parent, data
+            break
+    if found is None:
+        raise BridgeError(
+            f"No registered project names {root}; `agent-parley doctor` "
+            "lists the roots that are gone."
+        )
+    directory, data = found
+    named = str(data["root"])
+    if Path(named).exists():
+        raise BridgeError(
+            f"{named} still exists, so its project state is kept; retire "
+            "its lanes with `agent-parley participant retire` instead."
+        )
+    live = []
+    for name in data["participants"]:
+        reading = presence(directory, name)
+        if (
+            reading["process_alive"] is True
+            or reading["evidence"] == UNREADABLE
+        ):
+            live.append(name)
+    if live:
+        raise BridgeError(
+            f"Lanes of {named} may still be running: {', '.join(live)}; "
+            "stop their sessions, then run this again."
+        )
+    if not root_retired(directory):
+        raise BridgeError(
+            f"The service has not retired {named} yet; it does so one "
+            "supervision interval after it finds the root gone. Run "
+            "`agent-parley up` and try again."
+        )
+    folder = directory / recovery.RECOVERY_FOLDER
+    held = folder.is_dir() and any(folder.iterdir())
+    kept = home / RECOVERED_FOLDER / directory.name
+    if held and not discard and kept.exists():
+        kept = kept.with_name(f"{directory.name}-{int(time.time())}")
+    if apply:
+        trash = home / f".forget-{directory.name}"
+        directory.rename(trash)
+        if held and not discard:
+            kept.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (trash / recovery.RECOVERY_FOLDER).rename(kept)
+        shutil.rmtree(trash)
+    return {
+        "root": named,
+        "state_directory": str(directory),
+        "removed": apply,
+        "checkpoints": str(kept) if held and not discard else "",
+        "checkpoints_deleted": held and discard,
+    }
+
+
+def forgotten_lines(result: dict) -> list[str]:
+    """Describes what `forget` removed or would remove.
+
+    Args:
+        result: What `forget` returned.
+
+    Returns:
+        One line for the state directory, one for the recovery checkpoints
+        when any exist, and the command that applies a reported plan.
+    """
+    done = result["removed"]
+    lines = [
+        ("Removed " if done else "Would remove ")
+        + f"{result['state_directory']}, the state of {result['root']}."
+    ]
+    if result["checkpoints"]:
+        lines.append(
+            ("Kept" if done else "Would keep")
+            + f" its recovery checkpoints in {result['checkpoints']}."
+        )
+    elif result["checkpoints_deleted"]:
+        lines.append(
+            ("Deleted" if done else "Would delete")
+            + " its recovery checkpoints."
+        )
+    if not done:
+        lines.append("Add --apply to remove it.")
+    return lines
 
 
 def poll(home: Path, directory: Path) -> None:

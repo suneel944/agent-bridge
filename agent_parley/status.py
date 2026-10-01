@@ -9,6 +9,7 @@ time.
 from __future__ import annotations
 
 import contextlib
+import shlex
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -484,7 +485,13 @@ class StatusMixin(BridgeCore):
                 "protocol": protocol.PROTOCOL,
                 "state": protocol.ROOT_GONE if gone else protocol.OK,
                 "remedy": (
-                    protocol.RESTORE_ROOT + ", ".join(gone) if gone else ""
+                    protocol.RESTORE_ROOT
+                    + "; ".join(
+                        protocol.FORGET_ROOT.format(root=shlex.quote(root))
+                        for root in gone
+                    )
+                    if gone
+                    else ""
                 ),
                 "compatible": not gone,
             }
