@@ -151,7 +151,7 @@ on standard output and export to a file.
 | `mail send NAME TEXT` | Compatibility alias of `say`, the canonical spelling, kept under `mail` with the other mail verbs; every `say` flag applies. |
 | `decide TEXT` | Record one decision every registered lane can read; `--subject` names it and `--key` deduplicates it. |
 | `decision list [QUERY]` | List or search the decisions recorded for this project; `--since` bounds their age and `--limit` the page. |
-| `mail pending` | List operator messages and offers recorded but not delivered. |
+| `mail pending` | List operator messages and offers recorded but not delivered, and each orphan decision waiting on the operator. |
 | `mail cancel ID` | Remove one recorded operator item before it is delivered. |
 | `history issue N` | List every record that touched an issue, with each holding. |
 | `history participant NAME` | List everything one lane filed. |

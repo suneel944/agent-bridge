@@ -1055,6 +1055,12 @@ conflated.
 condition and the deliveries it has left; `mail cancel ID` removes one before it
 is delivered. `status` counts a lane's pending operator items.
 
+`mail pending` also lists, under `orphans`, the orphan decision for each lane
+holding orphaned claims: the remedy `problems` prints, which is a live peer's
+`issue claim --take-orphaned` or, when no live lane can take them, the
+operator's commands. It is read from the ledger, so it appears whether or not a
+notification transport is configured.
+
 ### Attaching what does not fit
 
 Every coordination payload has an explicit UTF-8 byte cap: a message body
