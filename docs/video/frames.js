@@ -1,7 +1,7 @@
 window.PARLEY_CUT = {
  "columns": 132,
  "rows": 24,
- "seconds": 72.316,
+ "seconds": 72.116,
  "items": [
   {
    "start": 0.0,
@@ -24,23 +24,23 @@ window.PARLEY_CUT = {
    "caption": "ada runs on claude, in a worktree of its own.",
    "rows": [
     [
-     "ada is a claude lane the coordination service resumes unattended, and no bridge tool approval is recorded for it, so a service resum",
+     "ada is a claude lane the coordination service resumes unattended, and no bridge tool approval is recorded for it, so a service",
      "#c9d1d9"
     ],
     [
-     "e would stop at a permission prompt nobody sees; the service reports that lane instead of resuming it. To opt in, record \"approve_br",
+     "resume would stop at a permission prompt nobody sees; the service reports that lane instead of resuming it. To opt in, record",
      "#c9d1d9"
     ],
     [
-     "idge_tools\": true or \"auto_mode\": true under \"supervision\" in the project manifest or on this lane, or resume the lane in your own t",
+     "\"approve_bridge_tools\": true or \"auto_mode\": true under \"supervision\" in the project manifest or on this lane, or resume the lane in",
      "#c9d1d9"
     ],
     [
-     "erminal.",
+     "your own terminal.",
      "#c9d1d9"
     ],
     [
-     "ada (claude, default account): /home/dev/.local/state/agent-parley/projects/c44f7669ccf6eccc/ada",
+     "ada (claude, default account): /home/dev/.local/state/agent-parley/projects/0204ab80f76f5cbe/ada",
      "#c9d1d9"
     ],
     [
@@ -59,7 +59,7 @@ window.PARLEY_CUT = {
    "caption": "grace runs on codex, right beside it.",
    "rows": [
     [
-     "grace (codex, default account): /home/dev/.local/state/agent-parley/projects/c44f7669ccf6eccc/grace",
+     "grace (codex, default account): /home/dev/.local/state/agent-parley/projects/0204ab80f76f5cbe/grace",
      "#c9d1d9"
     ],
     [
@@ -86,7 +86,7 @@ window.PARLEY_CUT = {
      "#c9d1d9"
     ],
     [
-     " off: AGENT_PARLEY_INBOUND is not set",
+     "off: AGENT_PARLEY_INBOUND is not set",
      "#c9d1d9"
     ],
     [
@@ -114,7 +114,7 @@ window.PARLEY_CUT = {
      "#c9d1d9"
     ],
     [
-     "ada    starting  0       Check shared coordination state and await my task.",
+     "ada    working   0       Check shared coordination state and await my task.",
      "#c9d1d9"
     ],
     [
@@ -407,7 +407,7 @@ window.PARLEY_CUT = {
      "#c9d1d9"
     ],
     [
-     "    \"id\": \"bc0fc59fac434553bdf3a88bf745567e\",",
+     "    \"id\": \"7ee4a6b9480745149ebfdc68d4f341b9\",",
      "#c9d1d9"
     ],
     [
@@ -419,7 +419,7 @@ window.PARLEY_CUT = {
      "#c9d1d9"
     ],
     [
-     "    \"created\": 1790800461.9338422,",
+     "    \"created\": 1790828460.9125574,",
      "#c9d1d9"
     ],
     [
@@ -450,7 +450,7 @@ window.PARLEY_CUT = {
    "kind": "step",
    "typing": 1.6,
    "prompt": "$",
-   "command": "agent-parley issue accept 41 --offer-id bc0fc59fac434553bdf3a88bf745567e",
+   "command": "agent-parley issue accept 41 --offer-id 7ee4a6b9480745149ebfdc68d4f341b9",
    "caption": "grace accepts; only then does ownership move.",
    "rows": [
     [
@@ -516,7 +516,7 @@ window.PARLEY_CUT = {
   },
   {
    "start": 66.512,
-   "seconds": 5.804,
+   "seconds": 5.604,
    "kind": "step",
    "typing": 0.644,
    "prompt": "$",
@@ -524,11 +524,11 @@ window.PARLEY_CUT = {
    "caption": "The dashboard: state, issues, mail, leases, denials.",
    "rows": [
     [
-     "agent-parley top - 00:34:22  server running  projects 1  read 0.16s",
+     "agent-parley top - 08:21:01  server running  projects 1  read 0.08s",
      "#79c0ff"
     ],
     [
-     "Lanes: 2 total, 2 starting   Issues: 1 held",
+     "Lanes: 2 total, 1 starting, 1 working   Issues: 1 held",
      "#79c0ff"
     ],
     [
@@ -548,23 +548,15 @@ window.PARLEY_CUT = {
      "#79c0ff"
     ],
     [
-     "PARTICIPANT     STATE                   ISSUES      MAIL       LEASES     DENIALS    TOKENS     IDLE      TASK",
+     "PARTICIPANT     STATE                              ISSUES      MAIL       LEASES     DENIALS    TOKENS     IDLE      TASK",
      "#79c0ff"
     ],
     [
-     "ada             starting 18s            -           0/0        0          1/2                   0s        Check shared coordination\u2026",
+     "ada             working 17s; inferred by liveness  -           0/0        0          1/2                   0s        Check shared c\u2026",
      "#c9d1d9"
     ],
     [
-     "grace           starting 9s             #41         0/0        1 0s       0/1                   0s        Check shared coordination\u2026",
-     "#c9d1d9"
-    ],
-    [
-     "",
-     "#c9d1d9"
-    ],
-    [
-     "! ada  unfit (session): its session process is not running",
+     "grace           starting 9s                        #41         0/0        1 0s       0/1                   0s        Check shared c\u2026",
      "#c9d1d9"
     ],
     [

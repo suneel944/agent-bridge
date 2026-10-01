@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import textwrap
 import threading
 import time
 import tty
@@ -274,19 +275,27 @@ def lines(text: str) -> tuple[str, ...]:
         text: Captured output.
 
     Returns:
-        The lines of that output, right-stripped, wrapped at the frame
-        width the way the terminal wraps, and without trailing blank
-        lines. Output captured from a pseudo-terminal is already wrapped;
-        a tool result rendered as a document is not.
+        The lines of that output, right-stripped and without trailing
+        blank lines. A line wider than the frame wraps at the last space
+        that fits, so a frame never splits a word; a word wider than the
+        frame breaks at the frame edge. The words, their order and the
+        indentation that starts a line are kept.
     """
     rows: list[str] = []
     for row in text.split("\n"):
         stripped = row.rstrip()
-        if not stripped:
+        if len(stripped) <= COLUMNS:
             rows.append(stripped)
-        while stripped:
-            rows.append(stripped[:COLUMNS])
-            stripped = stripped[COLUMNS:]
+            continue
+        rows.extend(
+            textwrap.wrap(
+                stripped,
+                COLUMNS,
+                expand_tabs=False,
+                replace_whitespace=False,
+                break_on_hyphens=False,
+            )
+        )
     while rows and not rows[-1]:
         rows.pop()
     return tuple(rows)
