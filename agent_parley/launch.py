@@ -264,7 +264,6 @@ reported.
             process,
             protocol,
             roster,
-            shlex,
             shutil,
             store,
             supervision,
@@ -309,7 +308,7 @@ reported.
             if not protocol.compatible(declared):
                 raise BridgeError(
                     protocol.mismatch("installed plugin", declared),
-                    next_command=f"agent-parley setup {shlex.quote(str(repo))}",
+                    next_command="agent-parley plugins install",
                 )
         missing = [
             event
