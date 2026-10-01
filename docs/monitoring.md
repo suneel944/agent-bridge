@@ -132,22 +132,25 @@ and a service-driven resume has nobody at the keyboard to answer. `claude` 2.1.2
 carries per-tool approval in its own settings, so a launch can allow that one MCP
 server there, and only when you record the opt-in:
 
-```json
-{
-  "supervision": {"approve_bridge_tools": true},
-  "participants": {
-    "claude-2": {"approve_bridge_tools": false}
-  }
-}
+```sh
+agent-parley approval resume --bridge-tools on
+agent-parley approval resume --bridge-tools off --participant claude-2
 ```
 
-The default is off and changes nothing about the client's configuration. While
-a `claude` lane the service could resume has neither this opt-in nor
-`auto_mode`, `run` and `participant add` say so on standard error, `doctor`
-lists the lane under `approvals` as a setup gap, and the service withholds its
-resume: the wake is recorded as `setup gap: bridge tool approval not recorded`,
-which `problems` reports under `wake attention` with the opt-in and the
-`run --resume` command for your own terminal. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
+The command writes `approve_bridge_tools` under `supervision` in the project
+manifest, or on one lane with `--participant`; `--auto-mode on|off` records
+`auto_mode` the same way, and `approval resume` with no flag reports both for
+each lane. Only the operator can change them. The default is off and changes
+nothing about the client's configuration. While a `claude` lane the service
+could resume has neither this opt-in nor `auto_mode`, `run` and
+`participant add` say so on standard error, `doctor` lists the lane under
+`approvals` as a setup gap with that command, and the service withholds its
+resume: the wake is recorded as `setup gap: bridge tool approval not recorded`
+and spends no wake attempt, because the outcome is known from the manifest, so
+the lane is never escalated for it and its backlog waits for the opt-in or
+your own resume. `problems` reports the lane under `wake attention` with the
+command that records the opt-in and the `run --resume` command for your own
+terminal; when several lanes of one project share the gap, they share one row. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
 allows this bridge's own coordination tools, and
 `Bash(<interpreter> -m agent_parley.cli *)`, which allows the exact interpreter
 and module the protocol prompt orders every lane to run for `issue claim`,

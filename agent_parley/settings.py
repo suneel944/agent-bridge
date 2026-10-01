@@ -121,6 +121,78 @@ class SettingsMixin(BridgeCore):
             "records a decision on the lane's current ready report."
         )
 
+    def resume_opt_in(
+        self,
+        repo: Path,
+        participant: str = "",
+        bridge_tools: bool | None = None,
+        auto_mode: bool | None = None,
+    ) -> str:
+        """Reports or records the opt-ins a service resume of a lane needs.
+
+        A `claude` lane the service resumes has nobody at the keyboard, so
+        the service withholds the resume until the operator records
+        `approve_bridge_tools` or `auto_mode`. Both stay explicit operator
+        choices that default to off; this writes the same manifest fields
+        `roster.approval_opt_in` validates, for the project under
+        `supervision` or for one lane, so no one edits private state by hand.
+
+        Args:
+            repo: Any checkout of the target repository.
+            participant: Lane to record the opt-in on, or empty for the
+                project default a lane entry overrides.
+            bridge_tools: New `approve_bridge_tools` value, or None to keep it.
+            auto_mode: New `auto_mode` value, or None to keep it.
+
+        Returns:
+            One line per affected lane with both effective opt-ins.
+
+        Raises:
+            BridgeError: If the repository has no project yet, the named
+                participant is not in it, or a change comes from a lane or a
+                process holding a lane's token.
+        """
+        from agent_parley import dialogs, unattended
+        from agent_parley.cli import lock, roster, write_json
+
+        root, directory = self.project(repo, create=False)
+        data = roster.read(directory)
+        changes = {
+            key: value
+            for key, value in (
+                (dialogs.PRE_APPROVE, bridge_tools),
+                (dialogs.AUTO_MODE, auto_mode),
+            )
+            if value is not None
+        }
+        if participant and participant not in data["participants"]:
+            raise BridgeError(
+                f"{participant} is not a participant in this project."
+            )
+        if changes:
+            unattended.operator_only(
+                repo, root, data, "The service resume opt-in is set"
+            )
+            with lock(directory / "setup.lock"):
+                data = roster.read(directory)
+                target = (
+                    data["participants"][participant]
+                    if participant
+                    else data.setdefault("supervision", {})
+                )
+                target.update(changes)
+                write_json(directory / "project.json", data)
+        names = [participant] if participant else sorted(data["participants"])
+        if not names:
+            return f"{root} has no participants yet."
+        state = {True: "on", False: "off"}
+        return "\n".join(
+            f"{name}: {dialogs.PRE_APPROVE} "
+            f"{state[dialogs.pre_approved(data, name)]}, "
+            f"{dialogs.AUTO_MODE} {state[dialogs.auto_mode(data, name)]}"
+            for name in names
+        )
+
     def initialization(self, repo: Path, command: str | None = None) -> str:
         """Reports or records the command every new lane runs before starting.
 

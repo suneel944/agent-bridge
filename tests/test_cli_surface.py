@@ -27,6 +27,7 @@ NEW_COMMANDS = (
     ("status", "--help"),
     ("top", "--help"),
     ("approval", "show", "--help"),
+    ("approval", "resume", "--help"),
     ("branch", "show", "--help"),
     ("forge", "show", "--help"),
     ("state", "show", "--help"),
@@ -1025,3 +1026,55 @@ def test_a_duration_option_rejects_a_non_finite_window(
     assert f"--within: invalid duration value: '{text}'" in (
         capsys.readouterr().err
     )
+
+
+def test_approval_resume_records_the_service_resume_opt_ins(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    from agent_parley import supervision
+
+    def resume(*flags):
+        return text(
+            monkeypatch,
+            capsys,
+            "--home",
+            str(bridge.home),
+            "approval",
+            "resume",
+            *flags,
+            "--repo",
+            str(repo),
+        )
+
+    directory = bridge.project(repo)[1]
+    assert "claude: approve_bridge_tools off, auto_mode off" in resume()
+    shown = resume("--bridge-tools", "on", "--participant", "claude")
+    assert shown.strip() == "claude: approve_bridge_tools on, auto_mode off"
+    assert roster.read(directory)["participants"]["claude"][
+        "approve_bridge_tools"
+    ]
+    assert not supervision.opt_in_missing(
+        bridge.home, roster.read(directory), "claude"
+    )
+    shown = resume("--auto-mode", "on")
+    assert "codex: approve_bridge_tools off, auto_mode on" in shown
+    assert roster.read(directory)["supervision"]["auto_mode"] is True
+    resume("--bridge-tools", "off", "--participant", "claude")
+    assert "claude: approve_bridge_tools off, auto_mode on" in resume()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "approval",
+            "resume",
+            "--participant",
+            "nobody",
+            "--repo",
+            str(repo),
+        ],
+    )
+    assert cli.main() != 0
+    assert "nobody is not a participant" in capsys.readouterr().err

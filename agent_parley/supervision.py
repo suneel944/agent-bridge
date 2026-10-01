@@ -100,10 +100,10 @@ TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
 SESSION_HELD = "busy:session"
 OPT_IN_MISSING = "setup gap: bridge tool approval not recorded"
+OPT_IN_COMMAND = "agent-parley approval resume --bridge-tools on"
 OPT_IN_REMEDY = (
-    'record "approve_bridge_tools": true or "auto_mode": true under '
-    '"supervision" in the project manifest or on this lane, or resume the '
-    "lane in your own terminal"
+    f"run `{OPT_IN_COMMAND}` (or `--auto-mode on`; add `--participant NAME` "
+    "for one lane), or resume the lane in your own terminal"
 )
 OPT_IN_WARNING = (
     "{name} is a claude lane the coordination service resumes unattended, "
@@ -7229,8 +7229,11 @@ def wake(
     A resumed process uses a real terminal, not an unattended permission mode.
     A lane `opt_in_missing` reports is not resumed at all, because its
     session would stop at the bridge tool prompt with nobody to answer; the
-    attempt is recorded as `OPT_IN_MISSING` for the operator instead, and
-    counts toward the attempt bound, so a gap nobody closes is escalated.
+    attempt is recorded as `OPT_IN_MISSING` for the operator instead. Its
+    outcome is known from the manifest alone, so it spends no attempt and
+    never escalates the lane; the backlog waits until the operator records
+    the opt-in with `approval resume` or resumes the lane, and only the
+    first such refusal is written to the checkpoint history.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
     lane; waking only asks the lane to take its own turn.
 
@@ -7486,7 +7489,9 @@ def wake(
                     track_launcher(child)
                     result = f"resume requested (launcher {child.pid})"
         probe_exhaustion(directory, name, result)
-        counted = attempts + (not result.startswith("busy"))
+        gap = result == OPT_IN_MISSING
+        repeated = gap and record.get("result") == OPT_IN_MISSING
+        counted = attempts + (not result.startswith("busy") and not gap)
         now = time.time()
         spent = counted >= WORK_WAKE_ATTEMPTS
         store_wake(
@@ -7520,10 +7525,12 @@ def wake(
                 result,
                 (
                     "deferred"
-                    if result.startswith("busy")
+                    if result.startswith("busy") or gap
                     else "awaiting_progress"
                 ),
             )
+        if repeated:
+            return
         from agent_parley import checkpoints
 
         checkpoints.record(

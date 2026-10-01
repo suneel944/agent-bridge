@@ -753,9 +753,10 @@ captured: it goes straight to the operator's terminal, and the refusal points
 there. Only lane initialization captures its command's output and reports the
 last twenty lines. A command that cannot run is a refusal, not a skip.
 No flag bypasses the gate, and removing it is an explicit `verify set ''`.
-`verify set`, `approval set` and `init set` are operator-only: each is refused
-from an assigned worktree or from any process holding a lane's
-`AGENT_PARLEY_TOKEN`, so a lane cannot clear a gate its own merge has to pass.
+`verify set`, `approval set`, a change through `approval resume` and
+`init set` are operator-only: each is refused from an assigned worktree or
+from any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot clear
+a gate its own merge has to pass or grant its own unattended resume.
 Like `approve`, this is a command-line boundary, not an operating-system one.
 The gate reports the base checkout as it stands before the merge, which is not
 a claim about the merged result, so the same command runs again on the merge

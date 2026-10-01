@@ -111,6 +111,7 @@ on standard output and export to a file.
 | `reject NAME REASON` | Record a rejection and deliver the reason to the lane. |
 | `approval show` | Show which steps require a recorded approval first. |
 | `approval set [STEP ...]` | Require an approval before `merge`, `pr`, both, or none. |
+| `approval resume [--bridge-tools on\|off] [--auto-mode on\|off] [--participant NAME]` | Show or record whether the service may resume a `claude` lane without a terminal. |
 | `provider list` | List built-in presets and local overrides. |
 | `provider show NAME` | Show one provider definition with the hooks its adapter cannot serve. |
 | `provider add NAME` | Define a provider; warn when shadowing a built-in preset. |

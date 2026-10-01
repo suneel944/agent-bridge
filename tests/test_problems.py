@@ -605,9 +605,28 @@ def test_a_withheld_resume_names_the_missing_approval_opt_in(
     [row] = rows(bridge, problems.WAKE)
     assert row["detail"].startswith("setup gap")
     assert row["actor"] == problems.BY_OPERATOR
+    repo_arg = at(paired["root"])
     assert row["command"] == (
-        f"{supervision.OPT_IN_REMEDY}: agent-parley run claude --resume "
-        f"{at(paired['root'])}"
+        f"agent-parley approval resume --bridge-tools on --participant claude "
+        f"{repo_arg}, or agent-parley run claude --resume {repo_arg} in your "
+        "own terminal"
+    )
+
+
+def test_withheld_resumes_of_one_project_share_one_row(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    for name in ("claude", "codex"):
+        alive(directory, name)
+        refuse(bridge, directory, name, supervision.OPT_IN_MISSING)
+
+    [row] = rows(bridge, problems.WAKE)
+
+    assert row["count"] == 2
+    assert row["detail"].endswith("lanes: claude, codex")
+    assert row["command"].startswith(
+        f"agent-parley approval resume --bridge-tools on {at(paired['root'])}"
     )
 
 
