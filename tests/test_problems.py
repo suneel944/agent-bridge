@@ -492,6 +492,38 @@ def test_an_escalated_native_dialog_is_a_row_naming_it(
     assert row["seconds"] >= 40
 
 
+@pytest.mark.parametrize(
+    "dialog",
+    [
+        {"name": "directory-trust", "escalated": True, "at": 0},
+        {"name": dialogs.PERMISSION, "tool": "Bash", "since": 0},
+    ],
+)
+def test_a_dialog_ends_with_the_session_process_that_showed_it(dialog):
+    record = lane_record(
+        dialog=dialog,
+        availability={
+            "state": supervision.STOPPED,
+            "process_alive": False,
+            "age_seconds": 900,
+        },
+        idle={**lane_record()["idle"], "stalled": True, "age_seconds": 900},
+    )
+    found = problems._lane_rows(
+        record,
+        {"lane": "/lane", "branch": "work"},
+        "/root",
+        {**supervision.DEFAULTS, "wake": False},
+        600,
+        time.time(),
+    )
+    conditions = {row["condition"] for row in found}
+    assert not conditions & {problems.HELD, problems.APPROVAL}
+    assert [row["command"] for row in found] == [
+        "agent-parley run claude --resume --repo /root"
+    ]
+
+
 def test_a_held_permission_prompt_is_a_waiting_on_approval_row(
     bridge, repo, paired, served
 ):

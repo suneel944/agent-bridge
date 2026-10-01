@@ -162,19 +162,39 @@ def _blocked(record: dict) -> str:
         The session state or recorded wake refusal that keeps delivered mail
         unread, and an empty string when nothing recorded keeps it unread. A
         message sent to a blocked lane is stored and never reaches a turn, so
-        no row offers `say` while one of these holds.
+        no row offers `say` while one of these holds. A recorded dialog
+        counts only while the session process that showed it may be alive.
     """
     result = str((record.get("wake") or {}).get("result", ""))
     if record["availability"]["state"] == supervision.STOPPED:
         return supervision.STOPPED
     if result in (DIALOG, ATTENTION):
         return result
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     if held.get("name") == dialogs.PERMISSION or held.get("escalated"):
         return DIALOG
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _dialog(record: dict) -> dict:
+    """Reads the native dialog a lane's session still shows, if any.
+
+    A dialog belongs to the session that showed it. The record is not
+    cleared when that session ends, so a dialog read while the session
+    process is known to be gone describes a prompt no terminal shows.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        The recorded dialog, or an empty mapping when none is recorded or
+        the lane's session process is known to be gone.
+    """
+    if record["availability"].get("process_alive") is False:
+        return {}
+    return record.get("dialog") or {}
 
 
 def _inferred(record: dict) -> str:
@@ -294,7 +314,7 @@ def _remedy(
         )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     if (
         blocked == DIALOG
         and wake.get("result") == DIALOG
@@ -747,7 +767,10 @@ def _lane_rows(
         because a prompt the operator is about to answer needs no row. A
         native dialog the launcher escalated is reported at once by name,
         with the options it offers, because nothing will answer it but the
-        operator. A row about the lane's state says when the dialog watcher
+        operator. A prompt or dialog is reported only while the session
+        process that showed it may be alive; once that process is gone no
+        terminal shows the prompt, and the lane carries only the stopped
+        remedy. A row about the lane's state says when the dialog watcher
         or the liveness sample inferred that state and names the hook the
         lane's client lacks, because no hook confirmed it. A quiet lane
         that refused a peer a key it still holds is reported with the lanes
@@ -802,7 +825,7 @@ def _lane_rows(
                 actor,
             )
         )
-    held = record.get("dialog") or {}
+    held = _dialog(record)
     since = held.get("since")
     if held.get("name") == dialogs.PERMISSION and isinstance(
         since, (int, float)
