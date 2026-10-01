@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.0](https://github.com/suneel944/agent-parley/compare/v0.14.0...v0.15.0) (2026-10-01)
+
+
+### Features
+
+* deliver the 0.15.0 autonomy milestone (#828) ([#747](https://github.com/suneel944/agent-parley/issues/747)) ([#748](https://github.com/suneel944/agent-parley/issues/748)) ([#749](https://github.com/suneel944/agent-parley/issues/749)) ([#750](https://github.com/suneel944/agent-parley/issues/750)) ([#751](https://github.com/suneel944/agent-parley/issues/751)) ([#752](https://github.com/suneel944/agent-parley/issues/752)) ([#753](https://github.com/suneel944/agent-parley/issues/753)) ([#754](https://github.com/suneel944/agent-parley/issues/754)) ([#755](https://github.com/suneel944/agent-parley/issues/755)) ([#756](https://github.com/suneel944/agent-parley/issues/756)) ([#757](https://github.com/suneel944/agent-parley/issues/757)) ([#758](https://github.com/suneel944/agent-parley/issues/758)) ([#759](https://github.com/suneel944/agent-parley/issues/759)) ([#760](https://github.com/suneel944/agent-parley/issues/760)) ([#761](https://github.com/suneel944/agent-parley/issues/761)) ([#762](https://github.com/suneel944/agent-parley/issues/762)) ([#776](https://github.com/suneel944/agent-parley/issues/776)) ([#777](https://github.com/suneel944/agent-parley/issues/777)) ([#778](https://github.com/suneel944/agent-parley/issues/778)) ([#779](https://github.com/suneel944/agent-parley/issues/779)) ([#780](https://github.com/suneel944/agent-parley/issues/780)) ([#781](https://github.com/suneel944/agent-parley/issues/781)) ([#783](https://github.com/suneel944/agent-parley/issues/783)) ([#792](https://github.com/suneel944/agent-parley/issues/792)) ([#795](https://github.com/suneel944/agent-parley/issues/795)) ([#796](https://github.com/suneel944/agent-parley/issues/796)) ([#797](https://github.com/suneel944/agent-parley/issues/797)) ([#798](https://github.com/suneel944/agent-parley/issues/798)) ([#799](https://github.com/suneel944/agent-parley/issues/799)) ([#800](https://github.com/suneel944/agent-parley/issues/800)) ([#801](https://github.com/suneel944/agent-parley/issues/801)) ([#803](https://github.com/suneel944/agent-parley/issues/803)) ([#804](https://github.com/suneel944/agent-parley/issues/804)) ([#805](https://github.com/suneel944/agent-parley/issues/805)) ([#806](https://github.com/suneel944/agent-parley/issues/806)) ([#807](https://github.com/suneel944/agent-parley/issues/807)) ([#823](https://github.com/suneel944/agent-parley/issues/823)) ([#824](https://github.com/suneel944/agent-parley/issues/824))
+
+### Bug fixes
+
+* retire released claims on closed issues from free work (#746)
+
 ## [0.14.0](https://github.com/suneel944/agent-parley/compare/v0.13.0...v0.14.0) (2026-09-29)
 
 
