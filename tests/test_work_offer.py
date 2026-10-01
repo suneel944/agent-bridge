@@ -1409,6 +1409,52 @@ def test_an_escalation_holds_until_the_lane_records_activity(
     assert record["attempts"] == 1
 
 
+def test_an_escalated_offer_is_not_delivered_again_until_progress(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    alive(directory, "claude", updated=time.time() - 500)
+    bridge.issue(peer, "claim", "2")
+    bridge.issue(peer, "claim", "3")
+    requested = []
+    monkeypatch.setattr(
+        terminal,
+        "request",
+        lambda path, name: requested.append(name) or "accepted",
+    )
+    supervision.poll(bridge.home, directory)
+    manifest = json.loads((directory / "project.json").read_text())
+    config = supervision.configuration(bridge.home, manifest)
+    observed = supervision.presence(
+        directory, "claude", config["inactive_after"]
+    )
+    for _ in range(4):
+        unthrottle(bridge.home, directory, "claude")
+        supervision.wake(
+            bridge.home, directory, manifest, "claude", observed, config
+        )
+    dispatch = supervision.published_work(directory, "claude")["dispatch"]
+    assert dispatch["state"] == "escalated"
+    delivered = len(requested)
+
+    for _ in range(3):
+        unthrottle(bridge.home, directory, "claude")
+        supervision.wake(
+            bridge.home, directory, manifest, "claude", observed, config
+        )
+    assert len(requested) == delivered
+
+    committed(lane)
+    unthrottle(bridge.home, directory, "claude")
+    supervision.wake(
+        bridge.home, directory, manifest, "claude", observed, config
+    )
+    assert len(requested) == delivered + 1
+
+
 def test_a_waiting_only_offer_is_delivered_once_per_generation(
     bridge, repo, paired, monkeypatch
 ):
