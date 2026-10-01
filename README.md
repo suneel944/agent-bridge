@@ -12,7 +12,7 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 ```
 
 <p align="center">
-  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.0/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
+  <a href="https://github.com/suneel944/agent-parley/releases/download/v0.15.1/launch.mp4"><img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/launch.webp" width="800" alt="The Agent Parley launch video: two lanes claim work in one repository, collide on a reservation, hand off an issue, and agent-parley top shows both lanes"></a>
 </p>
 
 <p align="center">
