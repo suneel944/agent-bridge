@@ -9,8 +9,8 @@ the repository owner can carry out.
 Repository installation does not imply public directory approval. The Codex
 listing went live on 2026-09-14 at
 `https://chatgpt.com/plugins/plugins_6aa7c91c25008191ad715f14756e5deb`, and
-the submission archive has been attached to every release from v0.6.0 through
-v0.14.0; each new version still needs a manual portal upload, because neither
+the submission archive is attached to every release from v0.6.0 onward; each
+new version still needs a manual portal upload, because neither
 catalog offers a publishing API. The Claude submission was made on 2026-09-14
 through the Console form and was still awaiting review on 2026-09-26; a code
 search of `anthropics/claude-plugins-official` for `agent-parley` returned no
@@ -222,7 +222,10 @@ marketplace is named `agent-parley`, so the documented install command is
 
 Both catalogs ask for public URLs that match the publisher identity. Use:
 
-- Website and homepage: `https://github.com/suneel944/agent-parley#readme`
+- Website: `https://suneel944.github.io/agent-parley/`, the `Homepage` in
+  `pyproject.toml` and the `websiteUrl` in `server.json`
+- Plugin homepage and repository: `https://github.com/suneel944/agent-parley`,
+  as `plugin.json` and `.claude-plugin/marketplace.json` declare
 - Support: `https://github.com/suneel944/agent-parley/issues`
 - Privacy policy:
   `https://github.com/suneel944/agent-parley/blob/main/docs/privacy.md`
@@ -367,8 +370,9 @@ executable installed.
   remaining"`, and stays paused while the offer is pending. The recipient
   reads the current offer identifier from `agent-parley issue list` and runs
   `agent-parley issue accept NUMBER --offer-id ID`. An identifier from a
-  cancelled or replaced offer is rejected rather than accepted. The handoff
-  transfers neither file reservations nor message acknowledgement.
+  cancelled or replaced offer is rejected rather than accepted. Accepting
+  moves the advisory file reservations the offer carried from the offering
+  lane to the recipient; message acknowledgement does not transfer.
 
 ### 5. Reporting an outcome without claiming verification
 

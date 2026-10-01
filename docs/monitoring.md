@@ -74,8 +74,9 @@ dialog, is read. A framed dialog counts only while it shows at least two
 numbered options and its own footer (`Esc to cancel`, `Enter to select` and
 similar), and a usage limit counts only on the client's own notice line. Text
 that merely quotes a dialog, in scrollback or in the agent's output, never
-parks the lane. Once a dialog is answered, by the launcher or by a key you type
-in the lane's terminal, the next screen output releases the lane.
+parks the lane. Once a dialog is answered, by the launcher or by a digit or
+Enter you type in the lane's terminal, the next screen output releases the
+lane; any other key leaves it held.
 
 `directory-trust` is the screen that asks whether you trust the folder. Codex
 records that trust for the repository root, so trusting a lane's worktree also
@@ -477,13 +478,19 @@ agent-parley doctor
 agent-parley doctor --json
 ```
 
-`doctor` prints four components: the launcher's version and protocol, the
-protocol each shipped plugin manifest declares, the store's schema against the
-schema this build writes, and the `service` component, which compares the
-running coordination service against the code installed here. A service started
-from an older build is reported stale with the restart that clears it, rather
-than reported ready. `doctor` exits non-zero on a mismatch, so a script can gate
-on it. It reads only, and prints no credential.
+`doctor` prints the launcher's version and protocol, the protocol each shipped
+plugin manifest declares, the store's schema against the schema this build
+writes, and the `service` component, which compares the running coordination
+service against the code installed here. A service started from an older build
+is reported stale with the restart that clears it, rather than reported ready.
+Then `projects` names each registered root that no longer exists, `notify`
+says whether outbound and inbound notification are active, `approvals` names
+each lane lacking the resume opt-in, and a platform line names the kernel
+release, the WSL generation and whether `pidfd_open` is available. `doctor`
+exits non-zero on a version mismatch, a missing project root, or notification
+configured but unable to send, so a script can gate on it; notification that
+is off and an `approvals` setup gap leave it at zero. It reads only, and
+prints no credential.
 
 ## `metrics`
 
