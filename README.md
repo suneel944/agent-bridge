@@ -1,14 +1,24 @@
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/agent-parley.png" width="560" alt="Agent Parley — separate work, shared context">
+  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/agent-parley.png" width="420" alt="Agent Parley — separate work, shared context">
 </p>
 
 <p align="center">
-  <strong>Separate worktrees. Shared context. One screen.</strong>
+  Agent Parley runs several coding agents on one repository, each in its own
+  worktree, and records who owns what: every claim, handoff, wake and refusal.
+</p>
+
+```sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
+```
+
+<p align="center">
+  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo-short.svg" width="800" alt="A 24-second terminal recording: lane ada claims issue 41, lane grace asks to reserve the same paths and gets a conflict naming ada, grace accepts ada's handoff of issue 41 and the reservation moves with it, then agent-parley top shows both lanes">
 </p>
 
 <p align="center">
-  Run several coding agents on one repository, attended or not, and know who owns what.<br>
-  Every claim, handoff, wake and refusal is recorded, attributed and visible.
+  Try it without an account: <code>agent-parley demo</code> runs the story this
+  recording is cut from, with stub lanes in a throwaway sandbox and no native
+  CLI, model or network.
 </p>
 
 <p align="center">
@@ -59,14 +69,15 @@
 ## See it
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A nine-chapter terminal recording of Agent Parley 0.13.0: parallel claude and codex lanes, a shared work order, claims and a reservation collision, a native hook refusing a branch switch, a handoff, a plan revision, a run budget, unattended integration and the agent-parley top dashboard">
+  <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/demo.svg" width="900" alt="A nine-chapter terminal recording of Agent Parley: parallel claude and codex lanes, a shared work order, claims and a reservation collision, a native hook refusing a branch switch, a handoff, a plan revision, a run budget, unattended integration and the agent-parley top dashboard">
 </p>
 
 Nine chapters: parallel lanes, the work order, claims and reservations, hook
 guardrails, handoffs, plan revisions, run budgets, unattended integration and
 the dashboard. Every frame is captured command output from the shipped
 coordination path; only the native client is a stand-in, so no model runs.
-`make demo-stub` reproduces it with
+The short recording at the top is four frames of the same harness running the
+`agent-parley demo` story. `make demo-stub` reproduces the full one with
 [`scripts/record_demo.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_demo.py);
 `make demo` records real `claude` and `codex` sessions with
 [`scripts/record_live.py`](https://github.com/suneel944/agent-parley/blob/main/scripts/record_live.py).
@@ -88,8 +99,19 @@ covers the columns, keys, filters, `problems`, `metrics` and `watch`.
 
 ## Install
 
-You need Git and [uv](https://docs.astral.sh/uv/). No clone. The wheel needs
-no third-party runtime packages.
+You need Git. No clone. The wheel needs no third-party runtime packages. One
+command installs everything on Linux, macOS and WSL2:
+
+```sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
+```
+
+It installs [uv](https://docs.astral.sh/uv/) only when uv is missing, then
+installs or upgrades `agent-parley`, adds the plugin to each of `claude` and
+`codex` found on PATH with `agent-parley plugins install`, and runs
+`agent-parley doctor`. It never uses sudo, and re-running it upgrades in place.
+
+To install by hand instead:
 
 **macOS**
 
@@ -111,7 +133,9 @@ file system, not under `/mnt/c`.
 To track the default branch instead of the latest release, run
 `uv tool install git+https://github.com/suneel944/agent-parley`.
 
-Then add the plugin to whichever CLI you drive. One marketplace serves both.
+Then add the plugin to whichever CLI you drive: `agent-parley plugins install`
+does it for each one on PATH, or run the commands yourself. One marketplace
+serves both.
 
 ```sh
 claude plugin marketplace add suneel944/agent-parley
@@ -129,11 +153,36 @@ the coordination service, and per-session MCP configuration and hooks. The
 plugin without the launcher has nothing to coordinate through.
 
 For a pinned, checksummed install, take a wheel from
-[Releases](https://github.com/suneel944/agent-parley/releases) instead. Shell
+[Releases](https://github.com/suneel944/agent-parley/releases) instead. Checking
+`install.sh` against the release `SHA256SUMS` before it runs, shell
 completion, upgrades and the supported platforms are in
 [Operations](https://github.com/suneel944/agent-parley/blob/main/docs/operations.md#install-and-upgrade).
 
 ## Run it
+
+Not sure where to start? Run `agent-parley` with no arguments in the
+repository. It reads, and writes nothing: whether this is a Git checkout and
+whether it has uncommitted changes, whether the project is registered, which
+of `claude` and `codex` are on PATH and whether each has the plugin, and
+whether the coordination service is running. It then names the next one to
+three commands for exactly that state, such as `agent-parley plugins install`,
+`agent-parley run claude` or `agent-parley top`, or `agent-parley demo` when no
+native CLI is installed.
+
+```text
+Agent Parley coordinates native coding CLIs in one repository.
+
+Found:
+  Here      Git repository, clean
+  Project   not registered
+  CLIs      claude (plugin added), codex (plugin added)
+  Service   not running
+
+Next:
+  agent-parley run claude  Register the repository and start a lane.
+
+Full reference: agent-parley --help
+```
 
 From a committed, clean checkout, one terminal per agent:
 
@@ -162,10 +211,11 @@ agent-parley problems # only what needs you now, oldest first
 agent-parley say claude-2 "Rebase onto main before you open the pull request."
 ```
 
-`agent-parley` alone prints the grouped command list; `agent-parley version`
+`agent-parley --help` prints the grouped command list; `agent-parley version`
 prints the version and state directory. Single records read through `show`:
 `issue show 42`, `participant show claude-2`, `provider show claude`,
-`credentials show work`. Every reader accepts `--json`. The mail readers take
+`credentials show work`, and each of those, like `status`, `top` and
+`problems`, accepts `--json`. The mail readers take
 `--as NAME`, so you can open a lane's mail from the main checkout without
 acknowledging or marking anything for it.
 
@@ -282,21 +332,39 @@ permission settings still apply.
 ## Notifications when you step away
 
 Agent Parley can forward the moments that need you to a Telegram bot or an
-email address. Outbound only: no command arrives over the channel, and a
-permission prompt is still answered only in your terminal.
+email address. Email is outbound only. The Telegram bot can also take status
+queries and decision answers back once inbound is on, as described in
+[Asking for status from the chat](#asking-for-status-from-the-chat). With
+inbound off, nothing arrives over the channel and a permission prompt is
+answered only in your terminal.
 
-Ten changes notify, and nothing else: a handoff offered to a lane, a lane
-blocked on a permission prompt, a lane held by a native dialog, a lane idle
-with no claim past `stalled_after`, issues waiting on an idle claim, an issue
-that is not converging, the enforced run budget running out, a lane run that
-finished, a hook refusal, and the inbound status path locking after repeated
-wrong passcodes. An unchanged situation sends nothing further.
-Sending never blocks a hook or tool call. A failed send is logged as a lane
-event, and it and a send cut short by a hook exiting are sent again the next
-time the situation is observed.
+Thirteen changes notify, and nothing else: a handoff offered to a lane, a lane
+blocked on a permission prompt, a lane held by a native dialog, a lane still
+blocked past the escalation bound, a lane idle with no claim past
+`stalled_after`, issues waiting on an idle claim, a dead lane's claims waiting
+on your decision, a lane keeping a key refused to a peer past its deadline, an
+issue that is not converging, the enforced run budget running out, a lane run
+that finished, a hook refusal, and the inbound status path locking after
+repeated wrong passcodes. An unchanged situation sends nothing further.
+Sending never blocks a hook or tool call. Each of these situations, and each
+operator problem `agent-parley problems` reports, is kept as a decision with
+a stable identifier, its options and a recommended one. A decision is retried
+with backoff on the next supervision poll until every transport accepts it, so
+a send cut short by a hook exiting still arrives. Decisions due together go
+out as one digest with one row of Telegram buttons each.
 
-Configuration is environment variables only; no token is written into
-coordination state.
+Store the Telegram settings once, and the service, hooks and lanes all read
+them. The token is read from a hidden prompt, or from standard input when
+piped, and is written owner-only to `notify.json` in the state directory;
+add `--inbound` to also store the status passcode. Environment variables
+still work and override a stored value for one process. `agent-parley
+status`, `doctor` and `up` say whether outbound and inbound are on, and why
+not.
+
+```bash
+agent-parley notify setup --chat 123456789
+agent-parley notify test
+```
 
 | Variable | Meaning |
 | --- | --- |
@@ -317,22 +385,34 @@ agent-parley notify test
 ```
 
 `notify test` sends one message per transport, prints each answer and exits 1
-when any transport refuses.
+when any transport refuses. With inbound configured it also says whether the
+running service is long polling Telegram.
 
 ## Asking for status from the chat
 
-The same Telegram bot answers one question only: `status`, with the filters
-`agent-parley status` takes. No claim, handoff, wake, approval or free text
-crosses the channel. The service long-polls the Bot API, so no port is opened
-and no webhook is registered.
+The same Telegram bot takes two things back: `status`, with the filters
+`agent-parley status` takes, and answers to decisions. Tap a decision's
+button, send `decide ID OPTION [NOTE]`, or reply to a one-decision message
+with the option and a note. The answer is recorded once, the message is
+edited to say who chose what and when, and the waiting lane gets it as mail
+that wakes it. A second answer is refused with the first one's name. An
+irreversible option needs a confirming tap. A note reaches the lane quoted,
+never as an instruction. A native prompt holding a lane, such as a tool
+permission or a question picker, arrives as a decision with the options the
+screen draws; the launcher presses the chosen option only while that same
+prompt is still on screen, and an option that widens a permission needs a
+confirming tap. No other text is typed into a session. The service
+long-polls the Bot API, so no port is opened and no webhook is registered.
 
-Every message starts with a passcode, and both the passcode and the chat
-identifier must match:
+Every typed message starts with a passcode, and both the passcode and the
+chat identifier must match. A button tap is accepted only from the
+configured chat and only for an open decision this state root issued:
 
 ```
 hunter2-and-then-some status --pending
 hunter2-and-then-some status codex
 hunter2-and-then-some status --provider claude --issue 14
+hunter2-and-then-some decide 3f9c2a1b7e40 decline wait for the rebase
 ```
 
 | Variable | Meaning |
@@ -418,3 +498,6 @@ rules, package builds and tests. A minor or major release also needs
 [Security](https://github.com/suneel944/agent-parley/blob/main/SECURITY.md) ·
 [Code of Conduct](https://github.com/suneel944/agent-parley/blob/main/CODE_OF_CONDUCT.md) ·
 [MIT license](https://github.com/suneel944/agent-parley/blob/main/LICENSE)
+
+Tried it? Questions, rough edges and setups worth showing are welcome in
+[GitHub Discussions](https://github.com/suneel944/agent-parley/discussions).

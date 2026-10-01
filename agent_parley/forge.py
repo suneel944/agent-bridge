@@ -26,6 +26,14 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+MAX_LANDINGS = 100
+CLOSING = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE
+)
+UNLINKED = re.compile(
+    r"<!--.*?(?:-->|\Z)|^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1|\Z)|(`+).+?\2",
+    re.DOTALL | re.MULTILINE,
+)
 TIMELINE_PAGE = 100
 TIMELINE_PAGES = 10
 FAILED_CHECKS = frozenset(
@@ -38,6 +46,7 @@ FAILED_CHECKS = frozenset(
         "STARTUP_FAILURE",
     }
 )
+NOT_STARTED_CHECKS = frozenset({"ACTION_REQUIRED", "STARTUP_FAILURE"})
 PROVIDER_LABEL = "provider:"
 FORGES = ("github", "beads", "null")
 DEFAULT_FORGE = "github"
@@ -340,10 +349,6 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
         The matching pull request numbers, empty when none match or the
         timeline cannot be read.
     """
-    keyword = re.compile(
-        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{number}\b",
-        re.IGNORECASE,
-    )
     try:
         events = []
         for page in range(1, TIMELINE_PAGES + 1):
@@ -371,7 +376,7 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
                 merged
                 and home == project
                 and _epoch(merged) <= closed_at
-                and keyword.search(source.get("body") or "")
+                and number in closing_numbers(source.get("body") or "")
             ):
                 found.append(int(source["number"]))
         return found
@@ -379,15 +384,105 @@ def _closing_references(project: str, number: str, closed_at: float) -> list:
         return []
 
 
+def closing_numbers(body: str) -> list[str]:
+    """Lists the issues a pull request body closes by keyword.
+
+    GitHub links a closing keyword only in rendered prose, so a keyword
+    inside an HTML comment, a fenced code block or an inline code span
+    closes nothing and is removed before the keywords are read.
+
+    Args:
+        body: Markdown body of one pull request.
+
+    Returns:
+        Bare issue numbers in the order the prose names them.
+    """
+    return CLOSING.findall(UNLINKED.sub(" ", body))
+
+
+def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
+    """Reports which issues merged pull requests into a branch close.
+
+    GitHub closes an issue from a closing keyword only when the pull request
+    merges into the default branch, and links it to the issue only then, so
+    work merged into a milestone's integration branch leaves its issue open
+    and unlinked. One bounded request reads the newest `MAX_LANDINGS` pull
+    requests merged into that branch, and each one's body names the issues
+    it closes by keyword, whichever branch it came from. A pull request that
+    merely mentions an issue is never taken as landing it. Only the GitHub
+    forge opens pull requests, so every other forge reports None.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        base: Integration branch the pull requests merged into.
+
+    Returns:
+        Bare issue number to the newest merged pull request closing it: the
+        state `MERGED`, the instant it merged in Unix seconds as
+        `closed_at`, its number, URL, head branch, merge commit and the
+        base branch. None when the forge is unavailable or the response
+        cannot be read.
+    """
+    if _implementation(repo) != "github":
+        return None
+    project = _reachable(repo)
+    if not project:
+        return None
+    output = _run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            project,
+            "--base",
+            base,
+            "--state",
+            "merged",
+            "--limit",
+            str(MAX_LANDINGS),
+            "--json",
+            "number,url,headRefName,mergeCommit,mergedAt,body",
+        ],
+        15,
+    )
+    try:
+        records = json.loads(output or "null")
+        if not isinstance(records, list):
+            return None
+        landed: dict[str, dict] = {}
+        for record in records:
+            if not record.get("mergedAt"):
+                continue
+            reading = {
+                "state": "MERGED",
+                "closed_at": _epoch(record["mergedAt"]),
+                "pull_request": int(record["number"]),
+                "url": str(record.get("url") or ""),
+                "branch": str(record.get("headRefName") or ""),
+                "commit": str(
+                    (record.get("mergeCommit") or {}).get("oid") or ""
+                ),
+                "base": base,
+            }
+            for number in closing_numbers(record.get("body") or ""):
+                kept = landed.get(number)
+                if not kept or kept["closed_at"] < reading["closed_at"]:
+                    landed[number] = reading
+        return landed
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
 def open_pull_requests(repo: Path) -> list[dict] | None:
     """Reports the check, review and merge state of open pull requests.
 
     One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests
     with their head commit, the checks reported on it, the latest review of
-    each reviewer, whether the forge can merge it and the issues it closes.
-    The caller decides which lane a pull request belongs to and what changed
-    since its last reading. Only the GitHub forge opens pull requests, so
-    every other forge reports None.
+    each reviewer, whether the forge can merge it, the issues it closes and
+    the files it changes. The caller decides which lane a pull request
+    belongs to and what changed since its last reading. Only the GitHub forge
+    opens pull requests, so every other forge reports None.
 
     Args:
         repo: Repository or assigned worktree that selects the forge project.
@@ -396,10 +491,12 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         One reading per open pull request: its number, URL, head branch and
         head commit, the checks verdict (`pending`, `green`, `red`, or
         `none` when nothing reported), the sorted names of failing checks,
-        the latest reviews as author, state and submission time, the merge
-        state the forge reports and the bare numbers of the issues it
-        closes. None when the forge is unavailable or the response cannot
-        be read.
+        each unfinished check with its state and start time, each failing
+        check with the forge's conclusion and whether it never started, the
+        latest reviews as author, state and submission time, the merge state
+        the forge reports, the bare numbers of the issues it closes and the
+        sorted repository paths it changes. None when the forge is
+        unavailable or the response cannot be read.
     """
     if _implementation(repo) != "github":
         return None
@@ -419,7 +516,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
             str(MAX_PULL_REQUESTS),
             "--json",
             "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
-            "latestReviews,closingIssuesReferences",
+            "latestReviews,closingIssuesReferences,files",
         ],
         15,
     )
@@ -438,6 +535,8 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
                     "sha": str(record.get("headRefOid") or ""),
                     "checks": checks,
                     "failing": failing,
+                    "pending": _pending(record.get("statusCheckRollup")),
+                    "failed": _failed(record.get("statusCheckRollup")),
                     "reviews": [
                         {
                             "author": str(
@@ -454,6 +553,13 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
                         for entry in record.get("closingIssuesReferences") or []
                         if entry.get("number")
                     ],
+                    "files": sorted(
+                        {
+                            str(entry["path"])
+                            for entry in record.get("files") or []
+                            if entry.get("path")
+                        }
+                    ),
                 }
             )
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -498,6 +604,107 @@ def _checks(rollup: list | None) -> tuple[str, list[str]]:
     if failing:
         return "red", sorted(failing)
     return ("green" if rollup else "none"), []
+
+
+def _pending(rollup: list | None) -> list[dict]:
+    """Names each unfinished check on a pull request and when it began.
+
+    Args:
+        rollup: The forge's `statusCheckRollup` entries, check runs and
+            commit statuses mixed.
+
+    Returns:
+        One entry per check `_checks` counts as pending: its name, its state
+        in lower case (`queued`, `in_progress`, `pending` or `expected`) and
+        its start in Unix seconds, or None when the forge reports no usable
+        start time.
+    """
+    pending: list[dict] = []
+    for entry in rollup or []:
+        if "status" in entry:
+            state = str(entry.get("status") or "").upper()
+            if state == "COMPLETED":
+                continue
+        else:
+            state = str(entry.get("state") or "").upper()
+            if state not in {"", "PENDING", "EXPECTED"}:
+                continue
+        try:
+            started: float | None = _epoch(str(entry.get("startedAt") or ""))
+        except (ValueError, OverflowError, OSError):
+            started = None
+        pending.append(
+            {
+                "name": str(
+                    entry.get("name") or entry.get("context") or "unnamed"
+                ),
+                "state": state.lower() or "pending",
+                "started": started if started and started > 0 else None,
+            }
+        )
+    return pending
+
+
+def _failed(rollup: list | None) -> list[dict]:
+    """Names each check `_checks` counts as failing, with the forge's outcome.
+
+    Args:
+        rollup: The forge's `statusCheckRollup` entries, check runs and
+            commit statuses mixed.
+
+    Returns:
+        One entry per check whose outcome `_checks` counts toward a red
+        verdict: its name, the forge's conclusion in lower case, and whether
+        the forge reports the job never started (`action_required` or
+        `startup_failure`) rather than having run and failed.
+    """
+    failed: list[dict] = []
+    for entry in rollup or []:
+        if "status" in entry:
+            if str(entry.get("status") or "").upper() != "COMPLETED":
+                continue
+            outcome = str(entry.get("conclusion") or "").upper()
+        else:
+            outcome = str(entry.get("state") or "").upper()
+        if outcome not in FAILED_CHECKS:
+            continue
+        failed.append(
+            {
+                "name": str(
+                    entry.get("name") or entry.get("context") or "unnamed"
+                ),
+                "conclusion": outcome.lower(),
+                "not_started": outcome in NOT_STARTED_CHECKS,
+            }
+        )
+    return failed
+
+
+JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)
+
+
+def checks_timeout(repo: Path) -> float | None:
+    """Reads the longest job timeout the repository's workflows declare.
+
+    Only literal `timeout-minutes` values in `.github/workflows` count; an
+    expression or a job without one is not read, so a repository that sets
+    none reports None rather than the forge's own six-hour default.
+
+    Args:
+        repo: Repository checkout whose workflows are read.
+
+    Returns:
+        The longest declared job timeout in seconds, or None when no
+        workflow declares one or none can be read.
+    """
+    minutes: list[int] = []
+    for path in sorted((repo / ".github" / "workflows").glob("*.y*ml")):
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        minutes.extend(int(value) for value in JOB_TIMEOUT.findall(text))
+    return 60.0 * max(minutes) if minutes else None
 
 
 def _epoch(value: str) -> float:

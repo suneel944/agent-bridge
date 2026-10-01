@@ -26,6 +26,7 @@ from agent_parley.roster import OPERATOR
 from agent_parley.state import BridgeError, lock
 
 DATABASE = "bridge.sqlite3"
+MISSING = "No coordination store yet; run agent-parley up."
 SCHEMA_VERSION = 12
 SCHEMA_ABSENT = "absent"
 SCHEMA_BEHIND = "needs migration"
@@ -229,6 +230,16 @@ class Transaction(sqlite3.Connection):
         """Opens the connection with nothing to undo yet."""
         super().__init__(*args, **kwargs)
         self.undo: list[Callable[[], None]] = []
+
+
+def missing() -> BridgeError:
+    """Builds the refusal for a read or write before any store exists.
+
+    Returns:
+        The refusal, naming ``agent-parley up`` as the command that creates
+        the store.
+    """
+    return BridgeError(MISSING, next_command="agent-parley up")
 
 
 @contextlib.contextmanager
@@ -1970,7 +1981,7 @@ def _keys(
     for pattern in paths:
         _text(pattern, "path", 240)
         if named_resource(pattern):
-            if not roster.RESOURCE.fullmatch(pattern):
+            if not roster.resource_name(pattern):
                 raise BridgeError(
                     f"{pattern!r} is not a named resource; write a scheme and "
                     "a name, such as port:5432 or suite:integration."
@@ -2254,13 +2265,17 @@ def _reserve(
     checkpoint instead.
 
     A key written with a scheme, such as ``port:5432``, ``db:local``,
-    ``suite:integration`` or ``device:android-1``, reserves a named resource
-    rather than a path. Lanes collide on those as readily as on files, and a
-    worktree isolates neither. A named resource conflicts on an exact match
-    only: no glob, no prefix and no path containment applies to it, because a
-    port number is not a directory. Where a project declares which resources
-    exist, an undeclared name is refused with that list; where it declares
-    none, every well-formed name is accepted.
+    ``suite:integration``, ``device:android-1`` or ``merge:integration/0.15.0``,
+    reserves a named resource rather than a path. Lanes collide on those as
+    readily as on files, and a worktree isolates neither. A named resource
+    conflicts on an exact match only: no glob, no prefix and no path
+    containment applies to it, because a port number is not a directory, and
+    the branch a ``merge:`` key names may carry its own slashes. Where a
+    project declares which resources exist, an undeclared name is refused
+    with that list; where it declares none, every well-formed name is
+    accepted. A lane about to merge into a shared branch takes a
+    ``merge:<branch>`` reservation first and releases it once its merge lands,
+    so peers queue for their turn instead of racing a stale gate.
 
     Args:
         db: Open transaction owned by the caller.
@@ -2588,6 +2603,7 @@ def _grant_queued(
     actor: dict,
     released: list[str],
     reclaimed: bool = False,
+    reason: str = "",
 ) -> list[dict]:
     """Hands each released key to the lane that queued for it first.
 
@@ -2606,6 +2622,8 @@ def _grant_queued(
         reclaimed: Whether the release was the runtime reclaiming expired
             leases rather than the holder releasing them, which the notice
             says so the taking lane knows the holder never handed over.
+        reason: Why the runtime released the keys on the holder's behalf,
+            stated in the notice in place of the expiry, or empty.
 
     Returns:
         One entry per lane granted something, naming that lane, the keys it
@@ -2692,7 +2710,7 @@ def _grant_queued(
     notices = []
     for name in sorted(taken):
         keys = taken[name]
-        subject, body = _notice(actor["name"], keys, reclaimed)
+        subject, body = _notice(actor["name"], keys, reclaimed, reason)
         message = _send(
             db,
             actor,
@@ -2710,7 +2728,7 @@ def _grant_queued(
 
 
 def _notice(
-    holder: str, keys: list[str], reclaimed: bool = False
+    holder: str, keys: list[str], reclaimed: bool = False, reason: str = ""
 ) -> tuple[str, str]:
     """Words the one notice a lane reads when its queued keys are granted.
 
@@ -2719,13 +2737,18 @@ def _notice(
         keys: Keys the reading lane now holds, in the order granted.
         reclaimed: Whether the runtime released the keys because they were
             expired and unworked, rather than the holder releasing them.
+        reason: Why the runtime released the keys for their holder, which
+            replaces the expiry in the notice when given.
 
     Returns:
         The bounded subject and body of the notice.
     """
     listed = ", ".join(keys)[:MAX_NOTICE_CHARACTERS]
     handed = (
-        f"{holder}'s reservation of {listed} expired unrenewed and was released"
+        f"{holder}'s reservation of {listed} was released because {reason}"
+        if reason
+        else f"{holder}'s reservation of {listed} expired unrenewed and was "
+        "released"
         if reclaimed
         else f"{holder} released {listed}"
     )
@@ -3475,6 +3498,68 @@ def supersede_recipient(home: Path, root: str, name: str, reason: str) -> int:
         return cursor.rowcount
 
 
+def return_stale_deliveries(
+    home: Path, root: str, name: str, older_than: float, reason: str
+) -> list[dict]:
+    """Retires a lane's outstanding deliveries older than a bound.
+
+    Only deliveries still unread, or still owing an acknowledgement, and
+    sent at least ``older_than`` seconds ago are marked superseded with the
+    reason, in the same transaction that reads them, so a delivery is
+    returned once. Other recipients of the same message keep their
+    delivery, and nothing is read, acknowledged or deleted.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        name: Registered identity of the lane the mail was addressed to.
+        older_than: Seconds a delivery must have waited to be returned.
+        reason: Why the deliveries stopped being actionable.
+
+    Returns:
+        One entry per returned delivery, oldest first, naming the message,
+        its subject, its sender's identity and whether it asked for an
+        acknowledgement.
+    """
+    if not (home / DATABASE).exists():
+        return []
+    with connect(home, write=True) as db:
+        rows = db.execute(
+            "SELECT r.message_id,r.agent_id,m.subject,s.name AS sender,"
+            "m.ack_required FROM message_recipients r "
+            "JOIN messages m ON m.id=r.message_id "
+            "JOIN agents s ON s.id=m.sender_id "
+            "JOIN agents a ON a.id=r.agent_id "
+            "JOIN projects p ON p.id=a.project_id "
+            "WHERE p.human_key=? AND a.name=? AND r.superseded_ts IS NULL "
+            "AND (r.read_ts IS NULL OR "
+            "(m.ack_required=1 AND r.ack_ts IS NULL)) "
+            "AND m.created_ts<=datetime('now',?) ORDER BY m.id",
+            (root, name, f"-{int(older_than)} seconds"),
+        ).fetchall()
+        db.executemany(
+            "UPDATE message_recipients SET superseded_ts=CURRENT_TIMESTAMP,"
+            "superseded_reason=? WHERE message_id=? AND agent_id=?",
+            [
+                (
+                    reason[:MAX_SUPERSEDE_REASON],
+                    row["message_id"],
+                    row["agent_id"],
+                )
+                for row in rows
+            ],
+        )
+    return [
+        {
+            "message_id": row["message_id"],
+            "subject": row["subject"],
+            "sender": row["sender"],
+            "ack_required": bool(row["ack_required"]),
+        }
+        for row in rows
+    ]
+
+
 def supersede_project_claim(directory: Path, claim: str, reason: str) -> int:
     """Retires the mail of a claim that a project transition just ended.
 
@@ -3792,7 +3877,7 @@ def read_thread(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _thread(db, actor, {"thread_id": thread, "after_id": after})
@@ -3816,7 +3901,7 @@ def read_message(home: Path, root: str, name: str, message_id: int) -> dict:
             the message is not one this participant sent or received.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         row = db.execute(
@@ -3856,7 +3941,7 @@ def search_messages(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _search(db, actor, {"query": query, "limit": limit})
@@ -3889,7 +3974,7 @@ def search_decisions(
         BridgeError: If no store exists or the reader is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         return _decisions(
@@ -3976,7 +4061,7 @@ def list_messages(
         BridgeError: If no store exists or the participant is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home) as db:
         actor = _identify(db, root, name)
         bounded = _number(limit, "limit", 1, MAX_SEARCH_HITS)
@@ -4844,6 +4929,21 @@ def _refused_by(db: sqlite3.Connection, root: str) -> dict[str, list[str]]:
     return {holder: sorted(names) for holder, names in refused.items()}
 
 
+def refused_holders(home: Path, root: str) -> dict[str, list[str]]:
+    """Maps each lane holding a key it refused a peer to the refused lanes.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+
+    Returns:
+        Mapping of holding identity to the sorted identities it refused,
+        counting only refusals whose key the holder still holds.
+    """
+    with connect(home) as db:
+        return _refused_by(db, root)
+
+
 def usage(
     home: Path, root: str, *, db: sqlite3.Connection | None = None
 ) -> dict[str, dict]:
@@ -4994,7 +5094,7 @@ def transfer_reservations(
     if not keys:
         return []
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     wanted = sorted(set(keys))
     moved: list[str] = []
     with connect(home, write=True) as db:
@@ -5062,7 +5162,7 @@ def transfer_claim_reservations(
     if not source_claim:
         return []
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     moved: list[str] = []
     with connect(home, write=True) as db:
         holder = _identify(db, root, source)
@@ -5148,7 +5248,7 @@ def release_reservations(home: Path, root: str, name: str) -> list[str]:
         BridgeError: If no store exists or the identity is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     with connect(home, write=True) as db:
         holder = _identify(db, root, name)
         released = [
@@ -5166,6 +5266,55 @@ def release_reservations(home: Path, root: str, name: str) -> list[str]:
             (holder["project_id"], holder["id"]),
         )
     return released
+
+
+def release_dead_holder(home: Path, root: str, name: str, reason: str) -> dict:
+    """Releases a dead lane's reservations and grants what peers queued.
+
+    A lease bound to a live claim has no expiry, so the expiry sweep never
+    frees one whose holder died, and a peer queued behind it waits for a
+    release nobody will make. Supervision calls this once it has proved the
+    holder dead. The release, the grants it enables and the notice each
+    taking lane reads share one transaction. Reservations stay advisory:
+    this changes who is told a key is free, not what the file system allows.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        name: Registered identity of the dead lane.
+        reason: Why the holder was released, quoted in each grant notice.
+
+    Returns:
+        The released keys in key order and, as ``granted``, one entry per
+        lane that took queued keys. A missing store or an unregistered lane
+        releases nothing.
+    """
+    if not (home / DATABASE).exists():
+        return {"released": [], "granted": []}
+    with connect(home, write=True) as db:
+        try:
+            holder = _identify(db, root, name)
+        except BridgeError:
+            return {"released": [], "granted": []}
+        released = sorted(
+            {
+                row["path_pattern"]
+                for row in db.execute(
+                    "SELECT path_pattern FROM file_reservations WHERE "
+                    "project_id=? AND agent_id=? AND released_ts IS NULL",
+                    (holder["project_id"], holder["id"]),
+                )
+            }
+        )
+        if not released:
+            return {"released": [], "granted": []}
+        db.execute(
+            "UPDATE file_reservations SET released_ts=CURRENT_TIMESTAMP "
+            "WHERE project_id=? AND agent_id=? AND released_ts IS NULL",
+            (holder["project_id"], holder["id"]),
+        )
+        granted = _grant_queued(db, holder, released, reason=reason)
+    return {"released": released, "granted": granted}
 
 
 def reclaim_expired(home: Path, root: str) -> list[dict]:
@@ -5217,7 +5366,7 @@ def renew_reservations(home: Path, root: str, name: str) -> dict:
         BridgeError: If no store exists or the identity is unregistered.
     """
     if not (home / DATABASE).exists():
-        raise BridgeError("No coordination store yet; run agent-parley up.")
+        raise missing()
     claim = held_claim(home, root, name)
     with connect(home, write=True) as db:
         holder = _identify(db, root, name)

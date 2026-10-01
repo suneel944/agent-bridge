@@ -17,8 +17,10 @@ from agent_parley import (
     dashboard,
     dialogs,
     issues,
+    lanes,
     problems,
     protocol,
+    roster,
     store,
     supervision,
 )
@@ -319,6 +321,105 @@ def test_an_idle_lane_holding_a_refused_key_names_the_refused_lane(
     assert not rows(bridge, problems.HOLDING)
 
 
+def test_a_refused_key_held_past_its_deadline_is_an_operator_decision(
+    bridge, repo, paired, served, monkeypatch
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude")
+    store.initialize(bridge.home)
+    lanes = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    store.call(
+        bridge.home,
+        lanes["claude"],
+        "file_reservation_paths",
+        {"paths": ["shared.txt"]},
+    )
+    store.call(
+        bridge.home,
+        lanes["codex"],
+        "file_reservation_paths",
+        {"paths": ["shared.txt"]},
+    )
+    manifest = roster.read(directory)
+    idle = {"claude": {"state": supervision.IDLE}}
+
+    def subjects(name):
+        inbox = store.call(
+            bridge.home,
+            lanes[name],
+            "fetch_inbox",
+            {"include_bodies": True},
+        )
+        return [item["subject"] for item in inbox["messages"]]
+
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    hold = supervision.key_hold(directory, "claude")
+    assert hold["refused"] == ["codex"]
+    assert hold["deadline"] == hold["since"] + supervision.KEY_HOLD_DEADLINE
+    [told] = [s for s in subjects("claude") if "refused to codex" in s]
+    assert told.startswith("Release by ")
+    [row] = rows(bridge, problems.HOLDING)
+    assert row["actor"] == problems.BY_SERVICE
+    assert "asked to release it within" in row["detail"]
+    assert not [s for s in subjects("codex") if "past its deadline" in s]
+
+    supervision.refused_keys(
+        bridge.home, directory, manifest, {"claude": {"state": "active"}}
+    )
+    assert supervision.key_hold(directory, "claude")["since"] == hold["since"]
+
+    monkeypatch.setattr(supervision, "KEY_HOLD_DEADLINE", 0.0)
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    [row] = rows(bridge, problems.HOLDING)
+    assert row["actor"] == problems.BY_OPERATOR
+    assert "deadline passed" in row["detail"]
+    assert row["command"].startswith("decide: agent-parley say claude")
+    assert len([s for s in subjects("codex") if "past its deadline" in s]) == 1
+    assert len([s for s in subjects("claude") if "Release by" in s]) == 1
+
+    store.call(bridge.home, lanes["claude"], "release_file_reservations", {})
+    supervision.refused_keys(bridge.home, directory, manifest, idle)
+    assert supervision.key_hold(directory, "claude") == {}
+    assert not rows(bridge, problems.HOLDING)
+
+
+def test_an_active_holder_is_given_no_deadline(bridge, repo, paired, served):
+    directory = bridge.project(repo)[1]
+    store.initialize(bridge.home)
+    lanes = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    for name in ("claude", "codex"):
+        store.call(
+            bridge.home,
+            lanes[name],
+            "file_reservation_paths",
+            {"paths": ["shared.txt"]},
+        )
+    supervision.refused_keys(
+        bridge.home,
+        directory,
+        roster.read(directory),
+        {"claude": {"state": supervision.ACTIVE}},
+    )
+    assert supervision.key_hold(directory, "claude") == {}
+
+
 def test_a_hook_refusal_on_a_held_key_names_the_refused_lane(
     bridge, repo, paired, served
 ):
@@ -453,8 +554,9 @@ def test_a_paused_lane_is_resumed_rather_than_spoken_to(
         (
             problems.DIALOG,
             "operator input is pending",
-            "answer the prompt open in claude's own client; it reads no "
-            "mail until that prompt is cleared",
+            "submit or clear the unsent text in claude's own terminal "
+            "(Enter, or Ctrl-U to clear the line); it reads no mail until "
+            "that line is empty",
         ),
         (
             problems.ATTENTION,
@@ -492,6 +594,21 @@ def test_a_wake_refusal_names_its_reason_and_an_actor_who_can_clear_it(
     assert detail in row["detail"]
     assert row["command"] == remedy
     assert "complete or stop the session" not in row["command"]
+
+
+def test_a_withheld_resume_names_the_missing_approval_opt_in(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude")
+    refuse(bridge, directory, "claude", supervision.OPT_IN_MISSING)
+    [row] = rows(bridge, problems.WAKE)
+    assert row["detail"].startswith("setup gap")
+    assert row["actor"] == problems.BY_OPERATOR
+    assert row["command"] == (
+        f"{supervision.OPT_IN_REMEDY}: agent-parley run claude --resume "
+        f"{at(paired['root'])}"
+    )
 
 
 def test_a_lane_that_cannot_read_mail_is_never_offered_say(
@@ -640,6 +757,39 @@ def test_an_unanswered_offer_names_its_recipient_and_the_cancel(
     assert cli.main() == 0
     capsys.readouterr()
     assert rows(bridge, problems.OFFER) == []
+
+
+def test_an_unanswered_request_names_its_holder_and_the_unassign(
+    bridge, repo, paired, served, monkeypatch, capsys
+):
+    bridge.issue(paired["lanes"]["claude"], "claim", "1")
+    bridge.issue(paired["lanes"]["codex"], "request", "1", summary="Take it")
+    [row] = rows(bridge, problems.REQUEST)
+    assert row["participant"] == "claude"
+    assert (
+        "issue #1 takeover asked by codex, unanswered by claude"
+        in row["detail"]
+    )
+    assert row["command"] == (
+        f"agent-parley issue assign 1 --unassign {at(paired['root'])}"
+    )
+    program, *arguments = shlex.split(row["command"])
+    monkeypatch.setattr(
+        sys, "argv", [program, "--home", str(bridge.home), *arguments]
+    )
+    assert cli.main() == 0
+    capsys.readouterr()
+    assert rows(bridge, problems.REQUEST) == []
+
+
+def test_an_operator_request_is_not_a_row(bridge, repo, paired, served):
+    bridge.issue(paired["lanes"]["claude"], "claim", "1")
+    bridge.issue_assign(repo, "1", "codex")
+    directory = bridge.project(repo)[1]
+    assert issues.snapshot(directory)["issues"]["1"]["request"]["source"] == (
+        issues.OPERATOR
+    )
+    assert rows(bridge, problems.REQUEST) == []
 
 
 def test_two_offers_waiting_on_one_lane_are_one_row(
@@ -1312,3 +1462,118 @@ def test_rows_older_than_a_day_follow_todays_under_a_heading():
     assert listed[1] == problems.STALE_HEADING
     assert "claude" in listed[0] and "codex" in listed[2]
     assert problems.STALE_HEADING not in problems.lines([fresh])
+
+
+@pytest.mark.parametrize("provider", ["gemini", "amp"])
+def test_a_watcher_inferred_block_is_marked_and_still_asks_the_operator(
+    bridge, repo, served, provider
+):
+    manifest = bridge.add_participant(repo, "helper", provider)
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "helper",
+        activity="dialog: native tool permission prompt",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    store.initialize(bridge.home)
+    with store.connect(bridge.home, write=True) as db:
+        lanes.transition(
+            db, manifest["root"], "helper", lanes.IDLE, evidence="Stop: idle"
+        )
+    config = supervision.configuration(bridge.home, manifest)
+    readings = {
+        name: supervision.presence(directory, name, config["inactive_after"])
+        for name in manifest["participants"]
+    }
+    supervision.settle_lanes(
+        bridge.home, manifest, config, readings, directory=directory
+    )
+    [lane] = [
+        record
+        for record in bridge.status_snapshot()["projects"][0]["participants"]
+        if record["participant"] == "helper"
+    ]
+    assert lane["condition"]["state"] == lanes.BLOCKED
+    assert lane["condition"]["cause"] == lanes.APPROVAL
+    assert lane["provenance"] == {
+        "source": "dialog watcher",
+        "inferred": True,
+        "gap": ["PermissionRequest"],
+    }
+    note = "inferred by dialog watcher, no PermissionRequest hook"
+    assert lane["session"].endswith(note)
+    [row] = rows(bridge, problems.APPROVAL)
+    assert row["participant"] == "helper"
+    assert row["detail"] == (
+        f"the client is waiting for approval of Bash ({note})"
+    )
+
+
+def test_a_hooked_client_is_left_to_its_hooks_and_shows_no_inference(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(
+        directory,
+        "claude",
+        activity="waiting for approval: Bash",
+        dialog={
+            "name": dialogs.PERMISSION,
+            "tool": "Bash",
+            "since": time.time() - 7200,
+        },
+    )
+    store.initialize(bridge.home)
+    with store.connect(bridge.home, write=True) as db:
+        lanes.transition(
+            db,
+            paired["root"],
+            "claude",
+            lanes.BLOCKED,
+            cause=lanes.APPROVAL,
+            evidence="PermissionRequest: approval",
+        )
+    watched = supervision.watched_dialog(
+        bridge.home,
+        directory,
+        paired["participants"]["claude"],
+        "claude",
+        {"state": lanes.BLOCKED},
+        {"process_alive": True},
+    )
+    assert watched is None
+    [lane] = [
+        record
+        for record in bridge.status_snapshot()["projects"][0]["participants"]
+        if record["participant"] == "claude"
+    ]
+    assert lane["provenance"] == {
+        "source": "hook",
+        "inferred": False,
+        "gap": [],
+    }
+    [row] = rows(bridge, problems.APPROVAL)
+    assert row["detail"] == "the client is waiting for approval of Bash"
+
+
+def test_only_a_hook_the_client_lacks_is_named_as_the_gap():
+    idle = {"state": lanes.IDLE, "cause": "", "evidence": "liveness: idle"}
+    assert lanes.provenance(idle, ["Stop"])["gap"] == ["Stop"]
+    assert lanes.provenance(idle, [])["gap"] == []
+    working = {**idle, "state": lanes.WORKING}
+    assert lanes.provenance(working, ["UserPromptSubmit"])["gap"] == []
+    held = {
+        "state": lanes.BLOCKED,
+        "cause": lanes.DIALOG,
+        "evidence": "dialog: native directory trust prompt",
+    }
+    assert lanes.provenance(held, ["PermissionRequest"])["gap"] == []
+    assert lanes.inference(lanes.provenance(held, [])) == (
+        "inferred by dialog watcher"
+    )
+    assert lanes.provenance(None) is None

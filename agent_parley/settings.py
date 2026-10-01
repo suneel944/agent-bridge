@@ -226,11 +226,65 @@ class SettingsMixin(BridgeCore):
                 data["branch_prefix"] = roster.branch_prefix(prefix)
                 write_json(directory / "project.json", data)
         configured = data["branch_prefix"]
+        base = data.get("integration_base")
         return (
             f"{root} creates lane branches as "
             f"{configured}/{directory.name}/lane-N. A lane branch carries no "
             "participant, provider or account name. Existing lanes keep the "
-            "branch they were created with."
+            "branch they were created with. "
+            + (
+                f"Pull requests merged into {base} land the claims they close."
+                if base
+                else "No integration base is recorded."
+            )
+        )
+
+    def integration_branch(self, repo: Path, branch: str) -> str:
+        """Records the branch a milestone's pull requests merge into.
+
+        The forge closes an issue only when its pull request merges into the
+        default branch, so a milestone integrated on another branch leaves
+        every claim open until it crosses. With this branch recorded, the
+        supervisor counts a pull request merged into it that closes a claimed
+        issue by keyword as that claim's landed work, and asks the operator
+        once to open the crossing pull request when every claim has landed.
+        Only the operator records it, because it ends claims.
+
+        Args:
+            repo: Any checkout of the target repository.
+            branch: Integration branch, or an empty string to remove it.
+
+        Returns:
+            An account of the recorded integration base.
+
+        Raises:
+            BridgeError: If the repository has no project yet, the branch is
+                not one Git branch name, or the change comes from a lane or
+                a process holding a lane's token.
+        """
+        from agent_parley import unattended
+        from agent_parley.cli import lock, roster, write_json
+
+        root, directory = self.project(repo, create=False)
+        data = roster.read(directory)
+        unattended.operator_only(
+            repo, root, data, "The integration base is set"
+        )
+        accepted = roster.integration_base(branch)
+        with lock(directory / "setup.lock"):
+            data = roster.read(directory)
+            data.pop("integration_base", None)
+            if accepted:
+                data["integration_base"] = accepted
+            write_json(directory / "project.json", data)
+        if not accepted:
+            return (
+                f"{root} records no integration base; only issues the forge "
+                "closes end claims."
+            )
+        return (
+            f"{root} integrates into {accepted}: a pull request merged into "
+            "it that closes a claimed issue by keyword lands that claim."
         )
 
     def tracker(self, repo: Path, name: str | None = None) -> str:
@@ -357,9 +411,9 @@ class SettingsMixin(BridgeCore):
         recorded = data["deadlines"]
         if not recorded:
             return (
-                f"{root} records no deadline defaults, so a claim, an offer "
-                "or an acknowledgement carries a deadline only when it passes "
-                "--within."
+                f"{root} records no deadline defaults, so a claim, an offer, "
+                "a takeover request or an acknowledgement carries a deadline "
+                "only when it passes --within."
             )
         windows = ", ".join(
             f"{field} {int(recorded[field])}s"

@@ -141,8 +141,13 @@ server there, and only when you record the opt-in:
 }
 ```
 
-The default is off and changes nothing about the client's configuration. With it
-on, the launch adds two native permission rules: `mcp__agent_parley`, which
+The default is off and changes nothing about the client's configuration. While
+a `claude` lane the service could resume has neither this opt-in nor
+`auto_mode`, `run` and `participant add` say so on standard error, `doctor`
+lists the lane under `approvals` as a setup gap, and the service withholds its
+resume: the wake is recorded as `setup gap: bridge tool approval not recorded`,
+which `problems` reports under `wake attention` with the opt-in and the
+`run --resume` command for your own terminal. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
 allows this bridge's own coordination tools, and
 `Bash(<interpreter> -m agent_parley.cli *)`, which allows the exact interpreter
 and module the protocol prompt orders every lane to run for `issue claim`,
@@ -187,7 +192,13 @@ lane. The supervision key `titles` turns the tab title off; the details are in
 `status` prints the server line, the code line, the state directory and then,
 per project, the open work: each live claim's issue, title, owner, lane state,
 last event and pull request, then one line per lane with its state, live claim
-count and current task. Inside a project checkout it reports that project only;
+count and current task. The task is the lane's last report while the lane still
+holds the issue that report named. A report on an issue the lane no longer
+holds is labelled with that issue and its age, such as `#1017 (not held,
+reported 21m ago): ...`, and open claims with no report since they were
+claimed are named first, such as `no report on held #1500, #1695`; `--json`
+carries the same reading as `report_issue`, `report_held` and each claim's
+`reported_since_claim`. Inside a project checkout it reports that project only;
 `--all-projects` adds the rest, dormant ones last, and `--all` adds claims whose
 issue is closed or whose pull request ended. Titles and open state come from
 `forge-issues.json` in the project state directory, which the service's poll
@@ -364,7 +375,9 @@ Lanes: idle 35.0 min/lane-hour (top: claude blocked: capacity, 4 min); unaccount
 Idle lane-minutes per lane-hour count the time a lane spent `idle`,
 `blocked`, `stopped` or `dead` while it owned a claim or the ledger held an
 unclaimed, unblocked issue. Unaccountable claim-minutes count the time a lane
-owned a claim while it was not `working`. Each names its largest cause. The
+owned a claim while it was not `working`. Each names its largest cause; an
+idle lane whose turn ended on a retryable provider or transport error is
+charged to `idle: provider error`. The
 totals run from the first poll that saw the lane; a gap of more than five
 minutes between polls, a stopped service, is charged to nothing. `status
 --json` carries both per lane and per project under `accounting`, and each
@@ -405,7 +418,12 @@ sent without a deadline.
 Two readings wake a lane before they could ever reach this list. A lane
 waiting on its own pull request is sent one supervisor message, and so a wake,
 when that pull request's checks finish, a review lands or its merge state
-changes. A claim whose verification keeps failing with no verified improvement
+changes, and once more when its head stays pending past the checks ceiling,
+which also lists it here as `checks stalled`. A red run lists here as `checks
+failed`, naming the attempt; a required check the forge never started is
+different, since only you can act on it, so every pull request sharing that
+cause is grouped into one `checks refused` row and one decision instead of a
+row per lane. A claim whose verification keeps failing with no verified improvement
 is asked once to change approach, and only a repeat is escalated to you as
 `not converging`. Both are described under
 [waking](operations.md#availability-reminders-and-waking) in Operations. The

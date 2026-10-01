@@ -194,9 +194,19 @@ def test_doctor_reports_every_component(bridge, repo, paired, answering):
         "store",
         "service",
         "projects",
+        "notify",
+        "approvals",
     }
+    [approvals] = [
+        entry
+        for entry in reported["components"]
+        if entry["component"] == "approvals"
+    ]
+    assert approvals["state"] == protocol.SETUP_GAP
+    assert approvals["remedy"].endswith(f"{paired['root']} claude")
     text = protocol.render(reported)
     assert "Consistent." in text
+    assert f"approvals: {approvals['remedy']}" in text
     assert str(bridge.home) not in text
 
 

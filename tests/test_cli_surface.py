@@ -102,9 +102,18 @@ def test_version_command_reports_the_state_directory(
     assert document["state_directory"] == str(bridge.home)
 
 
-def test_bare_invocation_prints_grouped_help(monkeypatch, capsys):
-    printed = text(monkeypatch, capsys)
-    headings = [title for title, _ in cli.COMMAND_GROUPS]
+def help_text(monkeypatch, capsys):
+    """Runs `--help` and returns its printed text."""
+    monkeypatch.setattr(sys, "argv", ["agent-parley", "--help"])
+    with pytest.raises(SystemExit) as exit_status:
+        cli.main()
+    assert exit_status.value.code == 0
+    return capsys.readouterr().out
+
+
+def test_help_prints_grouped_commands(monkeypatch, capsys):
+    printed = help_text(monkeypatch, capsys)
+    headings = [cli.START_HERE[0]] + [title for title, _ in cli.COMMAND_GROUPS]
     positions = [printed.index(f"{title}:") for title in headings]
     assert positions == sorted(positions)
     assert "Other:" not in printed
@@ -112,12 +121,11 @@ def test_bare_invocation_prints_grouped_help(monkeypatch, capsys):
 
 
 def test_grouped_help_lists_every_declared_command(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["agent-parley", "--help"])
-    with pytest.raises(SystemExit) as exit_status:
+    printed = help_text(monkeypatch, capsys)
+    monkeypatch.setattr(sys, "argv", ["agent-parley", "-h"])
+    with pytest.raises(SystemExit):
         cli.main()
-    assert exit_status.value.code == 0
-    printed = capsys.readouterr().out
-    assert printed == text(monkeypatch, capsys)
+    assert printed == capsys.readouterr().out
     grouped = {name for _, names in cli.COMMAND_GROUPS for name in names}
     for name in grouped:
         assert f"  {name} " in printed
@@ -407,7 +415,7 @@ def test_an_alias_parses_to_the_canonical_arguments(canonical, alias):
 
 
 def test_help_names_the_canonical_command_for_each_alias(monkeypatch, capsys):
-    printed = " ".join(text(monkeypatch, capsys).split())
+    printed = " ".join(help_text(monkeypatch, capsys).split())
     assert "`mail send` is a compatibility alias" in printed
     assert "`reclaim` is a compatibility alias" in printed
     assert "`decision` queries the recorded ones" in printed

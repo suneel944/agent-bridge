@@ -29,6 +29,7 @@ from agent_parley.checkpoints import (
     activity,
     branch_head,
     event_summary,
+    hourly_rate,
     lane_branch,
     mailbox,
     participant_liveness,
@@ -405,8 +406,11 @@ def _row(
         mail = {}
     branch = _branch(Path(participant["lane"]), context["branches"])
     condition = context.get("conditions", {}).get(agent)
+    inferred = lanes.inference(
+        lanes.provenance(condition, supervision.hook_gaps(home, participant))
+    )
     liveness = (
-        lanes.describe(condition)
+        lanes.describe(condition) + (f"; {inferred}" if inferred else "")
         if condition
         else participant_liveness(directory, agent, context["inactive_after"])
     )
@@ -488,6 +492,7 @@ def _row(
         "queued": stats.get("queued", 0),
         "queued_by": list(stats.get("queued_by", [])),
         "injected_bytes": events["injected_bytes"],
+        "injected_per_hour": hourly_rate(state),
         "hook_events": events["events"],
         "denials": events["denials"],
         "denied_by": events.get("denied_by", []),

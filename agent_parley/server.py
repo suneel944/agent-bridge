@@ -24,6 +24,7 @@ from agent_parley import (
     metrics,
     protocol,
     recommend,
+    refusal,
     retries,
     roster,
     store,
@@ -1262,7 +1263,7 @@ class Handler(BaseHTTPRequestHandler):
         except BridgeError as exc:
             return {
                 "isError": True,
-                "content": [{"type": "text", "text": str(exc)}],
+                "content": [{"type": "text", "text": refusal(exc)}],
             }
         except sqlite3.OperationalError as exc:
             retryable = getattr(exc, "sqlite_errorcode", 0) & 0xFF in (

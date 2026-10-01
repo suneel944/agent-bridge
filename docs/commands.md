@@ -1,8 +1,23 @@
 # Commands
 
-Use `agent-parley COMMAND --help` for arguments, and `agent-parley` with no
-arguments for the command list, grouped as coordination, policy,
-observability and lifecycle. `--home DIR` selects private state globally;
+`agent-parley` with no arguments prints a short start-here screen: whether
+the working directory is a Git repository and whether it is clean, whether
+it belongs to a registered project, which supported native CLIs (`claude`,
+`codex`) are on PATH and whether each one's plugin record lists the Agent
+Parley plugin, and whether the service is running, followed by the next one
+to three commands for that state. It only reads: it never starts the
+service, registers a repository, creates the state directory or runs a
+native CLI, and it prints plain text with no color. The plugin reading comes
+from each CLI's own record (`installed_plugins.json` under
+`CLAUDE_CONFIG_DIR`, the `plugins` table of `config.toml` under
+`CODEX_HOME`) to stay fast; `plugins status` asks the CLIs themselves and is
+the authoritative reading.
+
+Use `agent-parley --help` for the full command list, led by a start-here
+group (`run`, `status`, `top`, `problems`, `demo`, `doctor`) and then grouped
+as coordination, policy, observability and lifecycle, and
+`agent-parley COMMAND --help` for arguments. `--home DIR` selects private
+state globally;
 repository commands accept `--repo PATH` unless noted below. `problems`,
 `doctor` and `metrics` take no `--repo`, and `state export` and
 `state import` select one project with `--project ROOT`. Issue mutations,
@@ -36,6 +51,7 @@ on standard output and export to a file.
 | `up` | Start the local coordination server. |
 | `down` | Stop the server while retaining state and worktrees. |
 | `completion SHELL` | Print a `bash`, `zsh` or `fish` completion script generated from the installed command tree. |
+| `demo` | Run the coordination story in a throwaway sandbox: a temporary Git repository, a temporary state home and a service on a free port, with two stub lanes that claim in parallel, meet a reservation collision and a hook refusal, hand off an issue and appear in a `top` snapshot. Each step prints one line naming what happened and the real command behind it. No native CLI, model, network or account is used, and the user's state home, repositories and running service are never touched. It finishes by itself in well under 90 seconds; `q` or Ctrl-C stops it early, and every exit removes the worktrees, processes and temporary directories it created. Without a terminal it prints the same story as plain lines. `make demo-stub` renders the full recording from the same scenario, and `python scripts/record_demo.py --short` the README's four-step cut. |
 | `status` | Show server health, whether the running service is behind the installed code, and the open work of the project the working directory belongs to, each lane's condition read from its authoritative state record; `--all-projects` reports every project with dormant ones last, `--table` prints the full per-lane table instead, and `--all` also lists claims whose issue or pull request ended on the forge. `NAME` reports one lane in full, and `--repo`, `--provider`, `--outcome`, `--drifted`, `--pending`, `--idle`, `--since`, `--over-budget` and `--issue` narrow the rows; a named lane or any lane filter prints the table. |
 | `setup PATH` | Register a repository from committed HEAD. |
 | `run NAME` | Launch a lane; supports `--provider`, `--credentials`, `--repo`, and `--task`; `--resume` reopens the lane's recorded native session. |
@@ -53,7 +69,7 @@ on standard output and export to a file.
 | `issue match GOAL` | List the open issues whose recorded title or forge labels share subject words with a stated goal, marking the ones a peer already owns and naming the peer reservations those words run into. It is read only: a match is a reason to read the issue and claim or negotiate for it rather than open a second number for the same work, and no match is a recorded reason to open one. |
 | `issue claim NUMBER` | Claim an available issue from this lane. `--within 6h` on `claim`, `offer` or `accept` records a deadline; past it the record reads overdue, and ownership never moves on a deadline. |
 | `issue claim NUMBER --take-orphaned` | Take an issue whose owner reads as orphaned, recording the previous owner and the reason and moving the reservations that owner held for this claim to the taking lane; reservations for its other claims stay with it. |
-| `issue request NUMBER` | Ask the holder of an owned issue to hand it to this lane; `--summary` says why. The holder answers with `issue accept` or `issue decline`, and a holder that neither answers nor records progress within the project's `takeover_grace` has the request granted as an offer to this lane. |
+| `issue request NUMBER` | Ask the holder of an owned issue to hand it to this lane; `--summary` says why, and `--within 30m` records a deadline; past it the request reads overdue and shows in `problems`, but is granted only by the project's `takeover_grace`. The holder answers with `issue accept` or `issue decline`, and a holder that neither answers nor records progress within `takeover_grace` has the request granted as an offer to this lane. |
 | `issue release NUMBER` | Release ownership without closing the GitHub issue. |
 | `issue offer NUMBER --to NAME --summary TEXT` | Pause work and offer ownership explicitly; `--remaining ITEM`, repeatable, lists the work still to do, and `--when-released N` records it until that issue is released. |
 | `issue accept NUMBER --offer-id ID` | Accept the current offer addressed to this lane; the offered reservations move with the issue. |
@@ -70,8 +86,11 @@ on standard output and export to a file.
 | `plan proposals` | Print the current plan version, the envelope, the automatic revisions used and every retained proposal with its status. |
 | `plan approve ID` | As `operator`, validate the whole resulting graph and apply one open revision, authorizing any prerequisite it adds; a revision whose base version is no longer current is recorded as stale; an optional `--reason` is kept with it. `plan reject ID --reason TEXT` refuses it. |
 | `gc` (alias `reclaim`) | Report the lanes and lane-made worktrees a reclaim would remove and keep, with each worktree's size; `--dry-run` is that default, `--apply` removes them, and `--apply --force` also removes lane-made worktrees kept for uncommitted changes, unpushed commits or a recent change after writing a recovery checkpoint of each; a lane's own worktree is never forced. A lane-made worktree holding files Git ignores is kept even with `--force`, and a quiet one whose unpushed commits already landed through another branch is removed without it, its commits bundled into a recovery checkpoint first. |
+| `notify setup --chat ID` | Store the Telegram chat id, owner-only; `--inbound` also answers status queries from that chat. The bot token, and with `--inbound` the passcode, are read from a prompt or standard input. |
 | `notify test` | Send one test message on each configured transport. |
 | `doctor` | Report launcher, plugin, store and running-service versions and their fit; non-zero exit on a mismatch. |
+| `plugins install` | For each of `claude` and `codex` found on PATH, add the `suneel944/agent-parley` marketplace and install `agent-parley@agent-parley` through the CLI's own plugin commands, only where its listing lacks them; a re-run refreshes the marketplace and updates the plugin instead, never adding a second entry. Non-zero exit when a detected CLI's command fails. |
+| `plugins status` | Report, per supported CLI, whether it is on PATH, has the marketplace and has the plugin installed; writes nothing. |
 | `problems` | List every lane, claim and store condition that needs attention, oldest first, one row per lane per cause with its count and the remedy the lane's state allows; rows the supervision service is handling say so, `--ack-after` sets the acknowledgement age, `--json` prints it for scripts, exit 1 when any row exists. |
 | `problems ack ID` | Record your own acknowledgement of one message a lane left unanswered. It clears that condition and nothing else: no ownership moves, no reservation is released and no lane is woken. |
 | `issue ... --idempotency-key KEY` | Retry a transition safely; the repeat returns the first result. `issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`, `unblock` and `request`, and `report`, accept it; `issue recover`, `resolve` and `assign` do not. |
@@ -101,14 +120,15 @@ on standard output and export to a file.
 | `credentials show NAME` | Show one profile with every recorded value redacted: the config home, the override names and the variables required from your shell. |
 | `credentials add NAME` | Define a config home and environment requirements. |
 | `credentials remove NAME` | Delete a profile definition, preserving native files and logins. |
-| `branch show` | Show the prefix new lane branches are created under. |
+| `branch show` | Show the prefix new lane branches are created under and the recorded integration base. |
 | `branch set PREFIX` | Set that prefix; existing lanes keep their branch. |
+| `branch integration BRANCH` | Record the non-default branch a milestone's pull requests merge into, operator-only; a pull request merged there that closes a claimed issue lands the claim. An empty string removes it. |
 | `forge show` | Show the issue tracker this project coordinates over. |
 | `forge set NAME` | Select `github`, `beads` or `null`; only `github` opens pull requests. |
 | `resources show` | Show the named resources lanes may reserve. |
 | `resources set NAMES` | Declare them; an empty string accepts any well-formed name. |
 | `deadlines show` | Show this project's deadline and attempt defaults. |
-| `deadlines set` | Set `--claim`, `--offer`, `--ack` windows and `--attempts`. |
+| `deadlines set` | Set `--claim`, `--offer`, `--request`, `--ack` windows and `--attempts`. |
 | `budget show` | Show the advisory token, call and hour limits every lane of this project inherits. |
 | `budget set` | Set `--tokens`, `--calls` and `--hours` project defaults; a budget informs and does not gate. |
 | `budget enforce` | Show or set the opt-in run budget: aggregate `--tokens`, `--calls` and `--hours` across every lane; `0` removes one. Once used up, no wake, dispatch, retry or launch starts. A usage limit, not a billing cap. For the operator; refused from a lane's environment by accident guard, not enforcement. |
@@ -117,6 +137,8 @@ on standard output and export to a file.
 | `verify set COMMAND` | Set that command; an empty string removes it. |
 | `unattended show` | Show the unattended integration policy, or that integration is operator-only. |
 | `unattended set ISSUE ... --target BRANCH` | Authorize unattended integration of those issues into `BRANCH`; no issues removes the policy. Base checkout only. |
+| `timeout show` | List every decision kind with its class, recommended default and the timeout the project policy leaves it. |
+| `timeout set KIND [--ask \| --after WINDOW]` | Make a reversible kind always ask, or wait longer than 30 minutes; neither flag restores the default. Irreversible kinds always ask. Base checkout only. |
 | `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal; `--issue N` names the claim when the lane holds several ready ones. Base checkout only. |
 | `init show` | Show the command every new lane runs before it starts. |
 | `init set COMMAND` | Set that command; an empty string removes it. |
@@ -179,6 +201,42 @@ log or an empty field is stated in words. On a terminal narrower than a line,
 the line is clipped with `…` and a closing hint names `--json` for the full
 values; a pipe or a file receives every value in full. Credential values stay
 redacted in both modes.
+
+## Refusals
+
+A command that refuses prints one shape on standard error: what was refused
+and why, then, when one command resolves it, a `next:` line naming that
+command exactly:
+
+```text
+agent-parley: Unknown credential profile 'work'. Define it with `agent-parley credentials add`.
+next: agent-parley credentials add work
+```
+
+The `next:` line is the command to run, with the refusal's own values filled
+in; an uppercase word such as `CHAT_ID` marks a value only the operator knows.
+A refusal with no single resolving command, such as a missing native CLI,
+prints the message alone. Exit codes do not change: a refusal still exits 1.
+Under `--json` the `error` document keeps its `type` and `message` fields
+unchanged and carries no `next:` text. An MCP tool refusal a lane receives
+ends on the same `next:` line.
+
+Refusals that name a command include a dirty lane
+(`git -C LANE add -A && git -C LANE commit -m wip`), a dirty base checkout
+before integration (`git -C ROOT stash push --include-untracked`), an
+unregistered repository (`agent-parley setup .`), a command run from the main
+checkout instead of a lane or a participant that is not in the project
+(`agent-parley participant list`), an issue owned by a peer
+(`agent-parley issue request N`, or `issue claim N --take-orphaned` for an
+orphaned owner), an issue offered to the caller (`agent-parley issue accept N
+--offer-id ID`), a service that is running but unhealthy, including one
+answering from code the checkout no longer holds (`agent-parley down`), a
+missing store (`agent-parley up`), an unknown credential profile or provider,
+a lane off its branch (`agent-parley participant restore NAME`), an exhausted
+run budget (`agent-parley budget resume`) and a plugin on another protocol
+(`agent-parley setup PATH`). New refusals follow the same shape by raising
+`BridgeError(message, next_command=...)`; a test parses every suggested
+`agent-parley` command against the real command tree.
 
 ## MCP tools
 

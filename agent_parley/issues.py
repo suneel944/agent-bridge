@@ -221,6 +221,79 @@ def closed(record: dict) -> bool:
     )
 
 
+def landed(ledger: dict, base: str, opened: dict | None) -> list[dict]:
+    """Lists the issues whose work landed in the integration base.
+
+    A claim ended through a pull request merged into the integration base
+    keeps its issue open on the forge until the base crosses to the default
+    branch, so the issue waits only on that crossing. Once the forge reports
+    the issue closed, it no longer waits and leaves the list.
+
+    Args:
+        ledger: Published issue ledger.
+        base: Recorded integration base, empty when none is recorded.
+        opened: Every open issue the forge reported, by bare number, or None
+            when no complete reading is known, which keeps every landing.
+
+    Returns:
+        One entry per issue in ascending order: its number, the pull
+        request's number and URL, and when the claim ended.
+    """
+    if not base:
+        return []
+    found = []
+    for number, record in sorted(
+        ledger.get("issues", {}).items(), key=lambda item: int(item[0])
+    ):
+        resolution = record.get("resolution") or {}
+        evidence = resolution.get("evidence") or {}
+        if (
+            record.get("owner")
+            or resolution.get("outcome") != "complete"
+            or evidence.get("base") != base
+            or lifecycle.state(record)["state"] != lifecycle.COMPLETE
+            or (opened is not None and number not in opened)
+        ):
+            continue
+        found.append(
+            {
+                "issue": int(number),
+                "pull_request": int(evidence.get("pull_request") or 0),
+                "url": str(evidence.get("url") or ""),
+                "at": float(resolution.get("at") or 0),
+            }
+        )
+    return found
+
+
+def settled_at(ledger: dict) -> float:
+    """Reports when the newest claim of a project ended.
+
+    A claim ends through a release, a resolution or a verified completion,
+    and each one is the last transition of its unowned record's history,
+    so the newest such transition is when the project last stopped holding
+    that work.
+
+    Args:
+        ledger: Published issue ledger.
+
+    Returns:
+        Unix seconds of the newest such ending of an unowned record, or
+        zero when none is recorded.
+    """
+    return max(
+        (
+            float(history[-1].get("at") or 0)
+            for record in ledger.get("issues", {}).values()
+            if not record.get("owner")
+            for history in [record.get("history") or []]
+            if history
+            and history[-1].get("action") in ("release", "resolve", "complete")
+        ),
+        default=0.0,
+    )
+
+
 def deadline_notice(record: dict) -> dict:
     """Returns the deadline notice a record still stands behind.
 
@@ -229,7 +302,10 @@ def deadline_notice(record: dict) -> dict:
     or the issue closes on the forge, replaying it would tell the lane to
     pause for work it no longer holds. Readers therefore see a notice only
     while its holder still owns an open claim, which also silences notices
-    older ledgers kept after ownership ended.
+    older ledgers kept after ownership ended. A no-progress notice is also
+    silenced once the claim records progress after it was written, rather
+    than at the supervisor's next poll, because its frozen idle age would
+    otherwise contradict the progress the holder just reported.
 
     Args:
         record: Published ledger record for one issue, or an empty mapping.
@@ -242,6 +318,10 @@ def deadline_notice(record: dict) -> dict:
         notice.get("holder")
         and notice["holder"] == record.get("owner")
         and not closed(record)
+        and not (
+            str(notice.get("id", "")).startswith("idle:")
+            and last_progress(record) > float(notice.get("created", 0) or 0)
+        )
     ):
         return notice
     return {}
@@ -604,7 +684,7 @@ def change(
         title: Optional forge-supplied issue title recorded on a claim. It is
             display context, so it is excluded from the arguments a key is
             compared against and a changed title never refuses a retry.
-        within: Seconds this claim, offer or acknowledgement is expected to
+        within: Seconds this claim, offer or takeover request is expected to
             take, recorded as a deadline beside the record.
         defaults: Project deadline and attempt-budget defaults.
         carried: Structured work state an offer transfers beside its summary.
@@ -980,19 +1060,33 @@ def _within_cap(ledger: dict, agent: str, cap: int | None) -> None:
     )
 
 
-def _request(record: dict | None, agent: str, issue: str, reason: str) -> dict:
+def _request(
+    record: dict | None,
+    agent: str,
+    issue: str,
+    reason: str,
+    within: float | None,
+    budgets: dict,
+) -> dict:
     """Records a peer's request to take over an issue another lane holds.
 
     The holder answers it like an operator request, with issue accept or
     decline and the request identifier. A holder that neither answers nor
     records progress on the claim within the project's takeover grace window
-    has the request granted by the supervisor as an offer to the peer.
+    has the request granted by the supervisor as an offer to the peer. The
+    request itself also carries a deadline, from the caller's window or the
+    project's `request` default; past it the request is not granted, since
+    only the grace window above does that, but it reads as overdue so the
+    holder or the operator sees it needs a decision.
 
     Args:
         record: Published record for this issue, or None when it has none.
         agent: Lane asking to take the issue over.
         issue: Repository issue number the request names.
         reason: Why the peer asks, travelling with the request.
+        within: Seconds the holder is expected to answer within, recorded as
+            a deadline. None takes the project default.
+        budgets: Project deadline and attempt-budget defaults.
 
     Returns:
         The record carrying the pending request.
@@ -1013,12 +1107,14 @@ def _request(record: dict | None, agent: str, issue: str, reason: str) -> dict:
         raise BridgeError(
             "An offer or request is pending on this issue; wait for its answer."
         )
+    expected = within if within is not None else budgets.get("request")
     record["request"] = {
         "id": uuid.uuid4().hex,
         "to": agent,
         "reason": reason,
         "created": time.time(),
         "source": PEER,
+        "deadline": time.time() + expected if expected else None,
     }
     return record
 
@@ -1121,7 +1217,7 @@ def _change(
         title: Optional forge-supplied issue title recorded on a claim. It is
             display context only, never ownership authority, and an absent
             title leaves any previously recorded one in place.
-        within: Seconds this claim, offer or acknowledgement is expected to
+        within: Seconds this claim, offer or takeover request is expected to
             take, recorded as a deadline beside the record. None takes the
             project default, and a project without one records no deadline.
         defaults: Project deadline and attempt-budget defaults.
@@ -1205,7 +1301,12 @@ def _change(
                             f"issue claim {issue} --take-orphaned."
                             if orphan
                             else ""
-                        )
+                        ),
+                        next_command=(
+                            f"agent-parley issue claim {issue} --take-orphaned"
+                            if orphan
+                            else f"agent-parley issue request {issue}"
+                        ),
                     )
             elif take_orphaned:
                 raise BridgeError(
@@ -1220,7 +1321,13 @@ def _change(
                     if recipient == agent
                     else f"Issue #{issue} is offered to {recipient}; "
                     f"{recipient} answers the offer, or the operator "
-                    "withdraws it with issue assign --unassign, first."
+                    "withdraws it with issue assign --unassign, first.",
+                    next_command=(
+                        f"agent-parley issue accept {issue} "
+                        f"--offer-id {pending['id']}"
+                        if recipient == agent
+                        else f"agent-parley issue show {issue}"
+                    ),
                 )
             if not record or record["owner"] != agent:
                 _within_cap(state["issues"], agent, cap)
@@ -1270,7 +1377,9 @@ def _change(
             record = _withdraw(record, issue)
         elif action == "request":
             _within_cap(state["issues"], agent, cap)
-            record = _request(record, agent, issue, summary.strip())
+            record = _request(
+                record, agent, issue, summary.strip(), within, budgets
+            )
         else:
             answering = action in ("accept", "decline")
             operating = action == "unblock" and agent == OPERATOR

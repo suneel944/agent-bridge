@@ -169,7 +169,9 @@ class IntegrationMixin(MailMixin):
             if git(root, "status", "--porcelain"):
                 raise BridgeError(
                     f"The base checkout at {root} has uncommitted changes. "
-                    f"Commit or remove them yourself first. {stands}"
+                    f"Commit or remove them yourself first. {stands}",
+                    next_command=f"git -C {quoted} stash push "
+                    "--include-untracked",
                 )
             head = git(root, "rev-parse", "HEAD")
             if held["command"]:

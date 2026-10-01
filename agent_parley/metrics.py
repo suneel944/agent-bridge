@@ -282,6 +282,26 @@ def latest_review(
     return None
 
 
+def latest_report(directory: Path, name: str) -> dict | None:
+    """Reads the newest report one lane filed, with the issue it named.
+
+    A lane's activity file keeps the latest report's text but not the issue
+    it was about, so status could not tell a report on current work from one
+    on an issue the lane has since released. The durable log records both.
+
+    Args:
+        directory: Private state directory for the common repository.
+        name: Participant that owns the lane.
+
+    Returns:
+        The newest report record, or None when the lane retains none.
+    """
+    for record in reversed(report_records(directory, name)):
+        if record.get("kind") == "report":
+            return record
+    return None
+
+
 def idle_intervals(
     directory: Path,
     name: str,

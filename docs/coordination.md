@@ -20,8 +20,8 @@ checkpoint. A dependency never stops a claim, but it keeps the issue out of the
 unclaimed work lanes are shown, and `report ready` and a verified completion
 refuse while a dependency is incomplete. A block on an unrecorded issue or one
 that would form a cycle is refused, and the supervisor drops an edge once its
-blocker is complete, was released after it ended on the forge, or is no longer
-recorded.
+blocker is complete, was released after it ended on the forge, is closed on the
+forge while a lane still holds it, or is no longer recorded.
 
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-issues.svg" width="880" alt="agent-parley issue list showing an issue that waits on another, the participant holding it, and a pending handoff with its offer ID">
@@ -90,7 +90,11 @@ checkout, and it offers rather than takes; the detail is in
 They block branch changes inside an assigned lane, catch drift after any bypass,
 and deliver short updates only when coordination state actually changes. Each
 notice is capped at 1,536 UTF-8 bytes; an unchanged checkpoint adds no context
-at all. If a rename removed the assigned branch, the hook names the exact
+at all. A notice carries only the entries the lane was not already given, such
+as one new claim row rather than the whole claim set, and says how many
+unchanged entries it left out; `agent-parley status` and `agent-parley issue
+list` always return the full state. A session start, including one after a
+compaction, resends everything once. If a rename removed the assigned branch, the hook names the exact
 repair. Branch drift blocks completion once; a Stop retry can end the session
 while status continues to show the drift.
 
@@ -100,7 +104,20 @@ exclusive reservation a peer holds (`reserved_path`, whose text says
 reservations are advisory), and an offer to this lane that expires unanswered
 within 120 seconds (`offer_expiring`, which names the accept and decline
 commands). A call that only reads, and Agent Parley's own commands, are never
-refused for coordination. A Stop is blocked once while an issue or work notice
+refused for coordination.
+
+Overlap is shown before the work, not found as a merge conflict after it.
+A write to a file a peer reserves, even shared, or that a peer's open pull
+request changes, carries a notice naming that reservation or pull request and
+the issues it closes, and each lane named receives mail saying who is editing
+the file. A write to a file this lane has not reserved carries a reminder to
+reserve it. A `gh issue create` whose title or body names lane files a peer
+reserves or a peer's open pull request changes, or whose title shares subject
+words with a peer's live claim, is refused once (`filing_overlap`) with those
+findings, so the lane links or joins that work; running the same command again
+files it. Each finding is shown to a lane once. Pull request files come from
+supervision's last forge poll, so the hook never reaches the network. Nothing
+here locks a file or refuses an edit: reservations stay advisory. A Stop is blocked once while an issue or work notice
 is waiting, so the lane reads it before the turn ends.
 
 Enforcement is recorded, not discarded. Every hook decision carries an
@@ -143,7 +160,18 @@ tool again, or progress recorded on an idle claim, cancels the sequence. A
 claim observed complete is never moved; its completion reminder and the
 operator's `issue resolve` end it.
 
-## A dead lane's claims are offered, never taken away
+A pull request merged into the project's recorded integration base
+(`agent-parley branch integration BRANCH`) that closes a claimed issue by
+keyword counts as that claim's landed work, though the forge keeps the issue
+open until the base crosses to the default branch. The supervisor ends the
+claim as complete, `status` names the issue as landed with its pull request,
+and when no claim is held one `crossing ready` problem asks the operator to
+open the crossing pull request. That step stays the operator's. The problem
+waits for a whole reading of the forge's open issues, so it never repeats
+after the crossing closed them, and ages from the newest landing or claim
+end.
+
+## A dead lane's claims are offered, then returned
 
 A lane whose state record reads `dead` has its claims marked `orphaned` in
 `issue list`, `status` and `top`, which marks the issue `#42*`. A lane is
@@ -173,6 +201,19 @@ stop with a checkpoint, not a crash.
 ```sh
 agent-parley issue claim 42 --take-orphaned
 ```
+
+A lane that nobody takes over is not waited on forever. Supervision proves a
+lane dead when its state record has read `dead` for `orphan_retire_after`
+(3600 seconds), or when it has no state record, no activity file and a
+worktree at least that old, meaning it was added and never launched. The
+`dead lanes` poll stage then declines the offers made to it, releases its
+claims to the pool, and claims a released issue for the live peer that
+requested it. Ready work that still waits on integration stays with it. Its
+requests are withdrawn, the reminders about it are answered, and its advisory
+reservations are released, each granted to the first queued peer with a notice
+that says why. Every lane that can act is told once what moved. The lane is not
+retired and its worktree, branch and credential are kept, so the operator can
+still resume it; a lane that returns finds its claims in the pool.
 
 ## A budget informs; it does not gate
 
@@ -242,6 +283,14 @@ Every refusal, queued or not, is also recorded against its holder for a day.
 `problems` raises a `holding a refused key` row on a holder that is not
 active, with how long it has been quiet. A refusal drops out of both once
 the holder releases or loses the overlapping lease.
+
+A holder seen quiet while a refusal stands is given a deadline, 900 seconds
+(`KEY_HOLD_DEADLINE`), and told once by mail to release the key, hand the
+work over, or tell the refused lanes why it keeps it. Activity does not move
+the deadline. Once it passes, the `problems` row belongs to the operator as a
+decision, the `key_hold` notification is sent, and each refused lane is told
+once that the operator decides. Nothing is released for the holder; the
+reservation stays advisory.
 
 An operator editing the base checkout is otherwise invisible to a lane until the
 merge conflicts. Every `top` and `status` frame reads `git status` of the base

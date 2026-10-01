@@ -1128,6 +1128,9 @@ def versioned_repo(git_repo):
     (directory / "marketplace.json").write_text(
         json.dumps({"plugins": [{"version": "0.1.1"}]}) + "\n"
     )
+    (git_repo / "server.json").write_text(
+        json.dumps({"version": "0.1.1"}) + "\n"
+    )
     for client in ("claude", "codex"):
         directory = git_repo / "plugins/agent-parley" / f".{client}-plugin"
         directory.mkdir(parents=True)
@@ -1180,6 +1183,10 @@ def test_bump_raises_every_marker_and_lists_only_counted_work(versioned_repo):
         json.loads(
             (versioned_repo / ".claude-plugin/marketplace.json").read_text()
         )["plugins"][0]["version"]
+        == "0.2.0"
+    )
+    assert (
+        json.loads((versioned_repo / "server.json").read_text())["version"]
         == "0.2.0"
     )
     for client in ("claude", "codex"):

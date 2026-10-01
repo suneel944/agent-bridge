@@ -261,15 +261,24 @@ def handoff(value: dict | None) -> dict | None:
 
 
 def request(value: dict | None) -> dict | None:
-    """Reports one operator request that the issue's owner has not answered."""
+    """Reports one takeover or operator request the owner has not answered.
+
+    Past its deadline the request is not granted by this reading alone; the
+    supervisor's grace window still decides that. The deadline only makes an
+    unanswered request read as overdue, the same way an unanswered offer does.
+    """
     if not value:
         return None
+    waiting = issues_state.offer_state(value)
     return {
         "offer_id": value["id"],
         "to": value["to"],
         "source": value.get("source") or issues_state.OPERATOR,
         "reason": value.get("reason", ""),
         "created_at": timestamp(value.get("created")),
+        "deadline_at": timestamp(waiting["deadline"]),
+        "overdue": waiting["overdue"],
+        "overdue_seconds": waiting["overdue_seconds"],
     }
 
 
@@ -606,6 +615,7 @@ def _row(row: dict) -> dict:
         "queued_requests": row["queued"],
         "queued_by": list(row["queued_by"]),
         "injected_bytes": row["injected_bytes"],
+        "injected_bytes_per_hour": row.get("injected_per_hour", 0),
         "hook_events": row["hook_events"],
         "denials": row["denials"],
         "denied_by": [dict(item) for item in row.get("denied_by") or []],

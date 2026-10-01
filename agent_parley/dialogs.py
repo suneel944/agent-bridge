@@ -94,6 +94,13 @@ SHELL_TITLE = "Bash command"
 BRIDGE_ANSWER = "Yes"
 SHELL_NOTICE = "This command requires approval"
 SHELL_OPERATORS = re.compile(r"[;&|<>$`\\]")
+DECISION_KIND = "native_dialog"
+TERMINAL_ONLY = "terminal-only: answer it in the lane's terminal"
+WIDENING = re.compile(
+    r"auto mode|don.t ask again|always|allow all|for this session|bypass",
+    re.IGNORECASE,
+)
+REFUSING = re.compile(r"no\b", re.IGNORECASE)
 BOX = re.compile(r"[─-╿]")
 ROW_BREAKS = re.compile(r"\r\n|[\r\n]|\x1b\[[0-9;]*[ABEFHdf]")
 
@@ -813,6 +820,7 @@ class Watch:
         self._answered_at = 0.0
         self._answered_tail = b""
         self._repeats: dict[str, int] = {}
+        self._decision = ""
 
     def _opted_in(self) -> bool:
         """Reads whether this lane's operator allows this bridge's own tools.
@@ -893,6 +901,7 @@ class Watch:
         found = locate(screen)
         signature = self._describe(screen, found)
         if signature != self._signature:
+            self._retire()
             self._signature = signature
             self._since = now
             self._resolved = False
@@ -902,6 +911,10 @@ class Watch:
         if not signature:
             self._release()
             return b""
+        if self._resolved and self._decision:
+            pressed = self._carry(found, held)
+            if pressed:
+                return pressed
         if self._resolved and not self._approvable(screen, found):
             return b""
         return self._act(screen, found, now, held)
@@ -1034,7 +1047,10 @@ class Watch:
         """Parks the lane on a screen no configured answer covers.
 
         A question carries its own text and option lines into the record and
-        the notice, so the operator can answer from the notice alone.
+        the notice, so the operator can answer from the notice alone. A
+        recognized dialog that offers options is also recorded as a decision
+        offering those options, so the operator can answer it from the chat;
+        a prompt this watcher cannot read is named as terminal-only instead.
         """
         extra = dict(detail or {})
         if not self._publish(
@@ -1044,7 +1060,138 @@ class Watch:
         shown = " ".join(report(screen))
         if extra.get("options"):
             shown = " | ".join((label, *extra["options"]))
-        self._notify(label, shown)
+        if dialog is None:
+            shown = f"{TERMINAL_ONLY} | {shown}"
+        self._notify(label, shown, self._ask(dialog, label, screen, shown))
+
+    def _ask(
+        self, dialog: Dialog | None, label: str, text: str, shown: str
+    ) -> str:
+        """Records the decision a recognized dialog puts to the operator.
+
+        The options are the labels the client draws, so an answer names the
+        same choice a keypress at the terminal would. An option that widens a
+        permission, such as switching to auto mode or not asking again, takes
+        the same confirming answer an irreversible one does, and a refusing
+        option is the recommendation for a permission or trust prompt. The
+        free-text option of a question picker is not offered, because text
+        from the chat is never typed into a lane. The decision is keyed by the
+        screen and the instant it was first drawn, so a later drawing of an
+        identical dialog asks afresh rather than taking an old answer.
+
+        Args:
+            dialog: The recognized dialog, or None for an unreadable prompt.
+            label: What the operator is asked.
+            text: Screen text drawing the dialog and its options.
+            shown: What the notice shows of the screen.
+
+        Returns:
+            The decision identifier, or an empty string when the dialog offers
+            no options to answer with or the record could not be written.
+        """
+        self._decision = ""
+        if dialog is None or dialog.action == EXHAUSTED:
+            return ""
+        offered = [
+            option
+            for option in options(text).values()
+            if not _comparable(option).startswith(FREE_TEXT)
+        ]
+        if not offered:
+            return ""
+        refusing = [option for option in offered if REFUSING.match(option)]
+        widening: list[str] = []
+        if dialog.name == PERMISSION:
+            widening = [item for item in offered if WIDENING.search(item)]
+        from agent_parley import decisions, roster
+
+        project = ""
+        with contextlib.suppress(BridgeError, OSError, ValueError, KeyError):
+            project = str(roster.read(self._directory).get("root", ""))
+        key = hashlib.sha256(
+            f"{self._signature}\x00{self._since}".encode()
+        ).hexdigest()[:16]
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            record = decisions.open_or_refresh(
+                self._directory,
+                project=project,
+                lane=self._name,
+                kind=DECISION_KIND,
+                key=key,
+                question=label,
+                options=offered,
+                recommended=(
+                    refusing[0] if refusing and dialog.action == ANSWER else ""
+                ),
+                detail=shown,
+                confirm=widening,
+            )
+            self._decision = str(record["id"])
+        return self._decision
+
+    def _carry(self, found: Frame | None, held: bool) -> bytes:
+        """Presses the option the operator chose for the dialog on screen.
+
+        The screen was re-read on this pass and still compares equal to the
+        one the decision was opened for, which is what a changed screen would
+        not. The answer is claimed under the decision lock before its keys
+        are returned, so it is pressed at most once. An answer the screen no
+        longer offers is never pressed: the decision is retired as stale and
+        the lane stays parked on the dialog.
+
+        Args:
+            found: The dialog the screen still draws.
+            held: Whether the operator is holding a partially entered line.
+
+        Returns:
+            The keystrokes for the chosen option, or empty bytes.
+        """
+        if found is None or held:
+            return b""
+        from agent_parley import decisions
+
+        record: dict = {}
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            record = decisions.get(self._directory, self._decision)
+        if record.get("state") != decisions.ANSWERED:
+            return b""
+        answer = str(record.get("answer", ""))
+        pressed = keys(found.text, answer)
+        if not pressed:
+            self._retire()
+            return b""
+        carried = False
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            carried = decisions.applied(self._directory, self._decision)
+        if not carried:
+            return b""
+        self._decision = ""
+        self._publish(
+            found.dialog,
+            found.text,
+            {
+                "label": found.dialog.label,
+                "answer": answer,
+                "keys": pressed.decode().strip(),
+                "answered_by": str(record.get("answered_by", "")),
+            },
+        )
+        self.answered()
+        return pressed
+
+    def _retire(self) -> None:
+        """Marks the decision for a screen that is gone as stale.
+
+        A later answer to it is refused, and one already given is never
+        pressed on whatever dialog replaced it.
+        """
+        if not self._decision:
+            return
+        from agent_parley import decisions
+
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            decisions.stale(self._directory, self._decision)
+        self._decision = ""
 
     def _evidence(self, name: str, reset: float | None) -> str:
         """Identifies one screen situation for a durable observation."""
@@ -1139,16 +1286,23 @@ class Watch:
                 evidence="dialog released",
             )
 
-    def _notify(self, label: str, detail: str) -> None:
-        """Sends the operator one message carrying what the screen shows."""
+    def _notify(self, label: str, detail: str, decision: str = "") -> None:
+        """Sends the operator one message carrying what the screen shows.
+
+        A decision already recorded for the dialog is named, so the message
+        offers the dialog's own options rather than a generic one.
+        """
         from agent_parley import notify
 
+        fields = {"dialog": label, "detail": detail}
+        if decision:
+            fields["decision"] = decision
         with contextlib.suppress(BridgeError, OSError, ValueError):
             notify.deliver(
                 self._directory,
                 self._name,
                 notify.Event.NATIVE_DIALOG,
-                {"dialog": label, "detail": detail},
+                fields,
             )
 
 

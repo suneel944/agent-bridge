@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         supervision,
         terminal,
         views,
+        worktrees,
     )
     from agent_parley import attachments as attachments
     from agent_parley import delivery as delivery
@@ -119,7 +120,7 @@ if TYPE_CHECKING:
     )
     from agent_parley.worktrees import preserve_pending as preserve_pending
 
-from agent_parley import BridgeError
+from agent_parley import BridgeError, refusal
 from agent_parley.claims import ClaimsMixin
 from agent_parley.integration import IntegrationMixin
 from agent_parley.launch import LaunchMixin
@@ -983,7 +984,9 @@ def lane_detail(record: dict, data: dict) -> None:
         )
     print(
         f"    Context delivered: {record['injected_bytes']} "
-        f"UTF-8 bytes in {record['injections']} notices"
+        f"UTF-8 bytes in {record['injections']} notices; "
+        f"{record.get('injected_per_hour', 0)} bytes per hour over the "
+        "last day"
     )
     if record["report_age_seconds"] is not None:
         print(f"    Report age: {record['report_age_seconds']}s")
@@ -1085,11 +1088,43 @@ def terminal_width() -> int | None:
     return max(1, shutil.get_terminal_size().columns)
 
 
-def inbound_status() -> dict:
-    """Describes inbound status without loading its transport when disabled."""
-    if not os.environ.get("AGENT_PARLEY_INBOUND", "").strip():
+def inbound_status(home: Path | None = None) -> dict:
+    """Describes inbound status without loading its transport when disabled.
+
+    Args:
+        home: Private state root whose stored notification settings apply,
+            or None to read the process environment alone.
+
+    Returns:
+        Whether the reader was asked for and the fault, if any, stopping it.
+    """
+    values = notify.environment(home)
+    if not values.get("AGENT_PARLEY_INBOUND", "").strip():
         return {"enabled": False, "fault": ""}
-    return inbound.reported()
+    return inbound.reported(values)
+
+
+def notification_line(outbound: dict, received: dict) -> str:
+    """Says whether outbound and inbound notification are active, and why not.
+
+    Args:
+        outbound: Reading from `notify.reported`.
+        received: Reading from `inbound_status`.
+
+    Returns:
+        One ``Notify:`` line for status and ``up``.
+    """
+    if outbound["fault"]:
+        sent = f"outbound off: {outbound['fault']}"
+    else:
+        sent = "outbound on (" + ", ".join(outbound["transports"]) + ")"
+    if received["fault"]:
+        read = f"inbound off: {received['fault']}"
+    elif received["enabled"]:
+        read = "inbound on"
+    else:
+        read = "inbound off: AGENT_PARLEY_INBOUND is not set"
+    return f"Notify: {sent}; {read}"
 
 
 def add_selector(
@@ -2129,7 +2164,8 @@ class Bridge(
             if git(lane, "status", "--porcelain"):
                 raise BridgeError(
                     f"{name} has uncommitted changes on {actual}. Commit or "
-                    "preserve them first; restore never discards work."
+                    "preserve them first; restore never discards work.",
+                    next_command=worktrees.commit_all(lane),
                 )
             unmerged = git(lane, "log", "--oneline", f"{branch}..HEAD")
             if unmerged:
@@ -2190,7 +2226,8 @@ class Bridge(
                     if git(lane, "status", "--porcelain"):
                         raise BridgeError(
                             f"{name} has uncommitted changes. Commit or "
-                            "preserve them first; retire never discards work."
+                            "preserve them first; retire never discards work.",
+                            next_command=worktrees.commit_all(lane),
                         )
                     kept = [
                         path
@@ -2481,13 +2518,17 @@ class Bridge(
                 raise BridgeError(
                     f"{name} still has a live session. Run `agent-parley "
                     f"participant stop {name}` first; a restart never runs "
-                    "two clients in one worktree."
+                    "two clients in one worktree.",
+                    next_command=f"agent-parley participant stop {name}",
                 )
             self.stop(repo, name)
         lane = Path(participant["lane"])
         actual = current_branch(lane)
         if actual != participant["branch"]:
-            raise BridgeError(drift(name, participant, actual))
+            raise BridgeError(
+                drift(name, participant, actual),
+                next_command=f"agent-parley participant restore {name}",
+            )
         opening = task or terminal.PROMPT
         if git(lane, "status", "--porcelain"):
             saved = recovery.capture(directory, data, name)
@@ -3004,6 +3045,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "approval",
             "verify",
             "unattended",
+            "timeout",
             "init",
             "branch",
             "forge",
@@ -3040,10 +3082,23 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "state",
             "gc",
             "version",
+            "plugins",
             "completion",
+            "demo",
         ),
     ),
 )
+
+
+START_HERE: tuple[str, tuple[str, ...]] = (
+    "Start here",
+    ("run", "status", "top", "problems", "demo", "doctor"),
+)
+"""Leading root-help group of the commands a new operator reaches first.
+
+Its commands stay listed in their own groups too, and a name this build does
+not declare is skipped, so the group can name a command before it lands.
+"""
 
 
 class Absorbed:
@@ -3149,7 +3204,12 @@ def command_help(index: CommandIndex) -> str:
     """
     width = max(len(name) for name in index.summaries) + 2
     listed: set[str] = set()
-    blocks = []
+    blocks = [
+        (
+            START_HERE[0],
+            [name for name in START_HERE[1] if name in index.summaries],
+        )
+    ]
     for title, names in COMMAND_GROUPS:
         members = [name for name in names if name in index.summaries]
         listed.update(members)
@@ -3366,7 +3426,8 @@ def lane_reading(bridge: Bridge, repo: Path, name: str) -> tuple[dict, dict]:
     if name not in data["participants"]:
         raise BridgeError(
             f"No participant named {name!r} in {data['root']}; run "
-            "agent-parley participant list."
+            "agent-parley participant list.",
+            next_command="agent-parley participant list",
         )
     for project in bridge.status_snapshot()["projects"]:
         if project["root"] != data["root"]:
@@ -3443,7 +3504,69 @@ def notification_report(report: dict) -> str:
         + ("sent" if item["ok"] else f"failed: {item['error']}")
         for item in report["results"]
     ]
+    received = report.get("inbound") or {}
+    if received.get("fault"):
+        lines.append(f"  inbound: off: {received['fault']}")
+    elif received.get("polling"):
+        lines.append("  inbound: the service is long polling Telegram")
+    elif received.get("enabled"):
+        lines.append(
+            "  inbound: configured but not running; restart the service: "
+            "agent-parley down && agent-parley up"
+        )
     return "\n".join(lines)
+
+
+def secret(prompt: str) -> str:
+    """Reads one secret without echo, or one line of piped standard input.
+
+    Args:
+        prompt: Text shown on a terminal before the hidden input.
+
+    Returns:
+        The secret with surrounding whitespace removed.
+    """
+    import getpass
+
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt).strip()
+    return sys.stdin.readline().strip()
+
+
+def secret_settings(chat: str, answering: bool) -> dict[str, str]:
+    """Reads the notification secrets without placing them in argv.
+
+    A terminal is prompted without echo; otherwise each secret is one line
+    of standard input, the bot token first and the inbound passcode second.
+
+    Args:
+        chat: Telegram chat id the notifications go to.
+        answering: Whether to read and store the inbound passcode as well.
+
+    Returns:
+        The settings to store, keyed by environment variable name.
+
+    Raises:
+        BridgeError: If the token is empty or the passcode is too short.
+    """
+    token = secret("Telegram bot token: ")
+    if not token:
+        raise BridgeError("The Telegram bot token is empty; nothing stored.")
+    values = {
+        "AGENT_PARLEY_NOTIFY": "telegram",
+        "AGENT_PARLEY_TELEGRAM_CHAT": chat.strip(),
+        "AGENT_PARLEY_TELEGRAM_TOKEN": token,
+    }
+    if answering:
+        passcode = secret("Inbound passcode: ")
+        if len(passcode) < inbound.MINIMUM_PASSCODE:
+            raise BridgeError(
+                "The inbound passcode must be at least "
+                f"{inbound.MINIMUM_PASSCODE} characters; nothing stored."
+            )
+        values["AGENT_PARLEY_INBOUND"] = "telegram"
+        values["AGENT_PARLEY_INBOUND_PASSCODE"] = passcode
+    return values
 
 
 def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
@@ -3471,6 +3594,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Print the installed version and the state directory in use.",
     )
     released.add_argument("--json", action="store_true", help=JSON_HELP)
+    commands.add_parser(
+        "demo",
+        help=(
+            "Run the coordination story with stub lanes in a throwaway "
+            "sandbox; no native CLI, model or network."
+        ),
+    )
     starting = commands.add_parser(
         "up", help="Start the local coordination server in the background."
     )
@@ -3866,10 +3996,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     run.add_argument("--json", action="store_true", help=JSON_HELP)
     report = commands.add_parser(
-        "report", help="Record a partial, blocked, or ready-for-review handoff."
+        "report",
+        help=(
+            "Record a partial, blocked, ready-for-review or waiting handoff."
+        ),
     )
     report.add_argument("--repo", type=Path, default=Path.cwd())
-    report.add_argument("--state", choices=("partial", "blocked", "ready"))
+    report.add_argument(
+        "--state", choices=("partial", "blocked", "ready", "waiting")
+    )
     report.add_argument("--summary", default="")
     records = report.add_subparsers(dest="action")
     showing_report = records.add_parser(
@@ -3933,6 +4068,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     report.add_argument(
+        "--until",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "Seconds until this lane's next check, required for "
+            "--state waiting. Capped by the project's wait deadline."
+        ),
+    )
+    report.add_argument(
         "--idempotency-key", default="", metavar="KEY", help=RETRY_HELP
     )
     steer = commands.add_parser(
@@ -3971,7 +4116,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 metavar="KEY",
                 help=RETRY_HELP,
             )
-        if action in ("claim", "offer", "accept"):
+        if action in ("claim", "offer", "accept", "request"):
             command.add_argument(
                 "--within",
                 type=duration,
@@ -4154,6 +4299,22 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Report launcher, plugin and store versions and their fit.",
     )
     checking.add_argument("--json", action="store_true", help=JSON_HELP)
+    plugging = commands.add_parser(
+        "plugins",
+        help="Add the plugin to each supported native CLI on PATH.",
+    )
+    plugin_actions = plugging.add_subparsers(dest="action", required=True)
+    plugin_actions.add_parser(
+        "install",
+        help=(
+            "Add the marketplace and plugin to claude and codex where "
+            "missing, refreshing what is already present."
+        ),
+    )
+    plugin_actions.add_parser(
+        "status",
+        help="Report whether each supported CLI has the plugin; writes none.",
+    )
     triaging = commands.add_parser(
         "problems",
         help=(
@@ -4222,17 +4383,36 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     notifying = commands.add_parser(
         "notify",
         help=(
-            "Verify the outbound notification transports configured in the "
-            "environment; exit 1 when one of them refuses the message."
+            "Store the notification settings, or verify the configured "
+            "transports; exit 1 when one of them refuses the message."
         ),
     )
     notices = notifying.add_subparsers(dest="action", required=True)
     probing = notices.add_parser(
         "test",
-        help="Send one test message on each configured transport.",
+        help=(
+            "Send one test message on each configured transport and say "
+            "whether the service is reading inbound queries."
+        ),
     )
     probing.add_argument("--repo", type=Path, default=Path.cwd())
     probing.add_argument("--json", action="store_true", help=JSON_HELP)
+    storing = notices.add_parser(
+        "setup",
+        help=(
+            "Store the Telegram chat and bot token in the state root, "
+            "owner-only; the token is read from a prompt or standard input."
+        ),
+    )
+    storing.add_argument("--chat", required=True, help="Telegram chat id.")
+    storing.add_argument(
+        "--inbound",
+        action="store_true",
+        help=(
+            "Also answer status queries from the chat; the passcode is read "
+            "after the token."
+        ),
+    )
     planning = commands.add_parser(
         "plan", help="Apply, compare or show the recorded work-order plan."
     )
@@ -4594,6 +4774,35 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     standing_run.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_kind = commands.add_parser(
+        "timeout",
+        help=(
+            "Show or set how long a reversible decision waits before its "
+            "recommended default is applied."
+        ),
+    )
+    waiting_kinds = waiting_kind.add_subparsers(dest="action", required=True)
+    waiting_show = waiting_kinds.add_parser("show")
+    waiting_show.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_set = waiting_kinds.add_parser("set")
+    waiting_set.add_argument("kind", help="Decision kind the entry governs.")
+    waiting_choice = waiting_set.add_mutually_exclusive_group()
+    waiting_choice.add_argument(
+        "--ask",
+        action="store_true",
+        help="Always ask; never apply the default.",
+    )
+    waiting_choice.add_argument(
+        "--after",
+        type=duration,
+        default=None,
+        metavar="WINDOW",
+        help=(
+            "Longer wait than the default, such as 2h. Without --ask or "
+            "--after the kind returns to its default."
+        ),
+    )
+    waiting_set.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -4631,6 +4840,23 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     naming_set.add_argument("--repo", type=Path, default=Path.cwd())
+    naming_base = namings.add_parser(
+        "integration",
+        help=(
+            "Record the branch a milestone's pull requests merge into; "
+            "operator-only."
+        ),
+    )
+    naming_base.add_argument(
+        "integration",
+        metavar="BRANCH",
+        help=(
+            "Integration branch, such as integration/1.0.0; a pull request "
+            "merged into it that closes a claimed issue lands the claim. An "
+            "empty string removes it."
+        ),
+    )
+    naming_base.add_argument("--repo", type=Path, default=Path.cwd())
     tracker = commands.add_parser(
         "forge",
         help="Show or set the issue tracker this project coordinates over.",
@@ -4663,7 +4889,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     for field, described in (
         ("claim", "a claim"),
         ("offer", "a handoff offer"),
+        ("request", "a takeover request"),
         ("ack", "an acknowledgement"),
+        ("wait", "a lane's self-declared wait"),
     ):
         budget_set.add_argument(
             f"--{field}",
@@ -4880,7 +5108,7 @@ def _plain_status() -> int:
             Selection(project=bridge.project_at(Path.cwd())), terminal_width()
         )
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f"agent-parley: {exc}", file=sys.stderr)
+        print(f"agent-parley: {refusal(exc)}", file=sys.stderr)
         return 1
     return 0
 
@@ -4905,6 +5133,10 @@ def main() -> int:
         return _plain_status()
     if sys.argv[1:] == ["title"]:
         return _title()
+    if not sys.argv[1:]:
+        from agent_parley import start
+
+        return start.show()
     typed = selected_command(sys.argv[1:])
     parser, commands = root_parser(typed)
     if typed is not None and typed not in commands.declared:
@@ -4915,8 +5147,9 @@ def main() -> int:
         print(protocol.launcher_version())
         return 0
     if args.command is None:
-        parser.print_help()
-        return 0
+        from agent_parley import start
+
+        return start.show(home)
     if args.command == "completion":
         print(completion.script(parser, args.shell), end="")
         return 0
@@ -4936,6 +5169,19 @@ def main() -> int:
             else f"agent-parley {installed}\nState: {home}"
         )
         return 0
+    if args.command == "plugins":
+        from agent_parley import plugins
+
+        if args.action == "status":
+            print("\n".join(plugins.status()))
+            return 0
+        outcome, succeeded = plugins.install()
+        print("\n".join(outcome))
+        return 0 if succeeded else 1
+    if args.command == "demo":
+        from agent_parley import demo
+
+        return demo.main()
     try:
         bridge = Bridge(args.home)
         if args.command == "up":
@@ -4950,7 +5196,11 @@ def main() -> int:
                     },
                 )
                 if args.json
-                else f"Coordination server ready at {bridge.url}/mcp/"
+                else f"Coordination server ready at {bridge.url}/mcp/\n"
+                + notification_line(
+                    notify.reported(notify.environment(bridge.home)),
+                    inbound_status(bridge.home),
+                )
             )
         elif args.command == "down":
             bridge.down()
@@ -5169,6 +5419,8 @@ def main() -> int:
         elif args.command == "report":
             if not args.state or not args.summary:
                 parser.error("report needs --state and --summary.")
+            if args.state == "waiting" and args.until <= 0:
+                parser.error("report --state waiting needs --until SECONDS.")
             owed = bridge.report(
                 args.repo.resolve(),
                 args.state,
@@ -5179,6 +5431,7 @@ def main() -> int:
                 issue=args.issue,
                 resume_on=args.resume_on,
                 backlog=args.backlog,
+                until=args.until,
             )
             print(f"Recorded outcome: {args.state}")
             if owed:
@@ -5318,8 +5571,31 @@ def main() -> int:
                 else "\n".join(reclaim.lines(swept + made))
                 or "No lane to reclaim."
             )
+        elif args.command == "notify" and args.action == "setup":
+            path = notify.store(
+                bridge.home, secret_settings(args.chat, args.inbound)
+            )
+            print(
+                f"Notification settings stored in {path}.\n"
+                + notification_line(
+                    notify.reported(notify.environment(bridge.home)),
+                    inbound_status(bridge.home),
+                )
+            )
+            if args.inbound:
+                print(
+                    "A running service reads inbound settings at start: "
+                    "agent-parley down && agent-parley up"
+                )
         elif args.command == "notify":
-            probed = notify.probe(args.repo.resolve().name)
+            probed = notify.probe(args.repo.resolve().name, bridge.home)
+            received = inbound_status(bridge.home)
+            probed["inbound"] = {
+                **received,
+                "polling": received["enabled"]
+                and not received["fault"]
+                and inbound.polling(bridge.home),
+            }
             print(
                 views.render("notify", probed)
                 if getattr(args, "json", False)
@@ -5446,9 +5722,14 @@ def main() -> int:
                     "a lane selector."
                 )
             if args.action == "add":
-                bridge.add_participant(
+                added = bridge.add_participant(
                     repository, args.name, args.provider, args.credentials
                 )
+                if supervision.opt_in_missing(bridge.home, added, args.name):
+                    print(
+                        supervision.OPT_IN_WARNING.format(name=args.name),
+                        file=sys.stderr,
+                    )
             elif args.action == "restore":
                 print(bridge.restore(repository, args.name))
             elif args.action == "retire":
@@ -5505,9 +5786,14 @@ def main() -> int:
                         {
                             "root": data["root"],
                             "prefix": data["branch_prefix"],
+                            "integration_base": data.get(
+                                "integration_base", ""
+                            ),
                         },
                     )
                 )
+            elif args.action == "integration":
+                print(bridge.integration_branch(repository, args.integration))
             else:
                 print(
                     bridge.branch_naming(
@@ -5547,7 +5833,9 @@ def main() -> int:
                         {
                             "claim": args.claim,
                             "offer": args.offer,
+                            "request": args.request,
                             "ack": args.ack,
+                            "wait": args.wait,
                             "attempts": args.attempts,
                         },
                     )
@@ -5662,6 +5950,22 @@ def main() -> int:
                         args.steps if args.action == "set" else None,
                     )
                 )
+        elif args.command == "timeout":
+            from agent_parley import timeouts
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                print(
+                    timeouts.configure(
+                        bridge,
+                        repository,
+                        args.kind,
+                        ask=args.ask,
+                        seconds=args.after,
+                    )
+                )
+            else:
+                print(timeouts.show(bridge, repository))
         elif args.command == "unattended":
             from agent_parley import unattended
 
@@ -5840,7 +6144,7 @@ def main() -> int:
         sqlite3.Error,
         subprocess.TimeoutExpired,
     ) as exc:
-        print(f"agent-parley: {_error_message(exc)}", file=sys.stderr)
+        print(f"agent-parley: {_refusal_lines(exc)}", file=sys.stderr)
         if getattr(args, "json", False):
             print(_error_document(exc))
         return 1
@@ -5865,6 +6169,25 @@ def _error_message(exc: Exception) -> str:
             "the project while this one ran. Rerun it."
         )
     return str(exc)
+
+
+def _refusal_lines(exc: Exception) -> str:
+    """Words one runtime failure as the human refusal on standard error.
+
+    The message comes first, and a failure that names its resolving command
+    ends on a ``next:`` line carrying it, in the shape `refusal` gives every
+    refusal. The ``--json`` error document keeps the message alone, so its
+    fields are unchanged.
+
+    Args:
+        exc: Failure the command handler caught.
+
+    Returns:
+        The message, followed by a ``next:`` line when the failure has one.
+    """
+    if isinstance(exc, KeyError):
+        return _error_message(exc)
+    return refusal(exc)
 
 
 def _error_document(exc: Exception) -> str:

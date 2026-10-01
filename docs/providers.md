@@ -37,6 +37,33 @@ that provider.
 default. Delivery is recorded in that lane's event log like a served
 checkpoint, so `agent-parley top` reports its delivered context in `CONTEXT`.
 
+### How idle, blocked and prompt states are detected
+
+A lane's state comes from a native hook when its client raises one, and
+otherwise from the launcher's dialog watcher, which reads the lane's own
+terminal, or from the supervision poll's liveness sample of the session
+process. `status`, `top` and `problems` mark a state the watcher or the
+liveness sample set as inferred, for example `blocked: approval 2m; inferred
+by dialog watcher, no PermissionRequest hook`, and name the hook the client
+lacks. `status --json` carries the same reading under each lane's
+`provenance`: its `source`, whether it is `inferred`, and the `gap`.
+
+For an adapter missing `PermissionRequest` or `Stop`, the poll reads the
+dialog the watcher published on every pass while the lane is idle or blocked,
+and records the lane blocked under that dialog's cause, so an approval or
+question prompt still reaches `problems` as a row for the operator.
+
+| Provider | Hooks it cannot raise | Delivery | Idle | Blocked on approval | Other prompts |
+| --- | --- | --- | --- | --- | --- |
+| `claude`, `codex`, `copilot` | none | `hooks` | `Stop` hook | `PermissionRequest` hook | dialog watcher |
+| `gemini` | `PermissionRequest` | `hooks` | `Stop` hook | dialog watcher, read every poll | dialog watcher |
+| `opencode` | `SessionEnd` | `hooks` | `Stop` hook | `PermissionRequest` hook | dialog watcher |
+| `amp` | `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionEnd` | `polled` | liveness sample | dialog watcher, read every poll | dialog watcher |
+
+A hook-delivered lane idle at its prompt receives mail only when something
+makes its client raise a hook, such as a wake the service sends; a polled lane
+reads its delivery file on its own interval.
+
 ## Accounts
 
 ### The three names a lane carries

@@ -24,6 +24,7 @@ exclude:
   - CHANGELOG.md
   - AGENTS.md
   - CLAUDE.md
+  - docs/video
 defaults:
   - scope:
       path: README.md
@@ -103,6 +104,13 @@ defaults:
       description: >-
         Plugin directory submission material for the Agent Parley plugin
         bundle and how to verify each requirement.
+  - scope:
+      path: docs/mcp-directories.md
+    values:
+      title: MCP directory listings
+      description: >-
+        MCP directory manifests for the Agent Parley coordination server,
+        how each is validated, and the owner-only submission steps.
   - scope:
       path: docs/0.11.0-validation.md
     values:

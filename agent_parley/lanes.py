@@ -30,6 +30,7 @@ import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from agent_parley.state import BridgeError, lock
@@ -47,6 +48,7 @@ CAPACITY = "capacity"
 PROMPT = "prompt"
 APPROVAL = "approval"
 CAUSES = frozenset({DIALOG, CAPACITY, PROMPT, APPROVAL})
+PROVIDER_ERROR = "provider error"
 TRANSITIONS: dict[str, frozenset[str]] = {
     "": frozenset({STARTING, WORKING, IDLE, BLOCKED, STOPPED, DEAD}),
     STARTING: frozenset({STARTING, WORKING, IDLE, BLOCKED, STOPPED, DEAD}),
@@ -71,6 +73,8 @@ HOOK_STATES = {
     "Stop": IDLE,
     "SessionEnd": STOPPED,
 }
+INFERENCES = {"dialog": "dialog watcher", "liveness": "liveness"}
+"""Evidence sources that infer a lane state, with the name views print."""
 MAX_EVIDENCE = 200
 MAX_EVENTS = 2000
 SPOOL = "lane-evidence.jsonl"
@@ -792,6 +796,7 @@ def account(
     *,
     has_work: bool,
     owns: bool,
+    idle_cause: str = "",
     now: float | None = None,
 ) -> dict | None:
     """Adds the time since the last poll to a lane's idle and claim totals.
@@ -799,7 +804,11 @@ def account(
     Idle time is time the lane spent `idle`, `blocked`, `stopped` or `dead`
     while claimable or owned work existed. Unaccountable time is time the
     lane owned a claim while it was not `working`. Each total is kept per
-    state and cause, so the largest one can be named. The span since the
+    state and cause, so the largest one can be named. An idle lane records
+    no cause of its own, so the caller can name one it read elsewhere, such
+    as `PROVIDER_ERROR` for a turn that ended on a retryable provider
+    failure, and the gap is charged under `idle: provider error`. The span
+    since the
     last poll is split where the lane last changed state: the part before
     is charged to the state and work the last poll saw, the rest to the
     current ones. A span longer than `ACCOUNT_GAP`, a stopped service,
@@ -813,6 +822,7 @@ def account(
         record: The lane's current state record, or None.
         has_work: Whether claimable or owned work exists for the lane.
         owns: Whether the lane owns an open claim.
+        idle_cause: Cause an idle lane's gap is charged under, or empty.
         now: Unix time of the poll, or None for the current time.
 
     Returns:
@@ -824,6 +834,8 @@ def account(
     ensure(db)
     previous = read_accounts(db, root).get(lane)
     current = label(record)
+    if idle_cause and current == IDLE:
+        current = f"{IDLE}: {idle_cause}"
     totals: dict = {
         "observed": 0.0,
         "idle": 0.0,
@@ -1078,3 +1090,71 @@ def describe(record: dict, now: float | None = None) -> str:
         else (record["state"])
     )
     return f"{named} {held}"
+
+
+def provenance(
+    record: dict | None, unavailable: Iterable[str] = ()
+) -> dict | None:
+    """Names what put a lane in its recorded state and the hook it lacked.
+
+    Every observation reaches a record with its source as the evidence
+    prefix: `apply` writes the hook event, `dialog` for the terminal
+    watcher or `launch` for a launch deadline, and `sample` writes
+    `liveness`. A state the watcher or the liveness sample set is inferred,
+    because no hook of the native client confirmed it. The gap is the hook
+    events that would have confirmed that state when the lane's adapter
+    raises none of them, so a gap is only named where the client truly has
+    no hook for it, never for a state no hook of any client reports.
+
+    Args:
+        record: Lane state record as `read` returns it, or None.
+        unavailable: Hook events the lane's adapter cannot raise, as
+            `roster.unavailable_hooks` names them.
+
+    Returns:
+        The `source` (`hook`, a name in `INFERENCES`, or `supervision`),
+        whether the state is `inferred`, and the `gap` of hook events behind
+        an inferred state, or None when the lane has no record.
+    """
+    if record is None:
+        return None
+    prefix = str(record["evidence"]).partition(": ")[0]
+    inferred = prefix in INFERENCES
+    confirming = [
+        event
+        for event, state in HOOK_STATES.items()
+        if state == record["state"]
+        and (state != BLOCKED or record["cause"] == APPROVAL)
+    ]
+    missing = set(unavailable)
+    return {
+        "source": (
+            "hook"
+            if prefix in HOOK_STATES
+            else INFERENCES.get(prefix, "supervision")
+        ),
+        "inferred": inferred,
+        "gap": (
+            confirming
+            if inferred and confirming and missing.issuperset(confirming)
+            else []
+        ),
+    }
+
+
+def inference(seen: dict | None) -> str:
+    """Words an inferred lane state for the operator views.
+
+    Args:
+        seen: Provenance as `provenance` returns it, or None.
+
+    Returns:
+        Text such as ``inferred by dialog watcher, no PermissionRequest
+        hook``, or an empty string for a hook-confirmed or unrecorded state.
+    """
+    if not seen or not seen["inferred"]:
+        return ""
+    note = f"inferred by {seen['source']}"
+    if seen["gap"]:
+        note += f", no {'/'.join(seen['gap'])} hook"
+    return note

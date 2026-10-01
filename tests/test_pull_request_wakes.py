@@ -1,11 +1,21 @@
 """Checks that a lane is told once when its pull request's state changes."""
 
 import json
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from agent_parley import forge, issues, store, supervision
+from agent_parley import (
+    decisions,
+    forge,
+    issues,
+    problems,
+    store,
+    supervision,
+    tables,
+)
 
 SHA = "a" * 40
 NEXT = "b" * 40
@@ -188,6 +198,7 @@ def test_the_forge_reading_reduces_checks_to_one_verdict(monkeypatch, tmp_path):
             ],
             "mergeable": "CONFLICTING",
             "closingIssuesReferences": [{"number": 4}],
+            "files": [{"path": "b.py"}, {"path": "a.py"}, {"path": "b.py"}],
         },
         {
             "number": 2,
@@ -226,6 +237,7 @@ def test_the_forge_reading_reduces_checks_to_one_verdict(monkeypatch, tmp_path):
     assert (two["checks"], two["failing"]) == ("pending", [])
     assert three["checks"] == "green" and four["checks"] == "none"
     assert four["mergeable"] == "UNKNOWN"
+    assert one["files"] == ["a.py", "b.py"] and four["files"] == []
 
 
 def test_the_forge_reading_reports_absence_instead_of_raising(
@@ -241,3 +253,250 @@ def test_the_forge_reading_reports_absence_instead_of_raising(
     assert forge.open_pull_requests(tmp_path) is None
     forge.select(tmp_path, {"forge": "null"})
     assert forge.open_pull_requests(tmp_path) is None
+
+
+STARTED = [{"name": "wsl", "state": "queued", "started": 1.0}]
+
+
+def backdate(directory, seconds):
+    """Moves the recorded pending clock of pull request 7 into the past."""
+    path = directory / supervision.PULL_REQUEST_RECORD
+    record = json.loads(path.read_text())
+    record["pull_requests"]["7"]["pending_since"] -= seconds
+    path.write_text(json.dumps(record))
+
+
+def stalls(bridge):
+    """Returns the stalled-checks notices the Claude lane received."""
+    return [
+        notice
+        for notice in received(bridge, "claude")
+        if "checks pending over" in notice
+    ]
+
+
+def stalled_rows(directory):
+    """Returns the checks-stalled problem rows the record yields."""
+    return problems._checks_rows(directory, "root", time.time())
+
+
+def test_a_head_pending_past_the_ceiling_is_announced_once(
+    bridge, project, monkeypatch
+):
+    pending = reading(project, pending=STARTED)
+    observe(bridge, project, monkeypatch, pending)
+    observe(bridge, project, monkeypatch, pending)
+    assert stalls(bridge) == []
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, pending)
+    observe(bridge, project, monkeypatch, pending)
+    notices = stalls(bridge)
+    assert len(notices) == 1
+    assert "checks pending over 60 min: wsl queued" in notices[0]
+    assert "gh run rerun --failed" in notices[0]
+    rows = stalled_rows(project)
+    assert [row["participant"] for row in rows] == ["claude"]
+    assert rows[0]["condition"] == problems.CHECKS
+    assert "#7 checks pending: wsl queued" in rows[0]["detail"]
+    assert rows[0]["seconds"] >= supervision.CHECKS_STALLED_SECONDS
+
+
+def test_a_new_head_restarts_the_pending_clock(bridge, project, monkeypatch):
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(
+        bridge,
+        project,
+        monkeypatch,
+        reading(project, sha=NEXT, pending=STARTED),
+    )
+    assert stalls(bridge) == []
+    assert stalled_rows(project) == []
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, reading(project, checks="green"))
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    assert stalls(bridge) == []
+    record = json.loads((project / supervision.PULL_REQUEST_RECORD).read_text())
+    assert time.time() - record["pull_requests"]["7"]["pending_since"] < 60
+
+
+def test_a_forge_without_start_times_is_never_stalled(
+    bridge, project, monkeypatch
+):
+    unknown = [{"name": "wsl", "state": "queued", "started": None}]
+    observe(bridge, project, monkeypatch, reading(project, pending=unknown))
+    backdate(project, supervision.CHECKS_STALLED_SECONDS + 1)
+    observe(bridge, project, monkeypatch, reading(project, pending=unknown))
+    observe(bridge, project, monkeypatch, reading(project))
+    assert received(bridge, "claude") == []
+    assert stalled_rows(project) == []
+
+
+def test_the_ceiling_doubles_the_longest_declared_job_timeout(tmp_path):
+    assert (
+        supervision.checks_ceiling(tmp_path)
+        == supervision.CHECKS_STALLED_SECONDS
+    )
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "check.yml").write_text(
+        "jobs:\n  a:\n    timeout-minutes: 20\n  b:\n    timeout-minutes: 45\n"
+    )
+    assert supervision.checks_ceiling(tmp_path) == 5400.0
+
+
+def test_status_shows_the_pending_age_and_the_stall():
+    pull = {"number": 7, "checks": "pending", "mergeable": "MERGEABLE"}
+    assert tables.pull_cell({"pull_request": pull}) == "#7 CI pending"
+    pull.update(pending_seconds=4500, stalled=True)
+    assert tables.pull_cell({"pull_request": pull}) == (
+        "#7 CI pending 75m, stalled"
+    )
+
+
+def test_the_forge_reading_keeps_each_pending_check_start(
+    monkeypatch, tmp_path
+):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    records = [
+        {
+            "number": 1,
+            "statusCheckRollup": [
+                {
+                    "name": "wsl",
+                    "status": "QUEUED",
+                    "startedAt": "2026-09-29T12:45:00Z",
+                },
+                {
+                    "name": "macos",
+                    "status": "IN_PROGRESS",
+                    "startedAt": "0001-01-01T00:00:00Z",
+                },
+                {"context": "ci/legacy", "state": "PENDING"},
+                {
+                    "name": "lint",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(forge, "_run", lambda *args: json.dumps(records))
+    (one,) = forge.open_pull_requests(tmp_path)
+    assert one["checks"] == "pending"
+    assert one["pending"] == [
+        {
+            "name": "wsl",
+            "state": "queued",
+            "started": datetime.fromisoformat(
+                "2026-09-29T12:45:00+00:00"
+            ).timestamp(),
+        },
+        {"name": "macos", "state": "in_progress", "started": None},
+        {"name": "ci/legacy", "state": "pending", "started": None},
+    ]
+
+
+def test_the_forge_reading_names_a_failed_and_a_never_started_check(
+    monkeypatch, tmp_path
+):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    records = [
+        {
+            "number": 1,
+            "statusCheckRollup": [
+                {
+                    "name": "test",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                },
+                {
+                    "name": "build",
+                    "status": "COMPLETED",
+                    "conclusion": "STARTUP_FAILURE",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(forge, "_run", lambda *args: json.dumps(records))
+    (one,) = forge.open_pull_requests(tmp_path)
+    assert one["checks"] == "red"
+    assert one["failed"] == [
+        {"name": "test", "conclusion": "failure", "not_started": False},
+        {
+            "name": "build",
+            "conclusion": "startup_failure",
+            "not_started": True,
+        },
+    ]
+
+
+def failed_rows(directory):
+    """Returns the checks-failed problem rows the record yields."""
+    return problems._checks_failed_rows(directory, "root", time.time())
+
+
+def refused_rows(directory):
+    """Returns the checks-refused problem rows the record yields."""
+    return problems._checks_refused_rows(directory, "root", time.time())
+
+
+FAILED = [{"name": "test", "conclusion": "failure", "not_started": False}]
+REFUSED = [
+    {"name": "billing", "conclusion": "startup_failure", "not_started": True}
+]
+
+
+def test_a_red_required_check_is_one_problems_entry(
+    bridge, project, monkeypatch
+):
+    red = reading(project, checks="red", failing=["test"], failed=FAILED)
+    observe(bridge, project, monkeypatch, red)
+    rows = failed_rows(project)
+    assert len(rows) == 1
+    assert rows[0]["condition"] == problems.CHECKS_FAILED
+    assert rows[0]["participant"] == "claude"
+    assert "test failure" in rows[0]["detail"]
+    assert "attempt 1" in rows[0]["detail"]
+    assert refused_rows(project) == []
+
+
+def test_a_rerun_that_ends_red_again_counts_a_second_attempt(
+    bridge, project, monkeypatch
+):
+    red = reading(project, checks="red", failing=["test"], failed=FAILED)
+    observe(bridge, project, monkeypatch, red)
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    observe(bridge, project, monkeypatch, red)
+    rows = failed_rows(project)
+    assert "attempt 2" in rows[0]["detail"]
+
+
+def test_three_pull_requests_sharing_a_not_started_cause_are_one_row(
+    bridge, project, monkeypatch
+):
+    readings = [
+        reading(
+            project,
+            number=number,
+            branch="",
+            checks="red",
+            failing=["billing"],
+            failed=REFUSED,
+        )
+        for number in (7, 8, 9)
+    ]
+    observe(bridge, project, monkeypatch, *readings)
+    rows = refused_rows(project)
+    assert len(rows) == 1
+    assert rows[0]["condition"] == problems.CHECKS_REFUSED
+    assert rows[0]["count"] == 3
+    assert "#7" in rows[0]["detail"] and "#9" in rows[0]["detail"]
+    assert failed_rows(project) == []
+    opened = json.loads((project / decisions.RECORD_NAME).read_text())
+    [record] = opened.values()
+    assert record["kind"] == "checks_not_started"
+    assert "3 pull requests blocked" in record["question"]
+    assert record["state"] == decisions.OPEN

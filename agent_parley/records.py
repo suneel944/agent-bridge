@@ -60,6 +60,12 @@ THROTTLED = re.compile(
     r"(?:429|5\d\d)\b",
     re.IGNORECASE,
 )
+TRANSPORT = re.compile(
+    r"server error|mid-response|network error|request timed out"
+    r"|connection (?:error|reset|refused|closed)"
+    r"|stream (?:error|disconnected|closed)",
+    re.IGNORECASE,
+)
 RESET_CLOCK = re.compile(
     r"resets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"
     r"\s*\(([A-Za-z]+(?:/[A-Za-z_+-]+)+)\)",
@@ -254,7 +260,11 @@ def _capacity_state(text: str) -> str | None:
     which is retryable. An overload report and a bare status report such as
     ``API Error: 529`` or ``HTTP 429`` are read last, and a status number
     counts only next to an explicit API, HTTP or status label, so ordinary
-    error prose that merely mentions a number is no evidence.
+    error prose that merely mentions a number is no evidence. A transport
+    failure, such as a server error mid-response or a dropped stream, is read
+    last as retryable: the request never finished, so the same request can be
+    sent again, while a rejected request such as ``400 Bad Request`` names no
+    such failure and stays unclassified.
 
     Args:
         text: Provider-authored refusal text from one error envelope.
@@ -269,7 +279,7 @@ def _capacity_state(text: str) -> str | None:
         return "retryable"
     if WEAK_EXHAUSTION.search(text):
         return "exhausted"
-    if THROTTLED.search(text):
+    if THROTTLED.search(text) or TRANSPORT.search(text):
         return "retryable"
     return None
 
@@ -394,8 +404,10 @@ def _codex_capacity(record: dict) -> dict | None:
     """Reads one validated Codex capacity observation.
 
     Codex wraps each rollout record in a payload naming its own kind, so the
-    reader matches refusal text only on an error. Token-count events carry
-    structured rate limits and prove a successful request.
+    reader matches refusal text only on an error. A stream error whose text
+    names no capacity state is still retryable, because Codex writes it only
+    when the response stream broke before the request finished. Token-count
+    events carry structured rate limits and prove a successful request.
 
     Args:
         record: One parsed rollout record.
@@ -412,7 +424,10 @@ def _codex_capacity(record: dict) -> dict | None:
         return None
     kind = str(payload.get("type", ""))
     if kind in ("error", "stream_error"):
-        return _text_capacity(str(payload.get("message", "")), at)
+        observation = _text_capacity(str(payload.get("message", "")), at)
+        if observation is None and kind == "stream_error":
+            return {"state": "retryable", "observed_at": at}
+        return observation
     if kind != "token_count":
         return None
     info = payload.get("info")
@@ -684,6 +699,52 @@ def reported_tokens(home: Path, participant: dict, cache: dict) -> int | None:
         return None
     cache[key] = reading
     return int(reading["tokens"])
+
+
+def child_activity(
+    home: Path, participant: dict, paths: Iterable[Path]
+) -> tuple[int, float | None]:
+    """Counts native sessions recorded under worktrees a lane made itself.
+
+    A lane's own worktree is read by `reported_tokens`; this reads the
+    worktrees Git registers beyond it, so a session a lane started through
+    its own shell, in a worktree it added for a pull request or a
+    sub-task, is still attributed to it. The same provider session layout
+    is read for each worktree: a Claude project directory named after the
+    worktree path, or a recent Codex rollout whose own record names it.
+
+    Args:
+        home: Private bridge state root.
+        participant: Manifest entry naming the lane, provider and account.
+        paths: Worktrees Git registers and attributes to this lane, its own
+            lane worktree excluded.
+
+    Returns:
+        How many session records were found across those worktrees, and the
+        most recent modification time among them, or None when none were
+        found or the provider publishes no session layout.
+    """
+    try:
+        entry = roster.provider(home, str(participant.get("provider", "")))
+        sources = SOURCES[str(entry.get("adapter", ""))]
+        config = _config_home(home, entry, participant.get("credential"))
+    except (BridgeError, KeyError, ValueError):
+        return 0, None
+    if config is None:
+        return 0, None
+    count = 0
+    latest: float | None = None
+    for path in paths:
+        try:
+            found = sources(config, path)
+        except OSError:
+            continue
+        for record_path in found:
+            count += 1
+            stamp = _mtime(record_path)
+            if stamp > 0 and (latest is None or stamp > latest):
+                latest = stamp
+    return count, latest
 
 
 def lane_sources(

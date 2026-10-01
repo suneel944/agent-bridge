@@ -105,11 +105,23 @@ def test_required_checks_keep_their_names_and_gate_the_aggregator():
     assert jobs["macos"]["name"] == "python (3.12, macos-latest)"
     assert {"check", "wsl", "secrets"} <= set(jobs)
     assert "if" not in jobs["secrets"]
-    assert set(jobs["check"]["needs"]) == {"changes", "python", "macos"}
+    assert set(jobs["check"]["needs"]) == {
+        "changes",
+        "python",
+        "macos",
+        "install",
+    }
     assert jobs["check"]["if"] == "always()"
+    assert jobs["install"]["if"] == jobs["macos"]["if"]
+    assert jobs["install"]["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "macos-latest",
+    ]
     script = jobs["check"]["steps"][0]["run"]
     assert 'test "$CHANGES" = success' in script
     assert 'test "$MACOS" = skipped' in script
+    assert 'test "$INSTALL" = skipped' in script
+    assert 'test "$INSTALL" = success' in script
     assert workflow["concurrency"]["cancel-in-progress"] == (
         "${{ github.ref != 'refs/heads/main' }}"
     )

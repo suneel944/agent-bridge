@@ -221,7 +221,12 @@ reported.
         and only where the operator recorded the opt-in for this project or
         this lane, the launch allows that one MCP server through those native
         settings. No other tool is named, no permission decision is weakened
-        and no bypass flag is ever passed.
+        and no bypass flag is ever passed. A lane without that opt-in that the
+        service could resume is named on standard error, because the service
+        withholds its resume rather than start a session nobody can answer.
+        A client whose adapter `denials.EVENTS` names also runs the lane's
+        hook on the event reporting a refused tool call, so the refusal
+        reaches the operator as a decision.
 
         Args:
             agent: Participant name within the project.
@@ -259,6 +264,7 @@ reported.
             process,
             protocol,
             roster,
+            shlex,
             shutil,
             store,
             subprocess,
@@ -277,9 +283,14 @@ reported.
         if stopped:
             raise BridgeError(
                 f"The run budget is exhausted ({stopped['cause']}), so no "
-                f"lane is launched or resumed; {budgets.RESUME}."
+                f"lane is launched or resumed; {budgets.RESUME}.",
+                next_command="agent-parley budget resume",
             )
         data = self.add_participant(repo, agent, provider, credential)
+        if supervision.opt_in_missing(self.home, data, agent):
+            print(
+                supervision.OPT_IN_WARNING.format(name=agent), file=sys.stderr
+            )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
         account = roster.launch_environment(
@@ -298,7 +309,8 @@ reported.
             declared = protocol.installed(manifest)
             if not protocol.compatible(declared):
                 raise BridgeError(
-                    protocol.mismatch("installed plugin", declared)
+                    protocol.mismatch("installed plugin", declared),
+                    next_command=f"agent-parley setup {shlex.quote(str(repo))}",
                 )
         missing = [
             event
@@ -350,7 +362,18 @@ reported.
                         }
                     },
                 )
-                native: dict = {"hooks": hooks}
+                from agent_parley import denials
+
+                native: dict = {
+                    "hooks": {
+                        **hooks,
+                        **{
+                            event: hooks["PreToolUse"]
+                            for event, adapter in denials.EVENTS.items()
+                            if adapter == entry["adapter"]
+                        },
+                    }
+                }
                 if dialogs.pre_approved(data, agent):
                     native["permissions"] = {
                         "allow": [protocol.TOOL_PREFIX, protocol.cli_rule()]

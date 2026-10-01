@@ -10,7 +10,7 @@ Repository installation does not imply public directory approval. The Codex
 listing went live on 2026-09-14 at
 `https://chatgpt.com/plugins/plugins_6aa7c91c25008191ad715f14756e5deb`, and
 the submission archive has been attached to every release from v0.6.0 through
-v0.13.0; each new version still needs a manual portal upload, because neither
+v0.14.0; each new version still needs a manual portal upload, because neither
 catalog offers a publishing API. The Claude submission was made on 2026-09-14
 through the Console form and was still awaiting review on 2026-09-26; a code
 search of `anthropics/claude-plugins-official` for `agent-parley` returned no

@@ -37,7 +37,15 @@ import sqlite3
 import time
 from pathlib import Path
 
-from agent_parley import checkpoints, notify, process, records, roster, store
+from agent_parley import (
+    checkpoints,
+    notify,
+    process,
+    reclaim,
+    records,
+    roster,
+    store,
+)
 from agent_parley.state import BridgeError, lock, write_json
 
 UNITS = {"tokens": "tokens", "calls": "calls", "hours": "h"}
@@ -107,9 +115,11 @@ def consumption(
             lane without a token budget never has its transcript parsed.
 
     Returns:
-        Tokens the lane's client recorded, or None when unreadable or not
-        wanted; calls served for it; hours its recorded session process has
-        been alive, zero when no live session is recorded.
+        Tokens the lane's client recorded, including sessions its own shell
+        started in a worktree it made for a pull request or a sub-task, or
+        None when unreadable or not wanted; calls served for it; hours its
+        recorded session process has been alive, zero when no live session
+        is recorded.
     """
     participant = manifest["participants"][name]
     hours = 0.0
@@ -120,12 +130,17 @@ def consumption(
             state.get("session_pid"), state.get("session_ticks")
         ):
             hours = max(0.0, time.time() - float(started)) / 3600
+    tokens = None
+    if "tokens" in wanted:
+        tokens = records.reported_tokens(home, participant, cache)
+        for child in reclaim.child_worktrees(directory, manifest, name):
+            added = records.reported_tokens(
+                home, {**participant, "lane": str(child)}, cache
+            )
+            if added is not None:
+                tokens = (tokens or 0) + added
     return {
-        "tokens": (
-            records.reported_tokens(home, participant, cache)
-            if "tokens" in wanted
-            else None
-        ),
+        "tokens": tokens,
         "calls": int(usage.get(participant["display"], {}).get("calls", 0)),
         "hours": round(hours, 2),
     }

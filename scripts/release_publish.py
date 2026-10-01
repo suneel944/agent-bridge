@@ -72,6 +72,7 @@ def asset_names(version: str) -> set[str]:
         f"agent-parley-plugins-{version}.zip",
         f"agent-parley-{version}-codex-skills.zip",
         "requirements.txt",
+        "install.sh",
         "CHANGELOG.md",
         "RELEASE_NOTES.md",
     }
@@ -726,6 +727,10 @@ def bump(root: Path, baseline: str, approved: str, version: str) -> None:
     marketplace = json.loads(path.read_text())
     marketplace["plugins"][0]["version"] = version
     path.write_text(json.dumps(marketplace, indent=2) + "\n")
+    path = root / "server.json"
+    server = json.loads(path.read_text())
+    server["version"] = version
+    path.write_text(json.dumps(server, indent=2) + "\n")
     (root / MANIFEST_PATH).write_text(
         json.dumps({".": version}, indent=2) + "\n"
     )

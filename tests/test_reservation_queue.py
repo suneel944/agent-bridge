@@ -235,6 +235,38 @@ def test_only_the_first_queued_lane_takes_the_released_key(
     ]
 
 
+def test_two_lanes_queue_in_order_for_a_branchs_merge_turn(
+    bridge, repo, paired
+):
+    key = "merge:integration/0.15.0"
+    holder = actor(bridge, paired["root"], "claude")
+    peer = actor(bridge, paired["root"], "codex")
+    reserve(bridge, holder, key, reason="rebase and gate before merging")
+    result = request(bridge, peer, key)
+    assert result["granted"] == []
+    assert result["queued"] == [
+        {
+            "id": result["queued"][0]["id"],
+            "path": key,
+            "owner": "claude",
+            "position": 1,
+        }
+    ]
+    released = release(bridge, holder)
+    assert released["granted"] == [
+        {
+            "agent": "codex",
+            "paths": [key],
+            "message_id": released["granted"][0]["message_id"],
+        }
+    ]
+    assert store.active_reservations(bridge.home, paired["root"]) == {
+        "codex": [key]
+    }
+    notice = inbox(bridge, peer)[0]
+    assert notice["subject"] == f"Reservation granted: {key}"
+
+
 def test_asking_again_keeps_the_first_request_and_its_place(
     bridge, repo, paired
 ):

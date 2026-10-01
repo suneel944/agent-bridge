@@ -296,16 +296,23 @@ def satisfied(record: dict) -> bool:
     `ended_on_forge`. The operator merging or closing by hand ends the work
     as surely as verified integration does, and nothing else would ever
     clear the edge. A reclaim drops the mark, so a reopened blocker holds
-    its dependents again.
+    its dependents again. A blocker whose issue the forge reports closed
+    while a lane still holds it is satisfied too: a dead holder never
+    releases it, so its dependents would otherwise wait for nothing.
 
     Args:
         record: Ledger record of the blocking issue, or an empty mapping.
 
     Returns:
-        True when the blocker is complete or ended on the forge.
+        True when the blocker is complete, ended on the forge, or closed on
+        the forge.
     """
-    return state(record)["state"] == COMPLETE or bool(
-        record.get("ended_on_forge")
+    from agent_parley import issues
+
+    return (
+        state(record)["state"] == COMPLETE
+        or bool(record.get("ended_on_forge"))
+        or bool(record and issues.closed(record))
     )
 
 
@@ -796,15 +803,20 @@ def resolve(
     outcome: str,
     actor: str,
     reason: str = "",
+    claim_id: str | None = None,
 ) -> dict:
     """Ends a claim whose holder never answered its completion reminder.
 
-    This is the operator's transition, not the holder's, and it is recorded as
-    its own action so history never reads as though the lane filed the work
-    itself. It is reachable only for a claim the supervisor has escalated as
-    an unresolved completion, so a holder that answers is never resolved out
-    from under it, and only for evidence the caller has already correlated
-    with the current ownership generation.
+    This is the operator's or the service's transition, not the holder's,
+    and it is recorded as its own action so history never reads as though
+    the lane filed the work itself. The operator reaches it only for a claim
+    the supervisor has escalated as an unresolved completion, so a holder
+    that answers is never resolved out from under it. The supervisor reaches
+    it without an escalation by naming the claim its forge reading observed,
+    once a merged pull request closed the issue inside that generation, so a
+    claim taken again since that reading is never ended by it. Either way
+    the caller has already correlated the evidence with the current
+    ownership generation.
 
     A merged pull request names the commit that carries the work, so the
     ``complete`` outcome records that commit and frees the issues waiting on
@@ -821,13 +833,16 @@ def resolve(
         outcome: ``complete`` for merged work, ``release`` to requeue it.
         actor: Operator identity recording the transition.
         reason: Operator rationale kept beside the evidence.
+        claim_id: Claim the supervisor observed ending on the forge, which
+            stands in for the escalation and must still be current.
 
     Returns:
         The resolved issue record.
 
     Raises:
         BridgeError: If the issue is unheld, carries no escalation for its
-            current generation, or the evidence does not support the outcome.
+            current generation, holds a claim other than `claim_id`, or the
+            evidence does not support the outcome.
     """
     if outcome not in ("complete", "release"):
         raise BridgeError("Resolution outcome must be complete or release.")
@@ -845,7 +860,13 @@ def resolve(
         if not record or not record.get("owner"):
             raise BridgeError(f"Issue #{issue} has no owner.")
         escalation = record.get("unresolved_completion") or {}
-        if escalation.get("claim_id") != record.get("claim_id"):
+        if claim_id is not None:
+            if claim_id != record.get("claim_id"):
+                raise BridgeError(
+                    f"Issue #{issue} was claimed again after the forge "
+                    "reading that ended it."
+                )
+        elif escalation.get("claim_id") != record.get("claim_id"):
             raise BridgeError(
                 f"Issue #{issue} has no unresolved completion; the supervisor "
                 "escalates only after the holder leaves its completion "

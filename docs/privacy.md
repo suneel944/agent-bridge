@@ -49,9 +49,20 @@ repository, the lane, its provider, the event, the issue or offer, and the
 dialog text involved, capped at 1,536 bytes. With `AGENT_PARLEY_INBOUND` set
 to `telegram` and an `AGENT_PARLEY_INBOUND_PASSCODE`, the service long-polls
 the same bot and answers a passcoded `status` query from the configured chat
-with a status reading; no other command is accepted.
-These settings and secrets are read from the environment and never written
-into coordination state.
+with a status reading. It also records answers to decisions, given by a
+button tap in the configured chat or by a passcoded `decide` message; the
+decision record keeps the option, the Telegram user identifier that chose
+it, the time and any note, capped at 1,024 bytes, and the lane receives the
+answer as mail. An answer to a native dialog is instead pressed as that
+option's key on the lane's terminal, and a note is never typed there. No
+other command is accepted.
+These settings and secrets are read from the environment, or from
+`notify.json` in the state directory when `agent-parley notify setup` stored
+them. That command reads the bot token and passcode from a hidden prompt or
+standard input, never from its arguments, prints neither, and writes the file
+with mode `0600`. A variable set in the environment overrides the stored
+value. The file is read by the process that sends or polls and is never
+copied into a lane's environment or into coordination state.
 
 There is no analytics, no crash reporting, no license check and no account.
 The publisher receives no data from your use of the software.

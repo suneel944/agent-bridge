@@ -2,6 +2,37 @@
 
 ## Install and upgrade
 
+One command installs everything on Linux, macOS and WSL2:
+
+```sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/install.sh | sh
+```
+
+`install.sh` installs uv through its official installer only when uv is
+missing, with `UV_NO_MODIFY_PATH=1` so no shell startup file is edited. It then
+runs `uv tool install agent-parley`, or `uv tool upgrade agent-parley` when the
+tool is already installed, followed by `agent-parley plugins install` and
+`agent-parley doctor`, and prints the next command. It never uses sudo. When
+uv's directory is not on PATH it prints the exact `export PATH=...` line to add.
+Re-running it upgrades in place. Setting `AGENT_PARLEY_SPEC` to another package
+spec, such as a built wheel path, installs that instead with
+`uv tool install --force`, on every run; CI uses it to install the code under
+test in a clean home on Ubuntu and macOS. Native Windows is refused with the WSL2
+pointer described under [Platforms](#platforms). Each release attaches
+`install.sh` and lists its SHA-256 in `SHA256SUMS`, so it can be checked before
+it runs:
+
+```sh
+curl -LsSfO https://github.com/suneel944/agent-parley/releases/latest/download/install.sh
+curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/SHA256SUMS | grep ' install.sh$' | shasum -a 256 -c -
+sh install.sh
+```
+
+`agent-parley plugins install` is the plugin step on its own: it adds the
+marketplace and plugin to each of `claude` and `codex` found on PATH, skipping
+what their listings already hold, and `agent-parley plugins status` reports
+that state without writing. The manual steps follow.
+
 Installing needs no clone. `uv tool install agent-parley` takes the published
 distribution from PyPI. `uv tool install git+https://github.com/suneel944/agent-parley`
 tracks the default branch instead, and a release wheel URL pins an exact
@@ -428,19 +459,21 @@ condition, that count, its age and what clears it:
 | `inactive` | A live lane published no native activity inside `inactive_after`. | Whatever the lane's state allows, from the remedy table below. |
 | `wake attention` | The service's last wake of the lane was refused because operator input is pending, the client is waiting for a native approval or the previous accepted wake produced no checkpoint, or the wake needs operator attention. | Whatever the lane's state allows, from the remedy table below. |
 | `waiting on approval` | The lane's client has waited on a native tool approval prompt for longer than `--ack-after`. | Answer the prompt in the lane's own terminal. |
-| `held by a native dialog` | The launcher escalated a native dialog it could not answer; the row names the dialog and the options it offers. | Answer the prompt in the lane's own terminal. |
+| `held by a native dialog` | The launcher escalated a native dialog it could not answer; the row names the dialog and the options it offers. | Answer its decision from the chat, or the prompt in the lane's own terminal. |
 | `second session` | Another client process is sending hooks under the lane's identity; its events are ignored. The row names its session and process. | Stop that process, or run it outside the lane's worktree. |
 | `overdue claim` | One or more held issues are past their recorded deadline. A claim whose current generation reported ready or was verified complete is never overdue. | `agent-parley issue release NUMBER` for the oldest, named in the row. |
 | `claims over cap` | A lane holds more claims than `max_claims_per_lane`, from a ledger written before every ownership path was capped or a cap lowered after the claims were taken. The count is the excess. | `agent-parley issue release NUMBER` for the highest-numbered claim, named in the row, or an offer to a peer. |
-| `unanswered offer` | One or more handoff offers to the same lane have no answer yet. | `agent-parley issue cancel NUMBER`, or `issue assign NUMBER --unassign` for an operator offer. |
+| `unanswered offer` | One or more handoff offers to the same lane have no answer yet. Past the offer's own deadline the supervisor cancels it back to the lane that made it; this row can still show it in the gap before the next poll. | `agent-parley issue cancel NUMBER`, or `issue assign NUMBER --unassign` for an operator offer. |
+| `unanswered request` | One or more peer takeover requests wait on the same holder, past the request's own deadline. Its `takeover_grace`, not this row, decides whether it is later granted as an offer. | `agent-parley issue accept NUMBER --offer-id ID` or `issue decline`, or `issue assign NUMBER --unassign` to withdraw it. |
 | `unresolved completion` | One or more claimed issues read closed on the forge, or merged or closed on the lane branch when the forge cannot say, and their holder left `completion_reminders` reminders unanswered. | `agent-parley issue resolve NUMBER` for the oldest, named in the row, with `--release` when the pull request was closed without merging. |
 | `not converging` | A claim's repeated failing verification results outlasted the request to change approach with no verified improvement, so its convergence account escalated. One row per claim; the holder keeps it. | `agent-parley issue show NUMBER` to read the account, then hand off, reassign or redirect the lane explicitly. |
 | `awaiting acknowledgement` | Messages needing acknowledgement have waited past `--ack-after`, which defaults to `stalled_after`. | Whatever the lane's state allows, from the remedy table below. |
-| `holding a refused key` | A lane that is not active refused a peer a reserved key and still holds it. The row names the refused lanes and how long the holder has been quiet. | Whatever the lane's state allows, from the remedy table below; an expired lease of a holder observed idle past `inactive_after` is also reclaimed by the next sweep. |
+| `holding a refused key` | A lane that is not active refused a peer a reserved key and still holds it. The row names the refused lanes, how long the holder has been quiet and its release deadline (`KEY_HOLD_DEADLINE`, 900 seconds from the first quiet sighting). | Before the deadline, whatever the lane's state allows, from the remedy table below; past it, the operator decides: tell the holder to release, or let the refused lanes wait. An expired lease of a holder observed idle past `inactive_after` is also reclaimed by the next sweep. |
 | `bounced share` | A share the sender is still waiting on reached a recipient that cannot act on it. The row sits on the sender's lane. | Whatever the first blocked recipient's state allows, from the remedy table below. |
 | `shares to a retired lane` | Retirement superseded shares the lane still owed; the row sits on the retired lane, counts them and lasts while their acknowledgement deadlines run, or one day for a share without one. It is informational. | Nothing; the row clears when those deadlines pass. |
 | `recovery refused` | An `issue recover` approval could not proceed on the last poll, because the owner is idle, paused, at an approval prompt or on another session, or the approval is gone. The row sits on the owner's lane, names the issue and the reason, and lasts while the refused claim is the issue's current claim. | Clear what the reason names in the owner's lane; the service retries the recovery on every poll. |
 | `integration unverified` | The base checkout carries a merge that failed its gate, conflicted or was interrupted, or the record of one cannot be read. One row per project, on the lane that may repair it, naming the kind, the attempt and the gate result; every further merge is held. | The step the row names: rerun `agent-parley participant merge NAME` after the repair, `--renew-recovery` once attempts are used, or `agent-parley participant merge --verify-recovery` when no lane may repair it. See [Recovering an unverified integration](#recovering-an-unverified-integration). |
+| `crossing ready` | The project records an integration base, no claim is held, at least one issue landed there by a merged pull request is still open on the forge, and the cached reading holds every open issue. One row per project names the landed issues still open and ages from the newest landing or the newest claim end, whichever is later; with notifications configured it opens one decision, which never applies anything. The decision opens only while that age is under one day. | `gh pr create --head BRANCH`, naming each landed issue as `Closes #N`; review and merge it yourself, since that merge cannot be undone. |
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
@@ -689,14 +722,16 @@ why a key is worth reusing for a retry and not for bookkeeping.
 
 ### Deadlines and attempt budgets
 
-A claim, a handoff offer and an acknowledgement can carry a deadline:
+A claim, a handoff offer, a takeover request and an acknowledgement can
+carry a deadline:
 
 ```sh
 agent-parley issue claim 42 --within 2h
 agent-parley issue offer 42 --to codex --summary "commit, checks" --within 30m
+agent-parley issue request 42 --summary "claude is idle" --within 30m
 agent-parley say codex "Confirm the schema change" --ack --within 15m
 agent-parley deadlines show
-agent-parley deadlines set --claim 4h --offer 30m --ack 15m --attempts 3
+agent-parley deadlines set --claim 4h --offer 30m --request 30m --ack 15m --attempts 3
 ```
 
 **An overdue claim moves only when its holder is silent.** Past its deadline
@@ -714,11 +749,11 @@ A lane that reports `blocked` on an issue it still holds spends one attempt.
 budget is another visible state with the same guarantee: what to do about it
 stays the owner's or the operator's decision.
 
-`deadlines set` records the defaults every claim, offer and acknowledgement
-inherits when it passes no `--within`, so lanes carry a budget without repeating
-a flag. Windows take the same units as `--since` (`45m`, `6h`, `7d`), and a
-project that records none gives a claim and an offer a deadline only when they
-ask for one.
+`deadlines set` records the defaults every claim, offer, takeover request and
+acknowledgement inherits when it passes no `--within`, so lanes carry a budget
+without repeating a flag. Windows take the same units as `--since` (`45m`,
+`6h`, `7d`), and a project that records none gives a claim, an offer or a
+request a deadline only when they ask for one.
 
 **Every acknowledgement request carries a deadline.** A send marked
 `ack_required` that names no window takes the project's `--ack` default, and a
@@ -763,6 +798,17 @@ remains the only place an expectation is retired. `problems` carries the same
 reading as a `bounced share` row on the sender's lane while it holds. A request
 the operator sent is not returned this way: that operator is at a terminal and
 already reads it as awaiting acknowledgement.
+
+Mail to a dead lane is returned the same way, whether or not it asked for an
+acknowledgement. Once a lane's state record has read `dead` for 30 minutes
+(`DEAD_MAIL_AFTER`, long enough for a resumable session to have been resumed),
+each delivery to it that has waited 30 minutes and is still unread or
+unacknowledged is superseded with the reason `<lane> dead past 1800s`, which
+also drops it from that lane's wake backlog. Each sender that is a lane gets one
+`Mail returned: <lane> is dead` notice listing the messages, so it can resend
+them to a live peer or hold the work. Mail the operator sent is superseded
+without a notice. Nothing is read, acknowledged or deleted, and other
+recipients keep their delivery.
 
 Deadlines are evaluated when a checkpoint, a `status`, a `top` refresh or a
 served call reads the record, from the stored timestamps. The service gains no
@@ -1067,8 +1113,8 @@ minimum. When the set does not fit, columns are dropped in this order, and
 the header names the ones that went:
 
 ```text
-PROVIDER, EVENT, BRANCH, CONTEXT, CALLS, TOKENS, UNUSED, LEASES, FIT, IDLE,
-REVIEW, ISSUES, DENIALS
+PROVIDER, EVENT, BRANCH, CONTEXT, CALLS, TOKENS, UNUSED, TASK, LEASES, FIT,
+IDLE, REVIEW, ISSUES, DENIALS
 ```
 
 `PARTICIPANT`, `STATE` and `MAIL` are never dropped; if they alone still do
@@ -1597,9 +1643,11 @@ output, on a single line, and exits 1 as it does without `--json`:
 {"schema": "agent-parley/read/v1", "kind": "error", "generated_at": "2026-09-27T10:00:00Z", "error": {"type": "bridge", "message": "No participant named nobody"}}
 ```
 
-`type` is `bridge` for a coordination refusal, `os` for a file or network
-failure, `value` for an invalid value and `timeout` for an external command
-that ran out of time. `message` is the same text the `agent-parley:` line
+`type` is `bridge` for a coordination refusal, `timeout` for an external
+command that ran out of time, `os` for a file or network failure, `missing`
+for an internal lookup that found nothing, `store` for a failure reading or
+writing coordination state, and `value` for anything else, such as an
+invalid value. `message` is the same text the `agent-parley:` line
 prints on standard error, which still appears; no traceback is printed. The
 document goes to standard output so `agent-parley ... --json | jq` reads a
 failure the same way it reads a result. A command that already wrote part of
@@ -1971,7 +2019,30 @@ no lane's reflog moved to, or several did, is attributed to nobody. Only
 when the forge cannot say anything about the issue does the newest pull request
 on the lane branch speak for it, and a lane branch merge never marks a claimed
 issue the forge still reads as open. Issue readings are reused for five
-minutes. Forge lookups are bounded and best effort; an offline forge cannot
+minutes.
+
+A milestone integrated on a branch other than the default branch leaves every
+issue open until that branch crosses, because GitHub closes an issue from
+`Closes #N` only on a merge into the default branch. Record the branch once,
+from the base checkout: `agent-parley branch integration integration/1.0.0`
+(an empty string removes it; lanes are refused). The service then reads, at
+most once per five minutes, and no sooner than one minute after a failed
+read, the newest 100 pull requests merged into that branch, and a claimed
+issue the forge still reads as open whose body a merged pull request closes
+by keyword, inside the claim's generation and from any branch, is observed
+as merged. A keyword inside an HTML comment, a fenced code block or an
+inline code span is ignored, as GitHub ignores it. Like any merged pull request that no other
+lane landed, it ends the claim as complete with actor `supervisor`, the pull
+request, merge commit and base kept in the evidence, so the claim leaves the
+lane, stops counting toward the cap, and is never woken, reminded or offered
+again. `status` prints `Landed in BRANCH: #N (PR #M), ...` for those issues
+until the forge closes them. When no claim is held, at least one landed
+issue is still open and the cached reading holds every open issue,
+`problems` lists one `crossing ready` row, and with
+notifications configured one decision asks the operator to open the crossing
+pull request (`gh pr create --head BRANCH`, naming each issue as `Closes #N`).
+Nothing opens or merges it for you: a merge to the default branch cannot be
+undone. Forge lookups are bounded and best effort; an offline forge cannot
 establish completion. Reminders appear in issue/status output and
 at checkpoints. An explicit subsequent message reaching every waiting peer
 marks a response observed; that is delivery evidence, not proof of a complete
@@ -1998,6 +2069,33 @@ checks or reviews is reported once too. Nothing is merged, rerun or answered
 for the lane. Only the GitHub forge is read; `beads` and `null` read nothing,
 and a forge that is missing, offline or unreadable keeps the last reading and
 wakes nobody without stopping the poll.
+
+A pending run carries its age. Each reading keeps every unfinished check with
+its state (`queued`, `in_progress`, `pending` or `expected`) and start time,
+and records when the current head was first seen pending; a new head or a
+finished run restarts that clock. A head still pending past the ceiling,
+twice the longest literal `timeout-minutes` in `.github/workflows` or 60
+minutes when none is declared (`CHECKS_STALLED_FACTOR`,
+`CHECKS_STALLED_SECONDS`), gets one supervisor message naming each check,
+its state and its age. The message recommends one re-run, `gh run rerun
+--failed` for a run that ended without a conclusion or cancel and re-run for
+one still in progress past its job timeout, and leaves it to the lane; after
+one re-run it is an operator decision. `status` prints the pending age beside
+`CI pending` and marks the head `stalled`, and `problems` lists a `checks
+stalled` row until the head finishes or changes. Nothing is re-run, merged or
+bypassed automatically. A forge whose checks report no start time is never
+marked stalled.
+
+A red verdict also keeps, per head commit, the attempt count and when it was
+first seen red, incrementing once per rerun that ends red again on the same
+commit. `problems` lists one `checks failed` row per pull request naming the
+failing checks and the attempt. A required check the forge reports as never
+started (`action_required` or `startup_failure`) is different: only the
+operator can act on it, so every open pull request sharing the same check
+name and forge conclusion is grouped into one `checks refused` row naming
+every affected pull request, and one decision, opened through
+`decisions.open_or_refresh` and keyed by that check name and conclusion, so
+the operator answers the shared cause once rather than once per lane.
 
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed
@@ -2040,7 +2138,8 @@ accounts that cannot be reconstructed safely require manual attention.
 Wake attempts start one inactivity interval apart and the spacing doubles with
 each attempt, up to one hour. Three attempts on an unchanged backlog exhaust
 it; the lane is then asked hourly rather than never. Work dispatches add their offer generation and
-issue-scoped progress digest to that backlog. Delivery without a claim, handoff
+issue-scoped progress digest to that backlog. An escalated offer generation is not delivered again
+until the lane records progress or a new generation replaces it. Delivery without a claim, handoff
 or other recorded issue progress leaves the obligation pending. Exhaustion
 records the offer, issues, attempt count, last result and operator action in the
 work publication. A `busy:turn`, `busy:input`, or `busy:repeat` answer is not
@@ -2052,7 +2151,12 @@ cursor position reports and focus events do not count as partially entered
 operator input, so they do not refuse the wake. Complete replies are removed
 from the input-state check without hiding operator bytes that arrived in the
 same read; incomplete replies are carried until the next read and refuse a wake
-until they complete.
+until they complete or until half a second passes without another byte. A lone
+Esc therefore resolves as a keypress, as terminal programs resolve it, and adds
+no text. Backspace and delete erase one counted character, so a line typed and
+then erased reads as empty. A `busy:input` refusal in `problems` tells the
+operator to submit or clear the unsent text in the lane's own terminal rather
+than to answer a prompt.
 Wake attempts, backoff, the last result and escalation are fields of the
 lane's state in the store, and every wake decision reads them there. Results
 appear in `status`, the retained event log and private `<name>-wake.json`,
@@ -2218,10 +2322,27 @@ never seen, and a profile is the supported way to say the same thing.
 ### Notifications
 
 The service and the launcher can forward the coordination changes an absent
-operator waits on to a Telegram bot, an email address, or both. Delivery is
-outbound only: no command arrives over the channel, and a native permission
-prompt is still answered only in the lane's terminal. Configuration is entirely
-environment variables; no token or password is written into coordination state.
+operator waits on to a Telegram bot, an email address, or both. Email is
+outbound only. The Telegram bot also carries status queries and decision
+answers back once inbound is on, as described below; with inbound off, no
+command arrives over the channel and a native permission prompt is answered
+only in the lane's terminal. Settings come from the
+environment or from `notify.json` in the state directory, which
+`agent-parley notify setup` writes owner-only. No token or password is written
+into coordination state or copied into a lane's environment.
+
+```sh
+agent-parley notify setup --chat 123456789
+agent-parley notify setup --chat 123456789 --inbound
+```
+
+`notify setup` reads the Telegram bot token, and with `--inbound` the status
+passcode, from a hidden prompt, or from standard input when it is not a
+terminal. It never takes a secret as an argument and never prints one. A
+variable set in the environment overrides the stored value for that process.
+The running service reads inbound settings at start, so restart it after
+storing them. `status`, `doctor` and `up` print one line saying whether
+outbound and inbound are on and, when off, why.
 
 | Variable | Meaning |
 | --- | --- |
@@ -2252,19 +2373,38 @@ These events notify, and nothing else:
 | --- | --- |
 | `handoff_offered` | A handoff is offered to a lane. |
 | `permission_prompt` | A lane is blocked on a native permission prompt. |
+| `permission_denied` | A native permission layer, such as Claude Code's auto mode classifier, refused a lane's tool call without a prompt. |
 | `native_dialog` | A lane is held by a native dialog the launcher escalated. |
+| `lane_blocked` | A lane has stayed blocked (approval, prompt, dialog) for 30 minutes; sent once per block. |
 | `lane_idle` | A lane is idle with no claim past the project's `stalled_after`. |
 | `idle_blocker` | Other issues wait on a claim held by an idle lane. |
 | `non_convergence` | An issue is escalated as not converging. |
+| `key_hold` | A lane kept a key refused to a peer past its release deadline. |
 | `run_budget_exhausted` | The enforced [run budget](#enforcing-a-run-budget) runs out. |
+| `orphan_decision` | A dead lane spent its wake budget while holding orphaned claims; names the live peer that fits, or none, and moves nothing. |
 | `run_finished` | A lane run finished. |
 | `hook_refusal` | A lifecycle hook refused a branch switch or detected branch drift. |
 | `inbound_locked` | Inbound status queries were locked after repeated wrong passcodes. |
 
 Each event is sent once per situation: a digest of the fields that identify it
 is kept per lane in private state, so an unchanged situation sends nothing
-further. Sending never blocks a hook or a tool call; a failed send is recorded
-in the lane's event log and dropped, and nothing is queued for a retry.
+further. Sending never blocks a hook or a tool call.
+
+Every situation that waits on the operator is also recorded as a decision in
+`decisions.json` in the project's private state directory. A decision has a
+stable twelve-character identifier, the options that answer it with one marked
+recommended, whether acting on it can be undone, and an expiry a day out that
+each repeat observation extends; one situation holds exactly one open decision.
+The operator problems `problems` reports, such as a dirty worktree, an
+unresolved completion or a second session, open decisions as well, and a
+decision closes when its problem clears. Delivery is durable: a decision is
+marked sent only after every transport accepted it, and a refused or abandoned
+send is retried on the next supervision poll with a backoff that doubles from
+30 seconds to an hour, so a hook that exits before its send finishes still
+reaches the operator. Decisions due together go out as one digest; on Telegram
+it carries one row of buttons per decision, and every transport shows the text
+reply each takes. Decisions are recorded only while notifications are on, and
+a record holds no credential.
 
 The same Telegram bot can answer status queries. Set
 `AGENT_PARLEY_INBOUND=telegram` and `AGENT_PARLEY_INBOUND_PASSCODE` to a
@@ -2272,15 +2412,69 @@ passcode of at least twelve characters; the bot token and chat identifier are
 the outbound ones. The service long-polls the Bot API, so no port is opened and
 no webhook is registered. A message must start with the passcode, come from the
 configured chat, and carry `status` with the filters `agent-parley status`
-takes; the reply is that reading. Nothing else crosses the channel: no claim,
-handoff, wake, approval or free text into a session. A message from another
-chat, or with a wrong passcode, gets no reply. Five wrong passcodes inside ten
+takes; the reply is that reading.
+
+The bot also takes answers to decisions. A tap on a decision's button is
+admitted without a passcode, because only a member of the configured chat can
+tap a button the bot posted there, and only for an open decision this state
+root issued; a tap from any other chat is dropped. A typed answer is
+`decide ID OPTION [NOTE]` after the passcode, or a reply to a message that
+holds exactly one decision, starting with the option. The answer is recorded
+under the decision lock, so of two answers racing the second is refused with
+the option and the name of whoever answered first; an expired, closed or
+unknown decision is refused the same way. An irreversible option records
+nothing until a second `confirm` tap. The answered message is edited to say
+which option was chosen, by whom and when, and keeps the other decisions'
+buttons. The lane receives the answer as supervisor mail keyed by the
+decision, so a repeat never duplicates it and the unread mail wakes the lane
+on the next supervision poll; the lane then runs the matching command itself.
+A note is quoted in that mail and labelled as not an instruction. Nothing
+else crosses the channel: no claim, handoff, approval or free text is carried
+out for a lane, and nothing is typed into a session except the option key of
+a native dialog, described below. A message from another chat, or with a
+wrong passcode, gets no reply. Five wrong passcodes inside ten
 minutes lock the inbound path for an hour and send one `inbound_locked`
 notification; the counter and the lock live only in memory. Only a salted hash
 of the passcode is held, compared in constant time, and never written to state
 or logs. The reader refuses to start when the passcode is unset or too short,
 and `status` prints that fault on its `Inbound:` line and under `inbound` in
 `status --json`.
+
+A native dialog the launcher escalates, such as a tool permission prompt, a
+hook trust review or the client's question picker, is recorded as a decision
+offering the options the screen draws, less a question picker's free-text
+option, since chat text is never typed into a lane. A permission or trust
+prompt recommends its refusing option, and an option that widens a
+permission, such as switching to auto mode or not asking again, takes the
+same `confirm` tap as an irreversible one. The answer is not mailed: the
+launcher re-reads the screen on its next pass and, only while it still draws
+that same dialog, claims the answer under the decision lock and presses the
+chosen option's digit, once. A screen that changed first retires the
+decision as `stale`, so a later tap is refused and an answer already given is
+never pressed on another dialog; the new screen is asked about afresh. A
+prompt the launcher cannot read is sent as terminal-only and answered at the
+lane's terminal. Nothing is ever answered on expiry.
+
+A tool call a native permission layer refuses without drawing a prompt is
+recorded as a `permission_denied` decision. Today that is Claude Code's auto
+mode classifier: every Claude Code lane runs its hook on the
+`PermissionDenied` event, which the `claude` CLI raises with the tool,
+its input and the classifier's reason, such as `Interfere With Workloads` or
+`CI Bypass`. No other adapter reports such a refusal to a hook yet. The
+decision names the lane, the issue the lane has claimed, if any, the exact
+refused command and the stated reason. It offers `run it yourself`, with the
+command to run in the lane's worktree, `add a rule`, with a suggested
+permission rule such as `Bash(git push:*)`, and, when the lane holds a claim,
+`reassign` and `release`. The same refusal again, from the same lane on the
+same claim with the same command, refreshes that decision instead of opening
+a second one. While it is open the supervisor defers the lane's wakes under
+`permission denied` rather than asking it for a turn that would meet the
+same refusal; the answer reaches the lane as supervisor mail, like any other
+answer, and the lane or the operator carries it out. The decision is
+irreversible, so every option takes the `confirm` tap and no timeout ever
+applies a default to it. Nothing retries, rewords or works around the
+refused call, and the service never writes the suggested rule or any bypass
+flag: adding the rule is the operator's edit to their own settings.
 
 ### Reclaiming landed lanes
 
@@ -2663,7 +2857,7 @@ left the worktree, or the decision itself failed, the prompt goes through and th
 reason reaches the agent as context on it. The same causes still deny a tool
 call.
 
-A hook payload that cannot be decided, one past 1,000,000 characters such as a
+A hook payload that cannot be decided, one past 1,000,000 bytes such as a
 `Write` of a large file or one that is not a JSON hook object, is allowed and
 recorded as `oversize_payload` or `unreadable_payload` in the lane's event log,
 because a denial would refuse the same call on every retry.
@@ -3102,6 +3296,64 @@ up to 16 minutes. A relaunch stamp dated in the future, as a backward clock
 step leaves, does not hold the next request off. A machine that has never started a service is left alone: the first start
 belongs to the launch or to the operator.
 
+### Decisions that apply their default on timeout
+
+A question nobody answers should not hold a lane when the choice is
+reversible and has an obvious answer. Every decision kind is declared once, in
+`agent_parley/timeouts.py`, with its class, its recommended option and the
+command that undoes that option:
+
+| Kind | Class | Default | Timeout | Undo |
+| --- | --- | --- | --- | --- |
+| `orphan_claim` | reversible | reassign a dead lane's orphaned claim | 30 minutes | `agent-parley issue assign ISSUE LANE` |
+| `closed_claim` | reversible | resolve a claim whose issue a merged pull request closed | 30 minutes | `agent-parley issue assign ISSUE LANE` |
+| `idle_key` | reversible | release a key its idle holder never uses | 30 minutes | `agent-parley say LANE KEY --subject 'Reserve this key again'` |
+| `failed_ci` | reversible | re-run a failed CI job once | 30 minutes | `gh run cancel RUN` |
+| `merge_default` | irreversible | wait for the operator | never | none |
+| `release_tag` | irreversible | wait for the operator | never | none |
+| `discard_work` | irreversible | wait for the operator | never | none |
+| `delete_branch` | irreversible | wait for the operator | never | none |
+| `native_permission` | irreversible | wait for the operator | never | none |
+
+A reversible decision left unanswered for its timeout settles to the default.
+The outcome is appended to the lane's report log as a record of kind `default`
+with outcome `applied by timeout`, the evidence it used and the filled undo
+command, and one line naming what was done and that command is sent on the
+configured notification transports. When the evidence is already conclusive,
+for example the issue was closed by a merged pull request from this claim in
+the current ownership generation, nothing is asked and the outcome is
+`applied on evidence`. An irreversible kind, and any kind the table does not
+know, always waits for an answer.
+
+A project can make a reversible kind always ask, or wait longer, from the base
+checkout:
+
+```bash
+agent-parley timeout show
+agent-parley timeout set failed_ci --after 2h
+agent-parley timeout set orphan_claim --ask
+agent-parley timeout set failed_ci          # back to the default
+```
+
+The policy is stored in `project.json` as `"timeouts": {"orphan_claim":
+{"ask": true}, "failed_ci": {"seconds": 7200}}`. It can only make a kind more
+cautious: a timeout under 30 minutes or over seven days, an unknown kind, or
+any timeout for an irreversible kind is refused, and a manifest holding one
+refuses every settlement until it is fixed. `set` refuses lane shells the way
+`unattended set` does.
+
+Every supervision poll sweeps the project's open decision records, the ones
+notifications deliver, before sending the due ones. A record settles only
+when its notification kind maps to a reversible table kind, it was recorded
+reversible, and it recommends one of its own options. Today a
+`orphan_decision` record settles as `orphan_claim`; `permission_prompt`,
+`permission_denied` and `native_dialog` records map to `native_permission`
+and always wait; any other
+record waits for an answer. A settled record is answered with its recommended
+option by `timeout`, handed to its lane like any other answer, logged and
+announced as above. A record the operator answered first, or one missing the
+issue or lane its undo command names, is left alone.
+
 ### Keeping the service across reboots
 
 The service is a user process and does not survive a reboot. Where the machine
@@ -3196,6 +3448,10 @@ CI builds artifacts; it does not submit review forms.
 `docs/catalog-submission.md` records what each catalog asks for, the checks that
 can be run in this repository before submitting, and the steps that are bound to
 the owner's accounts and cannot be delegated.
+
+`docs/mcp-directories.md` does the same for the MCP directories: the
+`server.json` and `glama.json` manifests, the check that validates them, and
+the owner-only submission steps and open decisions.
 
 ## Releases
 

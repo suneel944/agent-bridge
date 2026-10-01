@@ -31,8 +31,11 @@ from agent_parley import (
     budgets,
     dialogs,
     issues,
+    lanes,
     merges,
     plan,
+    reclaim,
+    records,
     recovery,
     roster,
     store,
@@ -49,6 +52,7 @@ INACTIVE = "inactive"
 OVERDUE = "overdue claim"
 OVER_CAP = "claims over cap"
 OFFER = "unanswered offer"
+REQUEST = "unanswered request"
 UNRESOLVED = "unresolved completion"
 DIVERGING = "not converging"
 ACK = "awaiting acknowledgement"
@@ -73,6 +77,12 @@ ESCALATED = "escalated plan revision"
 PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
 RUN_UNMETERED = "run budget unmetered"
+CHECKS = "checks stalled"
+CROSSING = "crossing ready"
+CHECKS_FAILED = "checks failed"
+CHECKS_REFUSED = "checks refused"
+CHILD_SESSION = "session outliving its claim"
+CHILD_RECENT = 60
 
 BY_OPERATOR = "operator"
 BY_SERVICE = "service"
@@ -95,6 +105,10 @@ WAKE_DETAILS = {
     supervision.SESSION_HELD: (
         "resume refused because a running launcher holds the session lock "
         "and its wake socket did not answer"
+    ),
+    supervision.OPT_IN_MISSING: (
+        "setup gap: resume withheld because no bridge tool approval is "
+        "recorded, so the resumed session would stop at a prompt nobody sees"
     ),
 }
 
@@ -161,6 +175,21 @@ def _blocked(record: dict) -> str:
     if record.get("paused"):
         return PAUSED
     return ""
+
+
+def _inferred(record: dict) -> str:
+    """Words how a lane's recorded state was inferred, for a row's detail.
+
+    Args:
+        record: One participant record from the status reading.
+
+    Returns:
+        A clause naming the watcher or liveness inference and the hook the
+        lane's client lacks, starting with a separator, or an empty string
+        when a hook confirmed the state.
+    """
+    note = lanes.inference(record.get("provenance"))
+    return f" ({note})" if note else ""
 
 
 def _answer(name: str, repo: str, record: dict, text: str) -> str:
@@ -232,8 +261,10 @@ def _remedy(
     commands. Resuming a lane whose launcher is still running collides with
     the session lock that launcher holds, so only a stopped lane is resumed,
     a lane whose last wake found that lock held is sent to its own client
-    even when its record reads stopped, and a lane that cannot read mail is
-    never handed a delivery command.
+    even when its record reads stopped, a lane whose resume was withheld for
+    a missing bridge tool approval is sent to that opt-in or to the
+    operator's own terminal, and a lane that cannot read mail is never
+    handed a delivery command.
 
     Args:
         name: Participant that owns the lane.
@@ -255,8 +286,32 @@ def _remedy(
             "still holds the session lock, so a resume would be refused",
             BY_OPERATOR,
         )
+    if wake.get("result") == supervision.OPT_IN_MISSING:
+        return (
+            f"{supervision.OPT_IN_REMEDY}: agent-parley run {name} --resume "
+            f"{repo}",
+            BY_OPERATOR,
+        )
     if blocked == supervision.STOPPED:
         return f"agent-parley run {name} --resume {repo}", BY_OPERATOR
+    held = record.get("dialog") or {}
+    if (
+        blocked == DIALOG
+        and wake.get("result") == DIALOG
+        and held.get("name") != dialogs.PERMISSION
+        and not held.get("escalated")
+    ):
+        return (
+            _answer(
+                name,
+                repo,
+                record,
+                f"submit or clear the unsent text in {name}'s own terminal "
+                "(Enter, or Ctrl-U to clear the line); it reads no mail "
+                "until that line is empty",
+            ),
+            BY_OPERATOR,
+        )
     if blocked == DIALOG:
         return (
             _answer(
@@ -419,7 +474,9 @@ def _retire_rows(
     lane is ready to retire. A lane whose session process is alive is never
     offered retirement, whatever its markers say, because `participant
     retire` refuses a lane with a running session. The row only names the
-    command: the sweep never releases held work on its own.
+    command: the sweep never retires a lane on its own. Supervision returns
+    the work of a lane it proved dead, but leaves the lane itself for the
+    operator to retire or resume.
 
     Args:
         record: One participant record from the status reading.
@@ -501,6 +558,65 @@ def _unresolved_rows(
             root,
             BY_OPERATOR,
             len(unresolved),
+        )
+    ]
+
+
+def _child_rows(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    record: dict,
+    name: str,
+    repo: str,
+    root: str,
+    now: float,
+) -> list[dict]:
+    """Reports a session still active in a worktree beyond the lane's claim.
+
+    A lane can run a project's own tooling from its shell, and that tooling
+    can start further native sessions in a worktree the lane made for a
+    pull request or a sub-task. Agent Parley never sees those sessions
+    start and never stops them; this only tells the lane, once its claim
+    has ended, that one is still writing to its session record.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Project manifest holding this participant.
+        record: One participant record from the status reading.
+        name: Participant that owns the lane.
+        repo: Rendered `--repo` argument naming the project.
+        root: Canonical project key.
+        now: Unix time the observation ages are measured against.
+
+    Returns:
+        One row naming how many session records are still active and how
+        long since the most recent, or no row while the lane holds a claim,
+        no worktree beyond its own is attributed to it, or none of them
+        show activity within `CHILD_RECENT` seconds.
+    """
+    if record["claims"]:
+        return []
+    children = reclaim.child_worktrees(directory, manifest, name)
+    if not children:
+        return []
+    participant = manifest["participants"][name]
+    count, latest = records.child_activity(home, participant, children)
+    if not count or latest is None or now - latest > CHILD_RECENT:
+        return []
+    return [
+        _row(
+            CHILD_SESSION,
+            f"{count} native session(s) in a worktree this lane made are "
+            "still active after its claim ended",
+            f"agent-parley status {name} {repo}; agent-parley never "
+            "stops a session",
+            max(0, int(now - latest)),
+            name,
+            root,
+            BY_OPERATOR,
+            count,
         )
     ]
 
@@ -605,6 +721,7 @@ def _lane_rows(
     config: dict,
     ack_after: float,
     now: float,
+    directory: Path | None = None,
 ) -> list[dict]:
     """Derives the rows one lane record carries, one per cause.
 
@@ -615,6 +732,8 @@ def _lane_rows(
         config: Resolved supervision settings for the project.
         ack_after: Seconds after which an unacknowledged message is a row.
         now: Unix time the observation ages are measured against.
+        directory: Private project state directory holding the lane's
+            key-hold deadline, or None to read no deadline.
 
     Returns:
         Zero or more rows, one per cause the record shows, each carrying how
@@ -628,9 +747,14 @@ def _lane_rows(
         because a prompt the operator is about to answer needs no row. A
         native dialog the launcher escalated is reported at once by name,
         with the options it offers, because nothing will answer it but the
-        operator. A quiet lane that refused a peer a key it still holds is
-        reported with the lanes it refused and how long it has been quiet,
-        because the refused lane saw the refusal and nobody else did. A
+        operator. A row about the lane's state says when the dialog watcher
+        or the liveness sample inferred that state and names the hook the
+        lane's client lacks, because no hook confirmed it. A quiet lane
+        that refused a peer a key it still holds is reported with the lanes
+        it refused and how long it has been quiet, because the refused lane
+        saw the refusal and nobody else did. Once the release deadline the
+        service gave that lane passes, the row belongs to the operator as a
+        decision. A
         second client sending hooks under the lane's identity is named with
         its process while it lasts, because its events are ignored. A quiet
         lane is inactive only while it owes work, meaning a claim it has not
@@ -689,7 +813,8 @@ def _lane_rows(
             rows.append(
                 _row(
                     APPROVAL,
-                    f"the client is waiting for approval of {tool}",
+                    f"the client is waiting for approval of {tool}"
+                    + _inferred(record),
                     _answer(
                         name,
                         repo,
@@ -710,7 +835,7 @@ def _lane_rows(
         rows.append(
             _row(
                 HELD,
-                f"the client is held by {shown}",
+                f"the client is held by {shown}" + _inferred(record),
                 _answer(
                     name,
                     repo,
@@ -743,7 +868,7 @@ def _lane_rows(
         rows.append(
             _row(
                 STALLED,
-                supervision.stall_marker(idle),
+                supervision.stall_marker(idle) + _inferred(record),
                 command,
                 int(idle["age_seconds"]),
                 name,
@@ -763,7 +888,8 @@ def _lane_rows(
         rows.append(
             _row(
                 INACTIVE,
-                "alive but no native activity past the inactive threshold",
+                "alive but no native activity past the inactive threshold"
+                + _inferred(record),
                 command,
                 availability["age_seconds"],
                 name,
@@ -784,10 +910,28 @@ def _lane_rows(
     refused = (record.get("mail") or {}).get("refused") or []
     if quiet and refused:
         command, actor = _remedy(name, repo, record, waking)
+        detail = f"idle while holding a key refused to {_listed(refused)}"
+        deadline = (
+            supervision.key_hold(directory, name).get("deadline")
+            if directory
+            else None
+        )
+        if isinstance(deadline, (int, float)):
+            late = int(now - deadline)
+            if late >= 0:
+                detail += f"; its release deadline passed {late}s ago"
+                command, actor = (
+                    f'decide: agent-parley say {name} "release the key '
+                    f'refused to {", ".join(refused)}" {repo}, or let the '
+                    "refused lanes wait",
+                    BY_OPERATOR,
+                )
+            else:
+                detail += f"; asked to release it within {-late}s"
         rows.append(
             _row(
                 HOLDING,
-                f"idle while holding a key refused to {_listed(refused)}",
+                detail,
                 command,
                 availability["age_seconds"],
                 name,
@@ -886,6 +1030,60 @@ def _offer_rows(project: dict, now: float) -> list[dict]:
                 command,
                 age,
                 recipient,
+                project["root"],
+                BY_OPERATOR,
+                len(items),
+            )
+        )
+    return rows
+
+
+def _request_rows(project: dict, now: float) -> list[dict]:
+    """Groups the unanswered peer takeover requests, one row per holder.
+
+    An operator's own request carries no row here, the same way an
+    operator's own offer withdrawal is left to the operator, because it
+    still waits on that operator to withdraw or restate it. A peer request
+    is different: the peer asking has no path to force a decision, so the
+    row names the holder that owes one.
+
+    Args:
+        project: One project block from the status reading.
+        now: Unix time the request ages are measured against.
+
+    Returns:
+        One row per lane holding unanswered peer takeover requests, naming
+        the oldest request and counting the rest, exactly as unanswered
+        handoff offers are grouped by the lane that must decide.
+    """
+    repo = f"--repo {shlex.quote(str(project['root']))}"
+    waiting: dict[str, list[tuple[int, int, dict]]] = {}
+    for record in project["issues"]:
+        pending = record["request"]
+        if not pending or pending.get("source") != issues.PEER:
+            continue
+        created = _recorded(pending.get("created_at"), now)
+        waiting.setdefault(record["owner"], []).append(
+            (max(0, int(now - created)), record["issue"], pending)
+        )
+    rows = []
+    for holder, items in waiting.items():
+        items.sort(key=lambda item: -item[0])
+        age, number, pending = items[0]
+        peer = pending["to"]
+        detail = (
+            f"issue #{number} takeover asked by {peer}, unanswered by {holder}"
+            if len(items) == 1
+            else f"{len(items)} takeover requests wait on {holder}, the "
+            f"oldest issue #{number} asked by {peer}"
+        )
+        rows.append(
+            _row(
+                REQUEST,
+                detail,
+                f"agent-parley issue assign {number} --unassign {repo}",
+                age,
+                holder,
                 project["root"],
                 BY_OPERATOR,
                 len(items),
@@ -1233,6 +1431,202 @@ def _run_rows(
     ]
 
 
+def _checks_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each open pull request whose head supervision found stalled.
+
+    The lane was already told once; the row keeps the stall in front of the
+    operator until the head finishes or changes, which clears the mark.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the pending ages are measured against.
+
+    Returns:
+        One row per pull request whose pending head is marked stalled.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [
+        _row(
+            CHECKS,
+            f"pull request #{reading.get('number')} checks pending: "
+            + ", ".join(
+                f"{check.get('name')} {check.get('state')}"
+                for check in reading.get("pending") or []
+            ),
+            f"gh pr checks {reading.get('url')}, then re-run once with "
+            "gh run rerun RUN --failed, cancelling first a run still in "
+            "progress past its job timeout",
+            _age(reading.get("pending_since"), now),
+            str(reading.get("lane") or ""),
+            root,
+        )
+        for reading in readings
+        if isinstance(reading, dict)
+        and reading.get("checks") == "pending"
+        and reading.get("stalled_at")
+    ]
+
+
+def _crossing_rows(project: dict, now: float) -> list[dict]:
+    """Asks the operator once to cross a fully landed integration base.
+
+    When no claim is held and at least one issue landed in the integration
+    base still waits on the forge, the milestone's work sits complete on a
+    branch the default branch never received. Merging it there cannot be
+    undone, so the row only asks: nothing opens or merges the crossing pull
+    request for the operator. The row clears once a claim is held again or
+    the forge closes the landed issues. Without a whole reading of the
+    forge's open issues, a landed issue the crossing already closed cannot
+    be told apart, so no row is raised. The row ages from the newest
+    landing or the newest claim end, whichever is later, so the claim that
+    last stopped holding the work is what opens the decision.
+
+    Args:
+        project: One project of the status reading.
+        now: Unix time the landing ages are measured against.
+
+    Returns:
+        One row while the integration base is fully landed, or none.
+    """
+    integration = project.get("integration") or {}
+    landed = integration.get("landed") or []
+    if not landed or integration.get("held") or not integration.get("catalog"):
+        return []
+    base = str(integration["base"])
+    return [
+        _row(
+            CROSSING,
+            f"every claim landed in {base}: "
+            + ", ".join(f"#{item['issue']}" for item in landed)
+            + "; the default branch has not received them",
+            f"gh pr create --head {shlex.quote(base)}, naming each landed "
+            "issue as Closes #N in its body; review and merge it yourself, "
+            "since that merge cannot be undone",
+            _age(
+                max(
+                    float(integration.get("settled_at") or 0),
+                    *(float(item.get("at") or 0) for item in landed),
+                ),
+                now,
+            ),
+            project=str(project["root"]),
+            count=len(landed),
+        )
+    ]
+
+
+def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each open pull request whose head's checks ran and failed.
+
+    A check the forge never started names an operator cause and is reported
+    by `_checks_refused_rows` instead, grouped across every pull request it
+    blocks rather than once per lane.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the attempt's age is measured against.
+
+    Returns:
+        One row per open pull request whose checks are red and report at
+        least one check the forge ran and failed.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    rows = []
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        ran = [
+            check
+            for check in reading.get("failed") or []
+            if not check.get("not_started")
+        ]
+        if not ran:
+            continue
+        rows.append(
+            _row(
+                CHECKS_FAILED,
+                f"pull request #{reading.get('number')} checks failed "
+                f"(attempt {reading.get('red_attempts') or 1}): "
+                + ", ".join(
+                    f"{check['name']} {check['conclusion']}" for check in ran
+                ),
+                f"gh pr checks {reading.get('url')}, then fix and push or "
+                "re-run",
+                _age(reading.get("red_since"), now),
+                str(reading.get("lane") or ""),
+                root,
+            )
+        )
+    return rows
+
+
+def _checks_refused_rows(directory: Path, root: str, now: float) -> list[dict]:
+    """Reports each cause blocking pull requests the forge refused to start.
+
+    Every open pull request whose head reports a required check the forge
+    never started shares one row per check name and conclusion, naming every
+    pull request it blocks, so the operator answers the cause once rather
+    than once per lane. `supervision.pull_request_wakes` opens the matching
+    decision; this row only reads the same cached reading.
+
+    Args:
+        directory: Private project state directory.
+        root: Canonical project key.
+        now: Unix time the oldest occurrence's age is measured against.
+
+    Returns:
+        One row per distinct check name and forge conclusion an open pull
+        request's red head reports as never started.
+    """
+    try:
+        cached = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+        readings = list((cached.get("pull_requests") or {}).values())
+    except (OSError, ValueError, AttributeError):
+        return []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for reading in readings:
+        if not isinstance(reading, dict) or reading.get("checks") != "red":
+            continue
+        for check in reading.get("failed") or []:
+            if check.get("not_started"):
+                key = (str(check["name"]), str(check["conclusion"]))
+                groups.setdefault(key, []).append(reading)
+    rows = []
+    for (name, conclusion), members in groups.items():
+        numbers = sorted(int(item["number"]) for item in members)
+        listed = ", ".join(f"#{number}" for number in numbers)
+        rows.append(
+            _row(
+                CHECKS_REFUSED,
+                f"{len(numbers)} pull requests blocked: required job "
+                f"{name!r} not started, forge reports {conclusion}: "
+                f"{listed}",
+                "resolve at the forge (billing, spending limit or manual "
+                "approval), then re-run once",
+                max(_age(item.get("red_since"), now) for item in members),
+                project=root,
+                count=len(numbers),
+            )
+        )
+    return rows
+
+
 def derive(
     home: Path, report: dict, ack_after: float = 0.0, now: float = 0.0
 ) -> list[dict]:
@@ -1286,6 +1680,7 @@ def derive(
             )
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
+        repo = f"--repo {shlex.quote(str(project['root']))}"
         for record in project["participants"]:
             aged.extend(
                 _lane_rows(
@@ -1295,9 +1690,23 @@ def derive(
                     config,
                     after,
                     stamp,
+                    directory,
+                )
+            )
+            aged.extend(
+                _child_rows(
+                    home,
+                    directory,
+                    data,
+                    record,
+                    record["participant"],
+                    repo,
+                    project["root"],
+                    stamp,
                 )
             )
         aged.extend(_offer_rows(project, stamp))
+        aged.extend(_request_rows(project, stamp))
         aged.extend(_bounce_rows(home, directory, data, project, config))
         aged.extend(_retired_rows(home, project))
         aged.extend(_refused_rows(directory, project["root"], stamp))
@@ -1305,6 +1714,10 @@ def derive(
         aged.extend(_root_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
+        aged.extend(_checks_rows(directory, project["root"], stamp))
+        aged.extend(_checks_failed_rows(directory, project["root"], stamp))
+        aged.extend(_checks_refused_rows(directory, project["root"], stamp))
+        aged.extend(_crossing_rows(project, stamp))
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )
