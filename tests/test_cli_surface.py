@@ -1,5 +1,6 @@
 """Checks the version, show and list verbs the command surface offers."""
 
+import argparse
 import json
 import sys
 
@@ -130,6 +131,48 @@ def test_grouped_help_lists_every_declared_command(monkeypatch, capsys):
     for name in grouped:
         assert f"  {name} " in printed
     assert "__complete" not in printed
+
+
+def test_every_subcommand_action_carries_help():
+    parser, _ = cli.root_parser(None)
+    pending = [((), parser)]
+    bare = []
+    while pending:
+        path, current = pending.pop()
+        for action in current._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            helped = {
+                id(action.choices[choice.dest])
+                for choice in action._choices_actions
+            }
+            for name, child in action.choices.items():
+                if id(child) not in helped:
+                    bare.append(" ".join((*path, name)))
+                pending.append(((*path, name), child))
+    assert bare == []
+
+
+@pytest.mark.parametrize(
+    ("command", "described"),
+    (
+        ("issue", "Ask the holder of an issue to hand it to this lane."),
+        ("participant", "Push the lane branch and open or locate its pull"),
+        ("mail", "Search this lane's mail."),
+        ("unattended", "Integrate one eligible lane under the policy."),
+        ("approval", "Show which steps require a recorded approval first."),
+        ("decision", "List or search the decisions recorded for this"),
+    ),
+)
+def test_group_help_describes_each_action(
+    monkeypatch, capsys, command, described
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys, "argv", ["agent-parley", command, "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert described in " ".join(capsys.readouterr().out.split())
 
 
 def test_status_accepts_repo_as_the_project_selector(
