@@ -7182,8 +7182,11 @@ def wake(
     turn that only reads and stops leaves the marker as it was, so it is an
     attempt, and a lane that made no progress across the whole bound is
     escalated once, because only then is there something an operator has to
-    do. A lane that is working is never woken, because a wake needs the lane
-    quiet past the inactivity window.
+    do. An escalated work offer then leaves the backlog until the lane makes
+    progress or a new offer generation replaces it: the generation is the
+    operator's, and asking again hourly only spent a full turn on an offer
+    the lane had already declined. A lane that is working is never woken,
+    because a wake needs the lane quiet past the inactivity window.
 
     A spent attempt is not the end of the series. Every poll re-decides the
     lane against what it can read locally: durable provider capacity and the
@@ -7363,6 +7366,18 @@ def wake(
         same_backlog = record.get("backlog") == backlog
         marker = _lane_activity(home, directory, manifest, name)
         worked = bool(record.get("activity")) and record["activity"] != marker
+        if (
+            work_offer
+            and not worked
+            and (published_work(directory, name).get("dispatch") or {}).get(
+                "state"
+            )
+            == "escalated"
+        ):
+            backlog.remove(work_key)
+            work_offer = None
+            if not backlog:
+                return
         attempts = (
             record.get("attempts", 0) if same_backlog and not worked else 0
         )

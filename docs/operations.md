@@ -2138,7 +2138,8 @@ accounts that cannot be reconstructed safely require manual attention.
 Wake attempts start one inactivity interval apart and the spacing doubles with
 each attempt, up to one hour. Three attempts on an unchanged backlog exhaust
 it; the lane is then asked hourly rather than never. Work dispatches add their offer generation and
-issue-scoped progress digest to that backlog. Delivery without a claim, handoff
+issue-scoped progress digest to that backlog. An escalated offer generation is not delivered again
+until the lane records progress or a new generation replaces it. Delivery without a claim, handoff
 or other recorded issue progress leaves the obligation pending. Exhaustion
 records the offer, issues, attempt count, last result and operator action in the
 work publication. A `busy:turn`, `busy:input`, or `busy:repeat` answer is not

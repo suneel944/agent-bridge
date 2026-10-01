@@ -337,7 +337,9 @@ Hook events and turn ends do not count, because a woken lane that reads its
 prompt and stops records both without doing anything. Three attempts across
 which that marker never changes produce one durable escalation in the same
 publication and in `top`; waking then backs off by doubling to an hourly
-ceiling instead of repeating every window or stopping. Any progress resets the
+ceiling instead of repeating every window or stopping. An escalated work offer
+generation leaves the backlog instead, because the lane already declined it
+and the next step is the operator's. Any progress resets the
 series and clears the escalation, and changed issue state starts a new bounded
 attempt series. A spent attempt is re-decided on every poll rather than being
 final: durable capacity, the published screen state and the recorded session
