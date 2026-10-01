@@ -287,7 +287,7 @@ def test_process_platform_is_chosen_once_for_the_running_system():
     assert linux.terminate is process.linux_terminate
     darwin = process.platform_for("darwin")
     assert darwin.running is process.darwin_running
-    assert darwin.zombie is process.darwin_zombie
+    assert darwin.zombie.func is process.darwin_zombie
     assert darwin.start_ticks.func is process.darwin_start_ticks
     assert darwin.foreground_pid.func is process.darwin_foreground_pid
     assert darwin.parent_pid.func is process.darwin_parent_pid
@@ -445,8 +445,10 @@ def test_a_zombie_session_process_is_not_alive():
         assert parent.stdout is not None
         pid = int(parent.stdout.readline())
         ticks = process.start_ticks(pid)
+        assert process.darwin_zombie(process.read_ps_field, pid) is False
         process.ServerProcess(pid, ticks).stop()
         assert process.alive(pid, ticks) is False
+        assert process.darwin_zombie(process.read_ps_field, pid) is True
     finally:
         parent.kill()
         parent.wait(timeout=5)

@@ -274,18 +274,20 @@ def darwin_running(pid: int) -> bool:
     return True
 
 
-def darwin_zombie(pid: int) -> bool:
-    """Reports whether a macOS process is a zombie.
+def darwin_zombie(reader: PsReader, pid: int) -> bool:
+    """Reports whether a macOS process has exited but not been reaped.
+
+    A zombie still answers the signal-zero existence check, so only the
+    state ``ps`` prints tells it from a running process.
 
     Args:
+        reader: Reads one ``ps`` field for a process ID.
         pid: Process ID to inspect.
 
     Returns:
-        ``False`` always; this platform's liveness check is unaffected
-        by the zombie state a Linux process can be left in.
+        Whether ``ps`` reports the process in the zombie state.
     """
-    del pid
-    return False
+    return reader("stat=", pid).startswith("Z")
 
 
 def darwin_start_ticks(reader: PsReader, pid: int) -> str:
@@ -427,7 +429,7 @@ def darwin_terminate(reader: PsReader, pid: int, ticks: str) -> None:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 pass
-            if not darwin_running(pid):
+            if not darwin_running(pid) or darwin_zombie(reader, pid):
                 return
             time.sleep(POLL_INTERVAL)
     raise BridgeError(f"Process {pid} did not exit after SIGTERM and SIGKILL.")
@@ -529,7 +531,7 @@ def darwin_platform(reader: PsReader = read_ps_field) -> Platform:
         foreground_pid=functools.partial(darwin_foreground_pid, reader),
         parent_pid=functools.partial(darwin_parent_pid, reader),
         running=darwin_running,
-        zombie=darwin_zombie,
+        zombie=functools.partial(darwin_zombie, reader),
         matches_command=functools.partial(darwin_matches_command, reader),
         terminate=functools.partial(darwin_terminate, reader),
         boot_id=darwin_boot_id,
