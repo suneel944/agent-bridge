@@ -559,7 +559,7 @@ def test_an_attached_answer_waits_for_the_operator_to_finish_a_line():
             os.waitpid(pid, 0)
 
 
-def _reporter_harness(directory: Path, client: str) -> int:
+def _reporter_harness(directory: Path, client: str) -> tuple[int, int]:
     harness = (
         "import os, sys\nfrom pathlib import Path\n"
         "from agent_parley.terminal import run\n"
