@@ -6,8 +6,11 @@ accepts. The Codex plugin directory takes an uploaded archive instead, reads
 the Claude manifest inside it, and requires the listing fields it converts
 into ``.codex-plugin/plugin.json``: an ``interface`` block with a short
 description that also serves as the 30 character listing subtitle, a logo
-and a composer icon that resolve to square images inside the archive, and
-the website, privacy policy and terms URLs the portal shows and checks.
+and a composer icon that resolve to square images inside the archive, one of
+the portal's supported categories, and the website, support, privacy policy
+and terms URLs the portal shows and checks. The portal could not confirm the
+``Productivity`` category for a tool that coordinates coding agents, so the
+listing declares ``Developer Tools``.
 Those fields live in the repository's Codex manifest, and this module merges
 them into the archived Claude manifest so neither directory's format leaks
 into the other's.
@@ -35,7 +38,27 @@ IMAGE_EDGE_MINIMUM = 1024
 PROMPT_LIMIT = 3
 PROMPT_LENGTH_LIMIT = 128
 IMAGE_FIELDS = ("logo", "composerIcon")
-URL_FIELDS = ("websiteURL", "privacyPolicyURL", "termsOfServiceURL")
+URL_FIELDS = (
+    "websiteURL",
+    "supportURL",
+    "privacyPolicyURL",
+    "termsOfServiceURL",
+)
+CATEGORIES = (
+    "Productivity",
+    "Creativity",
+    "Developer Tools",
+    "Business & Operations",
+    "Data & Analytics",
+    "Communication",
+    "Education & Research",
+    "Security",
+    "Finance",
+    "Healthcare",
+    "Travel",
+    "Entertainment",
+    "Other",
+)
 CLAUDE_LISTING_FIELDS = (
     "description",
     "author",
@@ -180,6 +203,10 @@ def manifest_errors(root: Path) -> list[str]:
         )
     if not interface.get("capabilities"):
         errors.append("Codex manifest is missing interface.capabilities")
+    if interface.get("category") not in CATEGORIES:
+        errors.append(
+            "Codex interface.category must be one of the portal's categories"
+        )
     for field in URL_FIELDS:
         if not interface.get(field, "").startswith("https://"):
             errors.append(f"Codex interface.{field} must be an https URL")

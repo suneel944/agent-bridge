@@ -138,6 +138,16 @@ def test_rejects_a_listing_without_capabilities(tmp_path):
     ]
 
 
+def test_rejects_a_category_the_portal_does_not_list(tmp_path):
+    root = copy_repository(tmp_path)
+    rewrite_codex_manifest(
+        root, lambda interface: interface.update(category="Coding")
+    )
+    assert codex_bundle.manifest_errors(root) == [
+        "Codex interface.category must be one of the portal's categories"
+    ]
+
+
 def test_rejects_a_listing_without_policy_urls(tmp_path):
     root = copy_repository(tmp_path)
     rewrite_codex_manifest(
