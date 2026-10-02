@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "agent-parley"
-version = "0.15.2"
+version = "0.16.0"
 source = { editable = "." }
 
 [package.dev-dependencies]

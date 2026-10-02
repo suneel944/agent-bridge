@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/suneel944/agent-parley/compare/v0.15.2...v0.16.0) (2026-10-02)
+
+
+### Bug fixes
+
+* deliver the 0.16.0 audit fixes (#875) ([#782](https://github.com/suneel944/agent-parley/issues/782)) ([#829](https://github.com/suneel944/agent-parley/issues/829)) ([#837](https://github.com/suneel944/agent-parley/issues/837)) ([#838](https://github.com/suneel944/agent-parley/issues/838)) ([#841](https://github.com/suneel944/agent-parley/issues/841)) ([#842](https://github.com/suneel944/agent-parley/issues/842)) ([#843](https://github.com/suneel944/agent-parley/issues/843)) ([#844](https://github.com/suneel944/agent-parley/issues/844)) ([#845](https://github.com/suneel944/agent-parley/issues/845)) ([#846](https://github.com/suneel944/agent-parley/issues/846)) ([#847](https://github.com/suneel944/agent-parley/issues/847)) ([#848](https://github.com/suneel944/agent-parley/issues/848)) ([#849](https://github.com/suneel944/agent-parley/issues/849)) ([#850](https://github.com/suneel944/agent-parley/issues/850)) ([#851](https://github.com/suneel944/agent-parley/issues/851)) ([#852](https://github.com/suneel944/agent-parley/issues/852)) ([#853](https://github.com/suneel944/agent-parley/issues/853)) ([#854](https://github.com/suneel944/agent-parley/issues/854)) ([#855](https://github.com/suneel944/agent-parley/issues/855)) ([#856](https://github.com/suneel944/agent-parley/issues/856)) ([#857](https://github.com/suneel944/agent-parley/issues/857)) ([#858](https://github.com/suneel944/agent-parley/issues/858)) ([#859](https://github.com/suneel944/agent-parley/issues/859)) ([#860](https://github.com/suneel944/agent-parley/issues/860)) ([#861](https://github.com/suneel944/agent-parley/issues/861)) ([#862](https://github.com/suneel944/agent-parley/issues/862)) ([#863](https://github.com/suneel944/agent-parley/issues/863)) ([#882](https://github.com/suneel944/agent-parley/issues/882)) ([#884](https://github.com/suneel944/agent-parley/issues/884))
+
 ## [0.15.2](https://github.com/suneel944/agent-parley/compare/v0.15.1...v0.15.2) (2026-10-01)
 
 
