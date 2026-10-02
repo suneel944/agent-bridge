@@ -15,6 +15,12 @@ Those fields live in the repository's Codex manifest, and this module merges
 them into the archived Claude manifest so neither directory's format leaks
 into the other's.
 
+The portal also rejects a listing whose name or description references
+another AI assistant, model or platform. The Claude manifest's keywords name
+the supported agent command line tools, so the archive takes its keywords
+from the Codex manifest instead, and the check rejects any archived manifest
+or listing skill text that names an assistant.
+
 The portal scans each archived skill and flagged the repository's
 ``coordinate`` skill as a security risk once it carried operator,
 integration, permission and credential guidance. The archive therefore packs
@@ -24,6 +30,7 @@ repository skills and the launcher's injected protocol.
 """
 
 import json
+import re
 import struct
 import tomllib
 import zipfile
@@ -58,6 +65,10 @@ CATEGORIES = (
     "Travel",
     "Entertainment",
     "Other",
+)
+ASSISTANT_NAMES = re.compile(
+    r"\b(anthropic|chatgpt|claude|codex|copilot|cursor|gemini|gpt|openai)\b",
+    re.IGNORECASE,
 )
 CLAUDE_LISTING_FIELDS = (
     "description",
@@ -128,10 +139,15 @@ def submission_manifest(root: Path) -> dict:
         root: Repository root.
 
     Returns:
-        The Claude manifest with the Codex ``interface`` block merged in.
+        The Claude manifest with the Codex ``keywords`` and ``interface``
+        merged in.
     """
     claude, codex = load_manifests(root)
-    return {**claude, "interface": codex["interface"]}
+    return {
+        **claude,
+        "keywords": codex["keywords"],
+        "interface": codex["interface"],
+    }
 
 
 def manifest_errors(root: Path) -> list[str]:
@@ -211,6 +227,20 @@ def manifest_errors(root: Path) -> list[str]:
         if not interface.get(field, "").startswith("https://"):
             errors.append(f"Codex interface.{field} must be an https URL")
     errors.extend(listing_skill_errors(plugin))
+    texts = [json.dumps(submission_manifest(root))] + [
+        path.read_text() for path in (plugin / LISTING_SKILLS).glob("*/*.md")
+    ]
+    names = sorted(
+        {
+            match.lower()
+            for text in texts
+            for match in ASSISTANT_NAMES.findall(text)
+        }
+    )
+    if names:
+        errors.append(
+            "Codex listing names another AI assistant: " + ", ".join(names)
+        )
     return errors
 
 

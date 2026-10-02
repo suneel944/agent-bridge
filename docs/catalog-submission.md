@@ -224,7 +224,13 @@ and the Claude marketplace entry describe isolated worktrees, advisory
 reservations and explicit handoffs in a full paragraph. The Claude manifest
 declares `displayName`, `license` and `keywords`; the marketplace entry adds
 `category`, `author`, `homepage` and `repository`. The Codex manifest keeps
-its listing copy in `interface`, and that copy names no specific model. The
+its listing copy in `interface` and its own `keywords`. The OpenAI portal
+rejects a listing whose name or description references another AI assistant,
+model or platform, so the archived manifest takes the Codex keywords rather
+than the Claude ones, which name the supported agent command line tools. The
+bundle check fails when the archived manifest or a listing skill names an
+assistant, and the listing skill's launch example uses an `AGENT`
+placeholder. The
 marketplace is named `agent-parley`, so the documented install command is
 `agent-parley@agent-parley`.
 
