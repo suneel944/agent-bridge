@@ -148,6 +148,31 @@ def test_rejects_a_category_the_portal_does_not_list(tmp_path):
     ]
 
 
+def test_rejects_a_listing_that_names_another_assistant(tmp_path):
+    root = copy_repository(tmp_path)
+    rewrite_codex_manifest(
+        root,
+        lambda interface: interface.update(
+            longDescription="Runs beside ChatGPT and Gemini."
+        ),
+    )
+    assert codex_bundle.manifest_errors(root) == [
+        "Codex listing names another AI assistant: chatgpt, gemini"
+    ]
+
+
+def test_archive_keywords_come_from_the_codex_manifest(tmp_path):
+    bundle = codex_bundle.build(ROOT, tmp_path)
+    with zipfile.ZipFile(bundle) as archive:
+        manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
+    codex = json.loads(
+        (
+            ROOT / codex_bundle.PLUGIN_DIRECTORY / ".codex-plugin/plugin.json"
+        ).read_text()
+    )
+    assert manifest["keywords"] == codex["keywords"]
+
+
 def test_rejects_a_listing_without_policy_urls(tmp_path):
     root = copy_repository(tmp_path)
     rewrite_codex_manifest(

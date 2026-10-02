@@ -27,9 +27,10 @@ Act only from this session's own worktree. Each participant is started in its
 own terminal by the user, for example:
 
 ```sh
-agent-parley run claude --repo /path/to/repository
-agent-parley run codex --repo /path/to/repository
+agent-parley run AGENT --repo /path/to/repository
 ```
+
+where `AGENT` is the coding agent command that participant uses.
 
 If `agent-parley` is not available, tell the user; do not start other agent
 sessions from a tool call.
