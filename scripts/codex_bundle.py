@@ -5,11 +5,19 @@ The Claude plugin directory reads the repository, so the Claude manifest in
 accepts. The Codex plugin directory takes an uploaded archive instead, reads
 the Claude manifest inside it, and requires the listing fields it converts
 into ``.codex-plugin/plugin.json``: an ``interface`` block with a short
-description that also serves as the 30 character listing subtitle, plus a
-logo and a composer icon that
-resolve to square images inside the archive. Those fields live in the
-repository's Codex manifest, and this module merges them into the archived
-Claude manifest so neither directory's format leaks into the other's.
+description that also serves as the 30 character listing subtitle, a logo
+and a composer icon that resolve to square images inside the archive, and
+the website, privacy policy and terms URLs the portal shows and checks.
+Those fields live in the repository's Codex manifest, and this module merges
+them into the archived Claude manifest so neither directory's format leaks
+into the other's.
+
+The portal scans each archived skill and flagged the repository's
+``coordinate`` skill as a security risk once it carried operator,
+integration, permission and credential guidance. The archive therefore packs
+the shorter skills under ``.codex-plugin/listing-skills``, which keep the
+repository skills' names and descriptions and leave that guidance to the
+repository skills and the launcher's injected protocol.
 """
 
 import json
@@ -21,11 +29,13 @@ from pathlib import Path
 from scripts.release_artifacts import add_entry
 
 PLUGIN_DIRECTORY = Path("plugins") / "agent-parley"
+LISTING_SKILLS = Path(".codex-plugin") / "listing-skills"
 SHORT_DESCRIPTION_LIMIT = 30
 IMAGE_EDGE_MINIMUM = 1024
 PROMPT_LIMIT = 3
 PROMPT_LENGTH_LIMIT = 128
 IMAGE_FIELDS = ("logo", "composerIcon")
+URL_FIELDS = ("websiteURL", "privacyPolicyURL", "termsOfServiceURL")
 CLAUDE_LISTING_FIELDS = (
     "description",
     "author",
@@ -170,6 +180,39 @@ def manifest_errors(root: Path) -> list[str]:
         )
     if not interface.get("capabilities"):
         errors.append("Codex manifest is missing interface.capabilities")
+    for field in URL_FIELDS:
+        if not interface.get(field, "").startswith("https://"):
+            errors.append(f"Codex interface.{field} must be an https URL")
+    errors.extend(listing_skill_errors(plugin))
+    return errors
+
+
+def listing_skill_errors(plugin: Path) -> list[str]:
+    """Checks that the listing skills mirror the repository skills' headers.
+
+    Args:
+        plugin: Plugin directory holding both skill trees.
+
+    Returns:
+        One message per skill missing from either tree or whose frontmatter
+        differs between them.
+    """
+    trees = [plugin / "skills", plugin / LISTING_SKILLS]
+    repository, listing = (
+        {path.parent.name: path for path in tree.glob("*/SKILL.md")}
+        for tree in trees
+    )
+    errors = [
+        f"listing skill {name} is missing or has no repository skill"
+        for name in sorted(repository.keys() ^ listing.keys())
+    ]
+    for name in sorted(repository.keys() & listing.keys()):
+        headers = [
+            path.read_text().split("---")[1]
+            for path in (repository[name], listing[name])
+        ]
+        if headers[0] != headers[1]:
+            errors.append(f"listing skill {name} frontmatter differs")
     return errors
 
 
@@ -177,8 +220,9 @@ def build(root: Path, output: Path) -> Path:
     """Writes the submission archive for the current package version.
 
     The archive holds only what the skills-only path accepts: the merged
-    manifest, the skills directory and the listing images. Marketplace
-    manifests, the Codex manifest and the plugin README stay out.
+    manifest, the listing skills stored as ``skills`` and the listing images.
+    Marketplace manifests, the Codex manifest, the repository skills and the
+    plugin README stay out.
 
     Args:
         root: Repository root.
@@ -201,16 +245,17 @@ def build(root: Path, output: Path) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     bundle = output / f"agent-parley-{version}-codex-skills.zip"
     manifest = json.dumps(submission_manifest(root), indent=2) + "\n"
+    sources = {"skills": plugin / LISTING_SKILLS, "assets": plugin / "assets"}
     inputs = sorted(
-        path
-        for directory in ("skills", "assets")
-        for path in (plugin / directory).rglob("*")
+        (f"{name}/{path.relative_to(source).as_posix()}", path)
+        for name, source in sources.items()
+        for path in source.rglob("*")
         if path.is_file()
     )
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
         add_bytes(archive, manifest.encode(), ".claude-plugin/plugin.json")
-        for path in inputs:
-            add_entry(archive, path, path.relative_to(plugin).as_posix())
+        for name, path in inputs:
+            add_entry(archive, path, name)
     return bundle
 
 
