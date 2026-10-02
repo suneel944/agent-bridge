@@ -4755,6 +4755,9 @@ def waiting(home: Path, root: str, name: str) -> dict:
 
     Mail superseded by a claim that closed or moved is not an unanswered
     item: nobody is waiting on it, so it never makes a lane read as stalled.
+    Every age is measured against one reference time read once per call, so
+    a message that is both unread and unacknowledged reads as owing an
+    acknowledgement even when a second boundary falls between the queries.
 
     Returns:
         The oldest waiting item with its kind, sender, identifier and age in
@@ -4779,10 +4782,11 @@ def waiting(home: Path, root: str, name: str) -> dict:
         ).fetchone()
         if not agent:
             return report
+        now = db.execute("SELECT unixepoch('now')").fetchone()[0]
         served = db.execute(
-            "SELECT max(0,unixepoch('now')-unixepoch(max(created_ts))) AS age "
+            "SELECT max(0,?-unixepoch(max(created_ts))) AS age "
             "FROM events WHERE agent_id=?",
-            (agent["id"],),
+            (now, agent["id"]),
         ).fetchone()
         report["served_age_seconds"] = served["age"]
         for kind, condition in (
@@ -4791,13 +4795,13 @@ def waiting(home: Path, root: str, name: str) -> dict:
         ):
             row = db.execute(
                 "SELECT m.id,a.name AS sender,"
-                "max(0,unixepoch('now')-unixepoch(m.created_ts)) AS age "
+                "max(0,?-unixepoch(m.created_ts)) AS age "
                 "FROM message_recipients r "
                 "JOIN messages m ON m.id=r.message_id "
                 "JOIN agents a ON a.id=m.sender_id "
                 f"WHERE r.agent_id=? AND r.superseded_ts IS NULL "
                 f"AND {condition} ORDER BY m.id LIMIT 1",
-                (agent["id"],),
+                (now, agent["id"]),
             ).fetchone()
             if row and (
                 report["kind"] is None or row["age"] > report["age_seconds"]

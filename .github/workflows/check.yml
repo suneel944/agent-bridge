@@ -175,7 +175,7 @@ jobs:
           uv python install 3.12
           uv sync --locked
           uv build --no-sources
-          uv run --locked pytest -q
+          uv run --locked pytest -q -n auto
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 5
