@@ -268,9 +268,18 @@ skill needs: it reads coordination state in a conversation and writes claims,
 reservations and handoffs. `interface.defaultPrompt` carries three starter
 prompts. The directory keeps at most three and truncates any entry past 128
 characters, and the bundle check fails rather than letting either happen
-silently. Each prompt states a situation, naming the peers and the work in
-hand, because a bare command reads as documentation rather than a reason to
-install.
+silently. Each prompt states a situation, naming the work in hand and the
+peer involved, because a bare command reads as documentation rather than a
+reason to install. The prompts call the peer "the other agent" because the
+listing runs inside Codex, where "Codex" would name the user's own session.
+
+`interface.category` is `Developer Tools`. The portal could not confirm
+`Productivity` for a tool that coordinates coding agents, and the bundle check
+rejects any value outside the portal's supported list. The portal's guide asks
+`longDescription` to cover tasks, intended users and limitations, so the text
+has one paragraph for each after an opening sentence that states the purpose.
+It does not mention MCP, because the archive is skills-only and carries no
+server. `interface.supportURL` points at the issue tracker.
 
 Each prompt also ends in changed state rather than an answer, and covers one
 moment that a single agent cannot reach: splitting a milestone across lanes
