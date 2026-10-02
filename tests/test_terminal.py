@@ -367,7 +367,7 @@ def test_latched_checkpoint_admits_one_retry_then_requires_attention():
             "from agent_parley.terminal import run\n"
             "raise SystemExit(run([sys.executable, '-c', sys.argv[2]], "
             "Path(sys.argv[1]), dict(os.environ), 'lane', attached=False, "
-            "inactive_after=0.05))"
+            "inactive_after=1.0))"
         )
         child = subprocess.Popen(
             [sys.executable, "-c", harness, str(lane), script],
@@ -381,10 +381,10 @@ def test_latched_checkpoint_admits_one_retry_then_requires_attention():
             assert b"READY" in child.stdout.readline()
             assert terminal.request(directory, "lane") == "accepted"
             assert terminal.request(directory, "lane") == "busy:repeat"
-            time.sleep(0.1)
+            time.sleep(1.2)
             assert terminal.request(directory, "lane") == "accepted"
             assert terminal.request(directory, "lane") == "busy:repeat"
-            time.sleep(0.1)
+            time.sleep(1.2)
             assert (
                 terminal.request(directory, "lane")
                 == "manual attention required"
