@@ -213,6 +213,7 @@ class Reason(StrEnum):
     UNREADABLE_PAYLOAD = "unreadable_payload"
     OUTSIDE_LANE = "outside_lane"
     PERMISSION_DENIED = "permission_denied"
+    CHAINED_CLI = "chained_cli"
 
 
 UNOBSERVED = frozenset(
@@ -330,6 +331,35 @@ def item_digest(item: str) -> str:
     """
     masked = ELAPSED.sub("Ns", item).encode()
     return hashlib.blake2b(masked, digest_size=8).hexdigest()
+
+
+def base_advance_notice(paths: list[str], root: str, lane: str) -> str:
+    """Tells a lane the base branch moved over paths it holds.
+
+    The hook path and the polled delivery path both send this text once per
+    set of moved paths. It names the command that rebases the lane, and it
+    stays advisory: nothing was rebased, paused or reverted.
+
+    Args:
+        paths: Held paths the base branch changed since the lane forked.
+        root: Base checkout.
+        lane: The lane's worktree.
+
+    Returns:
+        The bounded notice text.
+    """
+    from agent_parley import supervision
+
+    command = supervision.rebase_command(root, lane)
+    return (
+        clip(
+            "The base branch advanced over paths you hold: " + ", ".join(paths),
+            300,
+        )
+        + "\nIt moved after this lane forked. Nothing was rebased or paused; "
+        "decide whether to rebase, merge, or coordinate before continuing."
+        + (f" To rebase: {clip(command, 300)}" if command else "")
+    )
 
 
 def fresh_notices(
@@ -1368,6 +1398,72 @@ def diagnosable(payload: dict) -> bool:
     return bool(segments) and all(map(bridge_invocation, segments))
 
 
+def chained_cli(payload: dict) -> bool:
+    """Reports whether a shell call wraps this bridge's CLI in other syntax.
+
+    A launch that records `approve_bridge_tools` allows `protocol.cli_rule`,
+    and the client matches that rule only against one plain command. A call
+    that also changes directory, expands a variable, chains a second
+    command, pipes or redirects falls outside it and raises a native prompt,
+    which nobody answers in a session the service resumed. Refusing the call
+    first costs one retype and tells the lane the form that runs.
+
+    Args:
+        payload: Native ``PreToolUse`` hook payload.
+
+    Returns:
+        True when the command runs the bridge's CLI and is not that single
+        plain command.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return False
+    command = str(tool_input.get("command", tool_input.get("cmd", "")))
+    segments = shell_segments(command)
+    calls = [
+        segment
+        for segment in segments
+        if bridge_invocation(invoked(segment))
+        or f"-m {protocol.CLI_MODULE}" in " ".join(segment)
+    ]
+    return bool(calls) and (
+        len(segments) > 1
+        or redirects(command)
+        or any(
+            construct in command
+            for construct in UNCHECKED_SHELL
+            if construct not in "<>"
+        )
+        or any("$" in segment[0] or "=" in segment[0] for segment in calls)
+    )
+
+
+def redirects(command: str) -> bool:
+    """Reports whether a shell command redirects outside any quotes.
+
+    A quoted `<` or `>`, such as an arrow inside a message, is text the
+    shell passes through, not a redirect.
+
+    Args:
+        command: Shell text supplied to a native command tool.
+
+    Returns:
+        True when an unquoted redirect operator appears, or when the text
+        cannot be tokenized.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    return any(
+        token and not token.strip(";&|<>") and set(token) & set("<>")
+        for token in tokens
+    )
+
+
 def bridge_invocation(words: list[str]) -> bool:
     """Reports whether one simple command runs this bridge's own CLI.
 
@@ -1631,10 +1727,12 @@ def hazard(
     """Finds the coordination hazard that makes one tool call unsafe.
 
     Pending mail and notices are context, never a reason to refuse a call.
-    Only two situations refuse: the call writes a path that overlaps an
-    exclusive reservation another lane holds, or an offer addressed to this
-    lane is about to expire unanswered. A call that only reads, and the
-    project's own coordination tools, are never refused for coordination.
+    Only three situations refuse: a shell call wraps this bridge's CLI in
+    syntax its pre-approval rule cannot match (`chained_cli`), the call
+    writes a path that overlaps an exclusive reservation another lane
+    holds, or an offer addressed to this lane is about to expire
+    unanswered. Otherwise a call that only reads, and the project's own
+    coordination tools, are never refused for coordination.
 
     Args:
         payload: Native ``PreToolUse`` hook payload.
@@ -1646,6 +1744,15 @@ def hazard(
     Returns:
         The denial cause and its reason text, or None when the call is safe.
     """
+    command = protocol.cli_command()
+    if chained_cli(payload):
+        return Reason.CHAINED_CLI, (
+            f"Run each Agent Parley CLI command alone, as `{command} ARGS` "
+            "from your worktree: no variable, `cd`, `;`, `&&`, `|`, "
+            "redirect or second command in the same call. Only that plain "
+            "form is pre-approved, so this call would wait on a permission "
+            "prompt. Change directory or filter output in a separate call."
+        )
     if exempt(payload):
         return None
     if conflict := reserved_conflict(payload, lane, mail):
@@ -1655,7 +1762,6 @@ def hazard(
             f"{held['holder']}. Coordinate with {held['holder']} or "
             "wait for the release; reservations are advisory."
         )
-    command = protocol.cli_command()
     now = time.time()
     for number, item in (issues.get("issues") or {}).items():
         offer = item.get("offer") or {}
@@ -2108,7 +2214,7 @@ def unscanned_hazard(
         The mailbox batch read and the hazard found, or None when the call
         is safe or coordination cannot be read.
     """
-    if exempt(payload):
+    if exempt(payload) and not chained_cli(payload):
         return None
     try:
         mail = mailbox(home, root, name)
@@ -3410,6 +3516,7 @@ def checkpoint(
                 advanced = scanned["advanced"]
                 if not advanced:
                     state.pop("base_advance", None)
+                    state.pop("base_advance_at", None)
                 advance_notice = bool(advanced) and advanced != state.get(
                     "base_advance"
                 )
@@ -3529,15 +3636,9 @@ def checkpoint(
                         sections.append(
                             (
                                 "advance",
-                                clip(
-                                    "The base branch advanced over paths you "
-                                    "hold: " + ", ".join(advanced),
-                                    300,
-                                )
-                                + "\nIt moved after this lane forked. Nothing "
-                                "was rebased or paused; decide whether to "
-                                "rebase, merge, or coordinate before "
-                                "continuing.",
+                                base_advance_notice(
+                                    advanced, manifest["root"], str(lane)
+                                ),
                             )
                         )
                     if budget_notice:
@@ -3578,8 +3679,9 @@ def checkpoint(
                         settled["work_offer"] = offer["id"]
                     if edit_notice:
                         settled["operator_edits"] = edited
-                    if advance_notice:
+                    if "advance" in kinds:
                         settled["base_advance"] = advanced
+                        settled["base_advance_at"] = time.time()
                     if quiet or (
                         event == "Stop"
                         and (

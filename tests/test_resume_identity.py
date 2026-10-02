@@ -132,6 +132,18 @@ def test_a_launch_moves_a_lane_sampled_stopped_to_starting_at_once(
     assert seen[0]["evidence"].startswith("launch:")
 
 
+def test_a_launch_moves_a_lane_to_stopped_once_the_client_exits(
+    bridge, repo, lane, monkeypatch
+):
+    root = roster.read(lane)["root"]
+    monkeypatch.setattr(terminal, "run", lambda *args, **kwargs: 0)
+    assert bridge.launch("claude", repo, terminal.PROMPT, resume=True) == 0
+    with store.connect(bridge.home) as db:
+        record = lanes.read(db, root, "claude")
+    assert record["state"] == lanes.STOPPED
+    assert record["evidence"] == "launch: session exited"
+
+
 def test_a_lane_that_never_reported_a_session_refuses_to_resume(
     bridge, repo, lane, monkeypatch
 ):

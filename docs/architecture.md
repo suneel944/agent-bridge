@@ -11,7 +11,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | Module | Responsibility |
 | --- | --- |
 | `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, prints the start-here screen for a bare invocation, and hands every other invocation to `cli` unchanged |
-| `start` | The read-only start-here screen: Git checkout and cleanliness, registration from the recorded manifests, native CLIs on PATH with their plugin records, the recorded service's liveness, and the next commands for that state |
+| `start` | The read-only start-here screen: Git checkout and cleanliness, registration from the recorded manifests, native CLIs on PATH with their plugin records, the recorded service's liveness, and the next commands for that state; for a registered project whose service runs, the count and two most urgent `problems` rows from the cached readings and whether outbound notification is off |
 | `cli` | Argument parsing and dispatch, plus the `Bridge` command object that joins the command groups below and keeps lane restore, pause, stop, restart, retirement, reclaim and pull requests |
 | `core` | Base of the `Bridge` command object: the private state root and its configuration, the mail server's start, stop and readiness, the project manifest and the participant lanes it records |
 | `settings` | The per-project settings commands: verification and initialization commands, approval policy, branch naming, issue tracker, declared resources, lane budgets and the limits of the enforced run budget (`budget enforce`) |
@@ -753,9 +753,10 @@ captured: it goes straight to the operator's terminal, and the refusal points
 there. Only lane initialization captures its command's output and reports the
 last twenty lines. A command that cannot run is a refusal, not a skip.
 No flag bypasses the gate, and removing it is an explicit `verify set ''`.
-`verify set`, `approval set` and `init set` are operator-only: each is refused
-from an assigned worktree or from any process holding a lane's
-`AGENT_PARLEY_TOKEN`, so a lane cannot clear a gate its own merge has to pass.
+`verify set`, `approval set`, a change through `approval resume` and
+`init set` are operator-only: each is refused from an assigned worktree or
+from any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot clear
+a gate its own merge has to pass or grant its own unattended resume.
 Like `approve`, this is a command-line boundary, not an operating-system one.
 The gate reports the base checkout as it stands before the merge, which is not
 a claim about the merged result, so the same command runs again on the merge
@@ -1191,8 +1192,17 @@ signaling. It does not kill arbitrary PIDs.
 
 The `process` module selects one bundle of operating-system primitives at
 import and every caller goes through that bundle, so no call site tests the
-platform. Each bundle supplies a creation-identity reader, an existence check,
-a command-line match and a terminate step.
+platform. Each bundle supplies a creation-identity reader, a hook's foreground
+process group reader, a parent process reader for walking a hook's ancestry
+without a controlling terminal, an existence check, a zombie check, a
+command-line match, a terminate step and a boot identifier, so a process
+record written before a restart is known to be from an earlier boot.
+
+A zombie counts as exited. A process that has exited but is not yet reaped
+keeps its process ID and its creation identity, so neither alone tells it from
+a running one; `alive` reports such a process as gone, and macOS shutdown
+stops polling once the target is a zombie. Linux reads the state field of
+`/proc/<pid>/stat` and macOS the `ps -o stat=` field, where `Z` marks a zombie.
 
 On Linux the bundle reads `/proc/<pid>/stat` for creation ticks and
 `/proc/<pid>/cmdline` for the argument vector, and shutdown pins the process

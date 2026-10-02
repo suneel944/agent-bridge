@@ -199,7 +199,10 @@ checkpoint lock is busy, and refuses a lane with uncommitted changes, so commit
 or preserve the work first; it never discards work. Ignored files in the
 worktree are deleted with it only after you confirm them by name, or with
 `--yes`. Commits
-the lane made are kept on its branch, and it says so. Messages are preserved.
+the lane made are kept on its branch, and it says so. It also refuses a lane
+whose ready work still awaits integration. Its issue claims return to the pool,
+its reservations are released and granted to queued peers, and mail it has not
+read or acknowledged is marked superseded. Messages are preserved.
 The replacement lane is a fresh worktree on the next free lane branch, so it
 does not continue the retired branch: merge that branch, or branch from it with
 Git, if the new lane should carry that work.

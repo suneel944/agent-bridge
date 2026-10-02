@@ -71,7 +71,7 @@ if [ "$spec" != agent-parley ]; then
     uv tool install --force "$spec"
 elif uv tool list 2>/dev/null | grep -q '^agent-parley '; then
     say "Upgrading agent-parley"
-    uv tool upgrade agent-parley
+    uv tool install --force agent-parley
 else
     say "Installing agent-parley"
     uv tool install agent-parley
@@ -95,12 +95,19 @@ if [ "$failed" -ne 0 ]; then
     exit 1
 fi
 
-provider=claude
-if ! command -v claude >/dev/null 2>&1 && command -v codex >/dev/null 2>&1; then
+provider=""
+if command -v claude >/dev/null 2>&1; then
+    provider=claude
+elif command -v codex >/dev/null 2>&1; then
     provider=codex
 fi
 say ""
-say "Next: cd your-repo && agent-parley run $provider"
+if [ -n "$provider" ]; then
+    say "Next: cd your-repo && agent-parley run $provider"
+else
+    say "Next: install claude or codex, then cd your-repo && agent-parley run <provider>."
+    say "No CLI yet? Try: agent-parley demo"
+fi
 }
 
 main "$@"

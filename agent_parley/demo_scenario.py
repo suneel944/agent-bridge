@@ -192,8 +192,11 @@ def handoffs(recorder: Recorder) -> None:
         "issue", "accept", ISSUE, "--offer-id", found.group(1), cwd=grace
     )
     recorder.caption("grace accepts; only then does ownership move.", limit=12)
-    recorder.tool("ada", "release_file_reservations", {"paths": [PATTERN]})
-    recorder.caption("ada releases the paths; grace's queued request is next.")
+    recorder.tool("ada", "release_file_reservations", {})
+    recorder.caption(
+        "ada releases all of its reservations; grace's queued request is "
+        "granted."
+    )
     recorder.run("issue", "list", cwd=grace)
     recorder.caption("Who holds what, at a glance.")
 

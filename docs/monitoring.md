@@ -74,8 +74,9 @@ dialog, is read. A framed dialog counts only while it shows at least two
 numbered options and its own footer (`Esc to cancel`, `Enter to select` and
 similar), and a usage limit counts only on the client's own notice line. Text
 that merely quotes a dialog, in scrollback or in the agent's output, never
-parks the lane. Once a dialog is answered, by the launcher or by a key you type
-in the lane's terminal, the next screen output releases the lane.
+parks the lane. Once a dialog is answered, by the launcher or by a digit or
+Enter you type in the lane's terminal, the next screen output releases the
+lane; any other key leaves it held.
 
 `directory-trust` is the screen that asks whether you trust the folder. Codex
 records that trust for the repository root, so trusting a lane's worktree also
@@ -132,22 +133,25 @@ and a service-driven resume has nobody at the keyboard to answer. `claude` 2.1.2
 carries per-tool approval in its own settings, so a launch can allow that one MCP
 server there, and only when you record the opt-in:
 
-```json
-{
-  "supervision": {"approve_bridge_tools": true},
-  "participants": {
-    "claude-2": {"approve_bridge_tools": false}
-  }
-}
+```sh
+agent-parley approval resume --bridge-tools on
+agent-parley approval resume --bridge-tools off --participant claude-2
 ```
 
-The default is off and changes nothing about the client's configuration. While
-a `claude` lane the service could resume has neither this opt-in nor
-`auto_mode`, `run` and `participant add` say so on standard error, `doctor`
-lists the lane under `approvals` as a setup gap, and the service withholds its
-resume: the wake is recorded as `setup gap: bridge tool approval not recorded`,
-which `problems` reports under `wake attention` with the opt-in and the
-`run --resume` command for your own terminal. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
+The command writes `approve_bridge_tools` under `supervision` in the project
+manifest, or on one lane with `--participant`; `--auto-mode on|off` records
+`auto_mode` the same way, and `approval resume` with no flag reports both for
+each lane. Only the operator can change them. The default is off and changes
+nothing about the client's configuration. While a `claude` lane the service
+could resume has neither this opt-in nor `auto_mode`, `run` and
+`participant add` say so on standard error, `doctor` lists the lane under
+`approvals` as a setup gap with that command, and the service withholds its
+resume: the wake is recorded as `setup gap: bridge tool approval not recorded`
+and spends no wake attempt, because the outcome is known from the manifest, so
+the lane is never escalated for it and its backlog waits for the opt-in or
+your own resume. `problems` reports the lane under `wake attention` with the
+command that records the opt-in and the `run --resume` command for your own
+terminal; when several lanes of one project share the gap, they share one row. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
 allows this bridge's own coordination tools, and
 `Bash(<interpreter> -m agent_parley.cli *)`, which allows the exact interpreter
 and module the protocol prompt orders every lane to run for `issue claim`,
@@ -160,6 +164,15 @@ again while the prompt holds the screen and answers `Yes` when the prompt's
 command begins with that interpreter and module and chains no second command.
 A prompt for any other command escalates as before. A participant entry
 overrides the project entry, so one lane can stay fully interactive.
+
+The client matches the CLI rule only against one plain command. A call that
+puts the prefix in a variable, changes directory first, chains a second
+command, pipes or redirects (`P=...; cd <lane> && $P issue accept ... | grep`)
+falls outside it and would stop on a prompt nobody answers in a resumed
+session. The `PreToolUse` hook therefore refuses any shell call that runs the
+CLI in such a form, recorded as `chained_cli`, and the reason tells the lane
+to run the command alone; the protocol prompt and the `coordinate` skill state
+the same rule.
 
 A lane the supervisor launches or resumes runs in the client's default
 permission mode unless you record `auto_mode`. A lane you started by hand and
@@ -193,12 +206,17 @@ lane. The supervision key `titles` turns the tab title off; the details are in
 per project, the open work: each live claim's issue, title, owner, lane state,
 last event and pull request, then one line per lane with its state, live claim
 count and current task. The task is the lane's last report while the lane still
-holds the issue that report named. A report on an issue the lane no longer
-holds is labelled with that issue and its age, such as `#1017 (not held,
-reported 21m ago): ...`, and open claims with no report since they were
-claimed are named first, such as `no report on held #1500, #1695`; `--json`
-carries the same reading as `report_issue`, `report_held` and each claim's
-`reported_since_claim`. Inside a project checkout it reports that project only;
+holds the issue that report named. A blocked or partial report that mail
+citing its issue has followed is labelled with its age and that mail's count,
+such as `#782 (reported 58m ago, 2 newer messages on it): ...`, because the
+mail may say the remaining work is done; the count covers messages the lane
+sent, received or can read on the project feed that cite the issue as `#N`.
+A report on an issue the lane no longer holds is labelled with that issue and
+its age, such as `#1017 (not held, reported 21m ago): ...`, and open claims
+with no report since they were claimed are named first, such as `no report on
+held #1500, #1695`; `--json` carries the same reading as `report_issue`,
+`report_held`, `report_newer_mail` and each claim's `reported_since_claim`.
+Inside a project checkout it reports that project only;
 `--all-projects` adds the rest, dormant ones last, and `--all` adds claims whose
 issue is closed or whose pull request ended. Titles and open state come from
 `forge-issues.json` in the project state directory, which the service's poll
@@ -460,13 +478,19 @@ agent-parley doctor
 agent-parley doctor --json
 ```
 
-`doctor` prints four components: the launcher's version and protocol, the
-protocol each shipped plugin manifest declares, the store's schema against the
-schema this build writes, and the `service` component, which compares the
-running coordination service against the code installed here. A service started
-from an older build is reported stale with the restart that clears it, rather
-than reported ready. `doctor` exits non-zero on a mismatch, so a script can gate
-on it. It reads only, and prints no credential.
+`doctor` prints the launcher's version and protocol, the protocol each shipped
+plugin manifest declares, the store's schema against the schema this build
+writes, and the `service` component, which compares the running coordination
+service against the code installed here. A service started from an older build
+is reported stale with the restart that clears it, rather than reported ready.
+Then `projects` names each registered root that no longer exists, `notify`
+says whether outbound and inbound notification are active, `approvals` names
+each lane lacking the resume opt-in, and a platform line names the kernel
+release, the WSL generation and whether `pidfd_open` is available. `doctor`
+exits non-zero on a version mismatch, a missing project root, or notification
+configured but unable to send, so a script can gate on it; notification that
+is off and an `approvals` setup gap leave it at zero. It reads only, and
+prints no credential.
 
 ## `metrics`
 

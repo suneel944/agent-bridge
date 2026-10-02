@@ -1,5 +1,6 @@
 """Checks the version, show and list verbs the command surface offers."""
 
+import argparse
 import json
 import sys
 
@@ -27,6 +28,7 @@ NEW_COMMANDS = (
     ("status", "--help"),
     ("top", "--help"),
     ("approval", "show", "--help"),
+    ("approval", "resume", "--help"),
     ("branch", "show", "--help"),
     ("forge", "show", "--help"),
     ("state", "show", "--help"),
@@ -130,6 +132,103 @@ def test_grouped_help_lists_every_declared_command(monkeypatch, capsys):
     for name in grouped:
         assert f"  {name} " in printed
     assert "__complete" not in printed
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("issue", "show", "829"),
+        ("participant", "show", "claude-2"),
+        ("gc", "--dry-run"),
+        ("issue", "release", "829"),
+    ),
+)
+def test_outside_a_checkout_names_repo(
+    tmp_path, monkeypatch, capsys, arguments
+):
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    assert cli.main() == 1
+    assert capsys.readouterr().err == (
+        "agent-parley: not inside a Git repository; pass --repo PATH or "
+        "run from the checkout\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "usage"),
+    (
+        (("say",), "usage: agent-parley say "),
+        (("report",), "usage: agent-parley report "),
+        (("history",), "usage: agent-parley history "),
+        (("mail", "send"), "usage: agent-parley mail send "),
+    ),
+)
+def test_missing_argument_prints_the_command_usage(
+    tmp_path, monkeypatch, capsys, arguments, usage
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["agent-parley", "--home", str(tmp_path / "home"), *arguments],
+    )
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 2
+    printed = capsys.readouterr().err
+    assert printed.startswith(usage)
+    assert f"\nagent-parley {arguments[0]}" in printed
+
+
+def test_every_subcommand_action_carries_help():
+    parser, _ = cli.root_parser(None)
+    pending = [((), parser)]
+    bare = []
+    while pending:
+        path, current = pending.pop()
+        for action in current._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            helped = {
+                id(action.choices[choice.dest])
+                for choice in action._choices_actions
+            }
+            for name, child in action.choices.items():
+                if id(child) not in helped:
+                    bare.append(" ".join((*path, name)))
+                pending.append(((*path, name), child))
+    assert bare == []
+
+
+@pytest.mark.parametrize(
+    ("command", "described"),
+    (
+        ("issue", "Ask the holder of an issue to hand it to this lane."),
+        ("participant", "Push the lane branch and open or locate its pull"),
+        ("mail", "Search this lane's mail."),
+        ("unattended", "Integrate one eligible lane under the policy."),
+        ("approval", "Show which steps require a recorded approval first."),
+        ("decision", "List or search the decisions recorded for this"),
+    ),
+)
+def test_group_help_describes_each_action(
+    monkeypatch, capsys, command, described
+):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys, "argv", ["agent-parley", command, "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert described in " ".join(capsys.readouterr().out.split())
 
 
 def test_status_accepts_repo_as_the_project_selector(
@@ -1025,3 +1124,55 @@ def test_a_duration_option_rejects_a_non_finite_window(
     assert f"--within: invalid duration value: '{text}'" in (
         capsys.readouterr().err
     )
+
+
+def test_approval_resume_records_the_service_resume_opt_ins(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    from agent_parley import supervision
+
+    def resume(*flags):
+        return text(
+            monkeypatch,
+            capsys,
+            "--home",
+            str(bridge.home),
+            "approval",
+            "resume",
+            *flags,
+            "--repo",
+            str(repo),
+        )
+
+    directory = bridge.project(repo)[1]
+    assert "claude: approve_bridge_tools off, auto_mode off" in resume()
+    shown = resume("--bridge-tools", "on", "--participant", "claude")
+    assert shown.strip() == "claude: approve_bridge_tools on, auto_mode off"
+    assert roster.read(directory)["participants"]["claude"][
+        "approve_bridge_tools"
+    ]
+    assert not supervision.opt_in_missing(
+        bridge.home, roster.read(directory), "claude"
+    )
+    shown = resume("--auto-mode", "on")
+    assert "codex: approve_bridge_tools off, auto_mode on" in shown
+    assert roster.read(directory)["supervision"]["auto_mode"] is True
+    resume("--bridge-tools", "off", "--participant", "claude")
+    assert "claude: approve_bridge_tools off, auto_mode on" in resume()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "approval",
+            "resume",
+            "--participant",
+            "nobody",
+            "--repo",
+            str(repo),
+        ],
+    )
+    assert cli.main() != 0
+    assert "nobody is not a participant" in capsys.readouterr().err

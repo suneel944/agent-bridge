@@ -1,5 +1,6 @@
 """Runs `agent-parley demo` end to end and checks that it leaves nothing."""
 
+import ast
 import io
 import os
 import pty
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import demo, demo_scenario
+from agent_parley import demo, demo_scenario, server
 
 STAGES = (
     ("One loopback coordination server", "$ agent-parley up"),
@@ -150,3 +151,39 @@ def test_q_or_ctrl_c_stops_the_demo_and_removes_everything(stop):
     base = Path(found.group(1))
     assert not base.exists()
     assert demo.leftovers(base) == []
+
+
+def _recorder_tool_calls() -> list[tuple[str, set[str]]]:
+    """Finds every ``recorder.tool(...)`` call site in the demo scenario."""
+    source = Path(demo_scenario.__file__).read_text()
+    calls = []
+    for node in ast.walk(ast.parse(source)):
+        is_recorder_tool = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "tool"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "recorder"
+        )
+        if not is_recorder_tool:
+            continue
+        tool_name = ast.literal_eval(node.args[1])
+        keys = {
+            key.value
+            for key in node.args[2].keys
+            if isinstance(key, ast.Constant)
+        }
+        calls.append((tool_name, keys))
+    return calls
+
+
+def test_every_demo_tool_call_matches_its_server_schema():
+    schemas = {tool["name"]: tool["inputSchema"] for tool in server.TOOLS}
+    calls = _recorder_tool_calls()
+    assert calls
+    for tool_name, keys in calls:
+        schema = schemas[tool_name]
+        properties = set(schema["properties"])
+        required = set(schema["required"])
+        assert keys <= properties, (tool_name, keys, properties)
+        assert required <= keys, (tool_name, keys, required)

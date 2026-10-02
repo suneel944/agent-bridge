@@ -87,6 +87,23 @@ def linux_running(pid: int) -> bool:
     return Path(f"/proc/{pid}").exists()
 
 
+def linux_zombie(pid: int) -> bool:
+    """Reports whether a Linux process has exited but not been reaped.
+
+    A zombie keeps its process ID and its recorded creation ticks until
+    its parent reaps it, so neither alone tells an exited process from a
+    running one.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        Whether `/proc` lists the process in the zombie state.
+    """
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    return fields[0] == "Z"
+
+
 def linux_foreground_pid(pid: int) -> int:
     """Reads the foreground process group of a Linux hook process.
 
@@ -257,6 +274,22 @@ def darwin_running(pid: int) -> bool:
     return True
 
 
+def darwin_zombie(reader: PsReader, pid: int) -> bool:
+    """Reports whether a macOS process has exited but not been reaped.
+
+    A zombie still answers the signal-zero existence check, so only the
+    state ``ps`` prints tells it from a running process.
+
+    Args:
+        reader: Reads one ``ps`` field for a process ID.
+        pid: Process ID to inspect.
+
+    Returns:
+        Whether ``ps`` reports the process in the zombie state.
+    """
+    return reader("stat=", pid).startswith("Z")
+
+
 def darwin_start_ticks(reader: PsReader, pid: int) -> str:
     """Reads a macOS process creation time through ``ps``.
 
@@ -396,7 +429,7 @@ def darwin_terminate(reader: PsReader, pid: int, ticks: str) -> None:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 pass
-            if not darwin_running(pid):
+            if not darwin_running(pid) or darwin_zombie(reader, pid):
                 return
             time.sleep(POLL_INTERVAL)
     raise BridgeError(f"Process {pid} did not exit after SIGTERM and SIGKILL.")
@@ -415,6 +448,9 @@ class Platform(NamedTuple):
         parent_pid: Returns a process's parent, for walking a hook's
             ancestry when it has no controlling terminal.
         running: Reports whether a process ID currently exists.
+        zombie: Reports whether a process ID has exited but is not yet
+            reaped, so its creation identity still matches while nothing
+            can be signaled or waited for.
         matches_command: Reports whether a process runs this server for
             a given private state directory.
         terminate: Verifies identity, signals the process, and waits for
@@ -427,6 +463,7 @@ class Platform(NamedTuple):
     foreground_pid: Callable[[int], int]
     parent_pid: Callable[[int], int]
     running: Callable[[int], bool]
+    zombie: Callable[[int], bool]
     matches_command: Callable[[int, Path], bool]
     terminate: Callable[[int, str], None]
     boot_id: Callable[[], str]
@@ -472,6 +509,7 @@ def linux_platform() -> Platform:
         foreground_pid=linux_foreground_pid,
         parent_pid=linux_parent_pid,
         running=linux_running,
+        zombie=linux_zombie,
         matches_command=linux_matches_command,
         terminate=linux_terminate,
         boot_id=linux_boot_id,
@@ -493,6 +531,7 @@ def darwin_platform(reader: PsReader = read_ps_field) -> Platform:
         foreground_pid=functools.partial(darwin_foreground_pid, reader),
         parent_pid=functools.partial(darwin_parent_pid, reader),
         running=darwin_running,
+        zombie=functools.partial(darwin_zombie, reader),
         matches_command=functools.partial(darwin_matches_command, reader),
         terminate=functools.partial(darwin_terminate, reader),
         boot_id=darwin_boot_id,
@@ -677,10 +716,17 @@ def alive(pid: int | None, ticks: str | None) -> bool:
 
     Returns:
         Whether the process runs and was created at the recorded time. A
-        recycled process ID reports false, and so does a missing record.
+        recycled process ID reports false, a missing record reports
+        false, and so does a process left in the zombie state, which
+        keeps its process ID and creation identity after it has already
+        exited.
     """
     try:
-        return pid is not None and start_ticks(pid) == ticks
+        return (
+            pid is not None
+            and start_ticks(pid) == ticks
+            and not PLATFORM.zombie(pid)
+        )
     except (OSError, IndexError, ValueError, TypeError):
         return False
 

@@ -1160,7 +1160,8 @@ def test_a_claude_resume_without_the_approval_opt_in_is_withheld(
     else:
         assert not launched
         assert record["result"] == supervision.OPT_IN_MISSING
-        assert record["attempts"] == 1
+        assert record["attempts"] == 0
+        assert not record["exhausted_at"]
 
 
 def test_operator_stop_holds_until_the_next_launch(

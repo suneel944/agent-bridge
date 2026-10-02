@@ -46,6 +46,7 @@ COMPOSED_FROM = (
     "issue_revision",
     "work_offer",
     "operator_edits",
+    "base_advance",
     "batches",
 )
 MAX_BATCHES = 8
@@ -123,8 +124,21 @@ def _notices(
     offer: dict | None,
     edits: list,
     state: dict,
+    advance: str = "",
 ) -> list:
-    """Builds the non-mail notices undelivered since the last delivery."""
+    """Builds the non-mail notices undelivered since the last delivery.
+
+    Args:
+        agent: Assigned native lane name.
+        issues: Issue ledger snapshot.
+        offer: The lane's work offer, or None.
+        edits: Reserved paths an operator changed in the base checkout.
+        state: The lane's activity state as last delivered.
+        advance: Base advance notice owed to the lane, or an empty string.
+
+    Returns:
+        The notice texts, in delivery order.
+    """
     parts = []
     if issues["revision"] != state.get("issue_revision", 0):
         notice = checkpoints.standing_notices(
@@ -148,6 +162,8 @@ def _notices(
             "was reverted; reservations are advisory. Coordinate before "
             "continuing."
         )
+    if advance:
+        parts.append(advance)
     return parts
 
 
@@ -161,6 +177,7 @@ def _compose(
     offer: dict | None,
     edits: list,
     state: dict,
+    advance: str = "",
 ) -> tuple[str, list]:
     """Composes one bounded delivery from everything undelivered.
 
@@ -168,7 +185,7 @@ def _compose(
     `checkpoints` builders the hook path uses, so a polled lane reads mail in
     the same relevance order under the same header.
     """
-    parts = [HEADER, *_notices(agent, issues, offer, edits, state)]
+    parts = [HEADER, *_notices(agent, issues, offer, edits, state, advance)]
     if mail["stale_reservations"]:
         parts.append(
             f"{mail['stale_reservations']} of your {mail['reservations']} "
@@ -238,8 +255,9 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
     lane's recorded cursor advances only for the previews that fit the
     context bound, so the remainder arrives on the next interval. New
     project feed items and a changed set of owed acknowledgements are
-    delivered once. A paused lane is skipped, because a pause holds its
-    work rather than its mail.
+    delivered once, and so is a base advance over held paths, once per set
+    of moved paths, with the time it was delivered recorded. A paused lane
+    is skipped, because a pause holds its work rather than its mail.
 
     The mailbox, issue and offer reads happen before the lane's checkpoint
     lock is taken, so a hook that ends a turn never waits behind them. Under
@@ -268,8 +286,17 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
     if participant.get("paused", False):
         return 0
     identity = json.loads((directory / f"{agent}-identity.json").read_text())
-    edits = supervision.readings(home, manifest)[0].get(agent, [])
+    edited, advances = supervision.readings(home, manifest)
+    edits = edited.get(agent, [])
+    advanced = advances.get(agent, [])
     read = checkpoints.activity(directory, agent)
+    advance = (
+        checkpoints.base_advance_notice(
+            advanced, manifest["root"], participant["lane"]
+        )
+        if advanced and advanced != read.get("base_advance")
+        else ""
+    )
     mail = checkpoints.mailbox(
         home, manifest["root"], identity["name"], read.get("cursor", 0)
     )
@@ -282,7 +309,16 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
     issues = snapshot(directory)
     offer = checkpoints.work_offer(directory, agent)
     text, delivered = _compose(
-        agent, identity["name"], mail, news, owed, issues, offer, edits, read
+        agent,
+        identity["name"],
+        mail,
+        news,
+        owed,
+        issues,
+        offer,
+        edits,
+        read,
+        advance,
     )
     batches = read.get("batches", [])
     unread = _unread(
@@ -298,13 +334,17 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
         or (not batch["ids"] and not text and batch is batches[-1])
     ]
     if not text:
-        if kept != batches:
+        settled = not advanced and "base_advance" in read
+        if kept != batches or settled:
             with lock(directory / f"{agent}-checkpoint.lock", timeout=1):
                 state = checkpoints.activity(directory, agent)
                 if state.get("batches", []) == batches:
                     with contextlib.suppress(OSError):
                         _publish(directory, agent, kept)
                     state["batches"] = kept
+                    if settled:
+                        state.pop("base_advance", None)
+                        state.pop("base_advance_at", None)
                     write_json(directory / f"{agent}-activity.json", state)
         return 0
     with lock(directory / f"{agent}-checkpoint.lock", timeout=1):
@@ -345,6 +385,12 @@ def deliver(home: Path, directory: Path, agent: str) -> int:
             state["operator_edits"] = edits
         else:
             state.pop("operator_edits", None)
+        if advance:
+            state["base_advance"] = advanced
+            state["base_advance_at"] = time.time()
+        elif not advanced:
+            state.pop("base_advance", None)
+            state.pop("base_advance_at", None)
         size = len(text.encode())
         checkpoints.count_injection(state, size)
         state["injections"] = state.get("injections", 0) + 1

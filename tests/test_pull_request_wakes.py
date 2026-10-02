@@ -500,3 +500,148 @@ def test_three_pull_requests_sharing_a_not_started_cause_are_one_row(
     assert record["kind"] == "checks_not_started"
     assert "3 pull requests blocked" in record["question"]
     assert record["state"] == decisions.OPEN
+
+
+CANCELLED = [
+    {
+        "name": "wsl",
+        "conclusion": "cancelled",
+        "not_started": False,
+        "run": "36832806201",
+        "job": "104",
+    }
+]
+RERUN = "gh run rerun 36832806201 --job 104 --repo owner/name"
+
+
+def reruns(monkeypatch, accepted=True):
+    """Records each automatic re-run request with a fixed forge answer."""
+    calls = []
+
+    def rerun_job(root, run, job):
+        calls.append((run, job))
+        return RERUN, accepted
+
+    monkeypatch.setattr(supervision.forge, "rerun_job", rerun_job)
+    return calls
+
+
+def cancelled(directory, **fields):
+    """Builds a red reading whose only failing check was cancelled."""
+    return reading(
+        directory,
+        checks="red",
+        failing=["wsl"],
+        failed=CANCELLED,
+        **fields,
+    )
+
+
+def test_the_forge_reading_names_the_run_and_job_of_a_failed_check(
+    monkeypatch, tmp_path
+):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    records = [
+        {
+            "number": 1,
+            "statusCheckRollup": [
+                {
+                    "name": "wsl",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "detailsUrl": "https://github.com/owner/name/actions/"
+                    "runs/36832806201/job/104",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(forge, "_run", lambda *args: json.dumps(records))
+    (one,) = forge.open_pull_requests(tmp_path)
+    assert one["failed"] == CANCELLED
+
+
+def test_rerun_job_runs_one_job_through_gh(monkeypatch, tmp_path):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "slug", lambda repo: "owner/name")
+    monkeypatch.setattr(forge.shutil, "which", lambda name: "/usr/bin/gh")
+    calls = []
+    monkeypatch.setattr(
+        forge, "_run", lambda args, timeout: calls.append(args) or ""
+    )
+    assert forge.rerun_job(tmp_path, "36832806201", "104") == (RERUN, True)
+    assert calls == [RERUN.split()]
+    assert forge.rerun_job(tmp_path, "1; rm", "104")[1] is False
+    assert len(calls) == 1
+    monkeypatch.setattr(forge, "_run", lambda args, timeout: None)
+    assert forge.rerun_job(tmp_path, "36832806201", "104") == (RERUN, False)
+    forge.select(tmp_path, {"forge": "null"})
+    assert forge.rerun_job(tmp_path, "1", "2")[1] is False
+
+
+def test_a_cancelled_job_is_rerun_once_per_head(bridge, project, monkeypatch):
+    calls = reruns(monkeypatch)
+    red = cancelled(project)
+    observe(bridge, project, monkeypatch, red)
+    assert calls == [("36832806201", "104")]
+    assert "one re-run was requested for you" in received(bridge, "claude")[-1]
+    assert "re-run requested" in failed_rows(project)[0]["detail"]
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    rows = failed_rows(project)
+    assert "#7 re-run requested: wsl cancelled" in rows[0]["detail"]
+    assert "nothing to push" in rows[0]["command"]
+    observe(bridge, project, monkeypatch, red)
+    assert len(calls) == 1
+    assert RERUN in received(bridge, "claude")[-1]
+    rows = failed_rows(project)
+    assert "attempt 2): wsl cancelled" in rows[0]["detail"]
+    assert rows[0]["command"] == f"run `{RERUN}` yourself, or fix and push"
+    observe(bridge, project, monkeypatch, cancelled(project, sha=NEXT))
+    assert len(calls) == 2
+
+
+def test_a_failure_or_a_partly_failed_run_is_never_rerun(
+    bridge, project, monkeypatch
+):
+    calls = reruns(monkeypatch)
+    observe(
+        bridge,
+        project,
+        monkeypatch,
+        reading(project, checks="red", failing=["test"], failed=FAILED),
+    )
+    mixed = reading(
+        project,
+        sha=NEXT,
+        checks="red",
+        failing=["test", "wsl"],
+        failed=FAILED + CANCELLED,
+    )
+    observe(bridge, project, monkeypatch, mixed)
+    assert calls == []
+
+
+def test_the_rerun_setting_turns_the_automatic_rerun_off(
+    bridge, project, monkeypatch
+):
+    calls = reruns(monkeypatch)
+    red = cancelled(project)
+    monkeypatch.setattr(
+        supervision.forge, "open_pull_requests", lambda root: [red]
+    )
+    supervision.pull_request_wakes(
+        bridge.home, project, manifest(project), rerun=False
+    )
+    assert calls == []
+    assert supervision.settings({})["rerun_cancelled"] is True
+    with pytest.raises(supervision.BridgeError):
+        supervision.settings({"rerun_cancelled": "no"})
+
+
+def test_a_refused_rerun_names_the_exact_command(bridge, project, monkeypatch):
+    reruns(monkeypatch, accepted=False)
+    observe(bridge, project, monkeypatch, cancelled(project))
+    assert f"so run `{RERUN}` yourself" in received(bridge, "claude")[-1]
+    rows = failed_rows(project)
+    assert "re-run requested" not in rows[0]["detail"]
+    assert rows[0]["command"] == f"run `{RERUN}` yourself, or fix and push"

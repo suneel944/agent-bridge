@@ -48,7 +48,10 @@ TOOL_PREFIX = f"mcp__{SERVER}"
 HEADER = "Agent-Parley-Protocol"
 PROTOCOL = 1
 SUPPORTED = (1,)
-UPDATE = "agent-parley setup PATH reinstalls the plugin for this repository."
+UPDATE = (
+    "agent-parley plugins install reinstalls the plugin; a lane already "
+    "running on the old one must be restarted to pick it up."
+)
 MIGRATE = "agent-parley up migrates the store in place; no lane is stopped."
 UPGRADE = "A newer agent-parley wrote this store; install that version."
 RELAUNCH = "agent-parley up starts a service on the code in the checkout."
@@ -63,9 +66,10 @@ ROOT_GONE = "root gone"
 SETUP_GAP = "setup gap"
 RESTORE_ROOT = (
     "These projects name a root checkout that no longer exists; restore "
-    "it, or remove the project's state folder once nothing in it is "
-    "needed: "
+    "it, or remove the project's state once the service retired its "
+    "lanes: "
 )
+FORGET_ROOT = "agent-parley gc --project {root} --apply"
 
 
 def cli_command() -> str:

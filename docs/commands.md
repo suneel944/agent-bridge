@@ -13,6 +13,14 @@ from each CLI's own record (`installed_plugins.json` under
 `CODEX_HOME`) to stay fast; `plugins status` asks the CLIs themselves and is
 the authoritative reading.
 
+For a registered project whose service runs, the screen also reads what
+`agent-parley problems` would list, from the readings supervision cached
+rather than a fresh forge poll. A `Needs you` line gives the count and the
+two most urgent rows, and `agent-parley problems` then leads the next
+commands. When no outbound notification transport is configured and the
+project has lanes, a `Notify off` line appears with `agent-parley notify
+setup`. A project with nothing pending shows neither line.
+
 Use `agent-parley --help` for the full command list, led by a start-here
 group (`run`, `status`, `top`, `problems`, `demo`, `doctor`) and then grouped
 as coordination, policy, observability and lifecycle, and
@@ -51,14 +59,14 @@ on standard output and export to a file.
 | `up` | Start the local coordination server. |
 | `down` | Stop the server while retaining state and worktrees. |
 | `completion SHELL` | Print a `bash`, `zsh` or `fish` completion script generated from the installed command tree. |
-| `demo` | Run the coordination story in a throwaway sandbox: a temporary Git repository, a temporary state home and a service on a free port, with two stub lanes that claim in parallel, meet a reservation collision and a hook refusal, hand off an issue and appear in a `top` snapshot. Each step prints one line naming what happened and the real command behind it. No native CLI, model, network or account is used, and the user's state home, repositories and running service are never touched. It finishes by itself in well under 90 seconds; `q` or Ctrl-C stops it early, and every exit removes the worktrees, processes and temporary directories it created. Without a terminal it prints the same story as plain lines. `make demo-stub` renders the full recording from the same scenario, and `python scripts/record_demo.py --short` the README's four-step cut. |
+| `demo` | Run the coordination story in a throwaway sandbox: a temporary Git repository, a temporary state home and a service on a free port, with two stub lanes that claim in parallel, meet a reservation collision and a hook refusal, hand off an issue and appear in a `top` snapshot. Each step prints one line naming what happened and the real command behind it. No native CLI, model, network or account is used, and the user's state home, repositories and running service are never touched. It finishes by itself in well under 90 seconds; `q` or Ctrl-C stops it early, and every exit removes the worktrees, processes and temporary directories it created. Without a terminal it prints the same story as plain lines. `make demo-stub` renders the full recording from the same scenario; `python scripts/record_demo.py --short` writes the four-step cut to `docs/assets/demo-short.svg`, and `--video` writes the launch video's frames to `docs/video/frames.js`. The README shows the launch video, not these SVGs. |
 | `status` | Show server health, whether the running service is behind the installed code, and the open work of the project the working directory belongs to, each lane's condition read from its authoritative state record; `--all-projects` reports every project with dormant ones last, `--table` prints the full per-lane table instead, and `--all` also lists claims whose issue or pull request ended on the forge. `NAME` reports one lane in full, and `--repo`, `--provider`, `--outcome`, `--drifted`, `--pending`, `--idle`, `--since`, `--over-budget` and `--issue` narrow the rows; a named lane or any lane filter prints the table. |
 | `setup PATH` | Register a repository from committed HEAD. |
 | `run NAME` | Launch a lane; supports `--provider`, `--credentials`, `--repo`, and `--task`; `--resume` reopens the lane's recorded native session. |
 | `top` | The dashboard of live lanes; `--once` prints a snapshot, `--interval` sets refresh seconds, `--provider`, `--repo`, `--participant` and `--since` filter it, `--sort`, `--reverse` and `--columns` shape it; `--no-operator-edits` skips reading a base checkout that is always dirty for operator edits on reserved paths; `--all` also shows stopped lanes holding nothing and projects whose root is gone, which the header otherwise only counts. |
 | `title` | Print the current lane's name, state and claim progress for a native status line; prints nothing outside a lane. |
 | `metrics` | Export the live counters and gauges as Prometheus text or `--json`; `--output` writes a file atomically and `--every` rewrites it; `--provider` narrows the lanes and `--since` bounds the enforcement history counted. |
-| `report` | Record `--state`, `--summary`, and required `--remaining` or `--evidence`; `--backlog COUNT` states the work units left on the claim, which is what lets the supervisor offer a split once the lane goes idle on it; `--issue` binds the report to one owned issue, `--resume-on N` resumes a blocked report once that issue completes, and `--idempotency-key` makes a retry safe. |
+| `report` | Record `--state`, `--summary`, and required `--remaining` or `--evidence`; `--backlog COUNT` states the work units left on the claim, which is what lets the supervisor offer a split once the lane goes idle on it; `--issue` binds the report to one owned issue, `--resume-on N` resumes a blocked report once that issue completes, `--until SECONDS` sets the seconds until the lane's next check and is required with `--state waiting`, capped by the project's wait deadline, and `--idempotency-key` makes a retry safe. |
 | `report show ID` | Print one report this lane recorded, the latest verdict a peer recorded against it, and with `--full` the whole attached evidence. |
 | `report review ID` | Record this lane's `--verdict pass\|fail` on another lane's report with the `--evidence` it checked. The report's own author is refused. A verdict is the reviewing lane's own claim about work it did not do, not independent verification, and it approves nothing. |
 | `say NAME TEXT` | Send as `operator`; `--subject` sets the inbox subject line, `--ack` requests acknowledgement, `--within 15m` records a deadline for it that only reads overdue, and `--key` controls deduplication. |
@@ -85,20 +93,20 @@ on standard output and export to a file.
 | `plan propose --base N --add I:B --remove I:B --reason TEXT` | File a revision of the applied plan's edges against plan version `N`: `--add` records a discovered prerequisite, `--remove` drops an obsolete edge, each repeatable, with up to five `--evidence TEXT`. A lane's revision applies at once only inside the plan's `[revisions]` envelope; otherwise it is kept, changing nothing, with the `plan approve` command that applies it. |
 | `plan proposals` | Print the current plan version, the envelope, the automatic revisions used and every retained proposal with its status. |
 | `plan approve ID` | As `operator`, validate the whole resulting graph and apply one open revision, authorizing any prerequisite it adds; a revision whose base version is no longer current is recorded as stale; an optional `--reason` is kept with it. `plan reject ID --reason TEXT` refuses it. |
-| `gc` (alias `reclaim`) | Report the lanes and lane-made worktrees a reclaim would remove and keep, with each worktree's size; `--dry-run` is that default, `--apply` removes them, and `--apply --force` also removes lane-made worktrees kept for uncommitted changes, unpushed commits or a recent change after writing a recovery checkpoint of each; a lane's own worktree is never forced. A lane-made worktree holding files Git ignores is kept even with `--force`, and a quiet one whose unpushed commits already landed through another branch is removed without it, its commits bundled into a recovery checkpoint first. |
+| `gc` (alias `reclaim`) | Report the lanes and lane-made worktrees a reclaim would remove and keep, with each worktree's size; `--dry-run` is that default, `--apply` removes them, and `--apply --force` also removes lane-made worktrees kept for uncommitted changes, unpushed commits or a recent change after writing a recovery checkpoint of each; a lane's own worktree is never forced. A lane-made worktree holding files Git ignores is kept even with `--force`, and a quiet one whose unpushed commits already landed through another branch is removed without it, its commits bundled into a recovery checkpoint first. `gc --project ROOT` instead reports the removal of the private state of a project whose root checkout is gone, and `--apply` removes it; it refuses while the root exists, while any lane's session process may still run, or before the service has retired the project. Its recovery checkpoints move to `recovered/` under the state root unless `--yes` deletes them too. |
 | `notify setup --chat ID` | Store the Telegram chat id, owner-only; `--inbound` also answers status queries from that chat. The bot token, and with `--inbound` the passcode, are read from a prompt or standard input. |
 | `notify test` | Send one test message on each configured transport. |
-| `doctor` | Report launcher, plugin, store and running-service versions and their fit; non-zero exit on a mismatch. |
+| `doctor` | Report the launcher, plugin, store and service components and their fit, plus `projects` (registered roots that no longer exist), `notify` (whether outbound and inbound notification are active), `approvals` (lanes lacking the resume opt-in) and the host platform; non-zero exit on a version mismatch, a missing project root, or a notification transport configured but unable to send. A setup gap under `approvals` and notification that is simply off leave the exit at zero. |
 | `plugins install` | For each of `claude` and `codex` found on PATH, add the `suneel944/agent-parley` marketplace and install `agent-parley@agent-parley` through the CLI's own plugin commands, only where its listing lacks them; a re-run refreshes the marketplace and updates the plugin instead, never adding a second entry. Non-zero exit when a detected CLI's command fails. |
 | `plugins status` | Report, per supported CLI, whether it is on PATH, has the marketplace and has the plugin installed; writes nothing. |
-| `problems` | List every lane, claim and store condition that needs attention, oldest first, one row per lane per cause with its count and the remedy the lane's state allows; rows the supervision service is handling say so, `--ack-after` sets the acknowledgement age, `--json` prints it for scripts, exit 1 when any row exists. |
+| `problems` | List every lane, claim and store condition that needs attention, oldest first, one row per lane per cause with its count and the remedy the lane's state allows, except that two or more lanes of one project lacking the resume opt-in share one project row naming them; rows the supervision service is handling say so, `--ack-after` sets the acknowledgement age, `--json` prints it for scripts, exit 1 when any row exists. |
 | `problems ack ID` | Record your own acknowledgement of one message a lane left unanswered. It clears that condition and nothing else: no ownership moves, no reservation is released and no lane is woken. |
 | `issue ... --idempotency-key KEY` | Retry a transition safely; the repeat returns the first result. `issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`, `unblock` and `request`, and `report`, accept it; `issue recover`, `resolve` and `assign` do not. |
 | `participant list` | List the project's lanes and their identities. |
 | `participant show NAME` | Show one lane: its branch, worktree, provider, account profile, advisory budget, current claims, reported outcome and last coordination. |
-| `participant add NAME` | Create a lane with an optional provider and credential profile. |
+| `participant add NAME` | Create a lane with an optional provider and credential profile. For a `claude` lane with no bridge tool approval recorded it warns that a service resume would stop at an unseen permission prompt and names `agent-parley approval resume --bridge-tools on` as the opt-in. |
 | `participant restore NAME` | Restore the assigned branch while preserving work. |
-| `participant retire NAME` | Retire a lane that is no longer working while preserving recoverable work. Lists the ignored files removing its worktree deletes and asks first; `--yes` skips the question. |
+| `participant retire NAME` | Retire a lane that is no longer working while preserving recoverable work. Its issue claims return to the pool, its reservations are released and granted to queued peers, and mail it has not read or acknowledged is marked superseded. A lane holding ready work awaiting integration is refused before anything is removed. Lists the ignored files removing its worktree deletes and asks first; `--yes` skips the question. |
 | `participant pause NAME` | Refuse a lane's calls and tool use; keep its session and claims. |
 | `participant resume NAME` | Let a paused lane act again. |
 | `participant stop NAME` | End a lane's session from the base checkout; keep its claims. |
@@ -111,6 +119,7 @@ on standard output and export to a file.
 | `reject NAME REASON` | Record a rejection and deliver the reason to the lane. |
 | `approval show` | Show which steps require a recorded approval first. |
 | `approval set [STEP ...]` | Require an approval before `merge`, `pr`, both, or none. |
+| `approval resume [--bridge-tools on\|off] [--auto-mode on\|off] [--participant NAME]` | Show or record whether the service may resume a `claude` lane without a terminal. |
 | `provider list` | List built-in presets and local overrides. |
 | `provider show NAME` | Show one provider definition with the hooks its adapter cannot serve. |
 | `provider add NAME` | Define a provider; warn when shadowing a built-in preset. |
@@ -150,7 +159,7 @@ on standard output and export to a file.
 | `mail send NAME TEXT` | Compatibility alias of `say`, the canonical spelling, kept under `mail` with the other mail verbs; every `say` flag applies. |
 | `decide TEXT` | Record one decision every registered lane can read; `--subject` names it and `--key` deduplicates it. |
 | `decision list [QUERY]` | List or search the decisions recorded for this project; `--since` bounds their age and `--limit` the page. |
-| `mail pending` | List operator messages and offers recorded but not delivered. |
+| `mail pending` | List operator messages and offers recorded but not delivered, and each orphan decision waiting on the operator. |
 | `mail cancel ID` | Remove one recorded operator item before it is delivered. |
 | `history issue N` | List every record that touched an issue, with each holding. |
 | `history participant NAME` | List everything one lane filed. |
@@ -234,7 +243,13 @@ answering from code the checkout no longer holds (`agent-parley down`), a
 missing store (`agent-parley up`), an unknown credential profile or provider,
 a lane off its branch (`agent-parley participant restore NAME`), an exhausted
 run budget (`agent-parley budget resume`) and a plugin on another protocol
-(`agent-parley setup PATH`). New refusals follow the same shape by raising
+(`agent-parley plugins install`, then restart any lane already running on the
+old plugin). A repository command run outside a Git checkout refuses with
+`not inside a Git repository; pass --repo PATH or run from the checkout`.
+Inside a lane, the hook refuses an Agent Parley CLI call chained with a
+variable, `cd`, `;`, `&&`, `|`, a redirect or a second command, because only
+the plain `agent-parley ARGS` form is pre-approved; run each command alone
+from the worktree. New refusals follow the same shape by raising
 `BridgeError(message, next_command=...)`; a test parses every suggested
 `agent-parley` command against the real command tree.
 

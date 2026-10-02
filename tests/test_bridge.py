@@ -29,6 +29,7 @@ from agent_parley import (
     dashboard,
     evidence,
     forge,
+    issues,
     metrics,
     process,
     records,
@@ -282,10 +283,12 @@ def test_process_platform_is_chosen_once_for_the_running_system():
     assert linux.foreground_pid is process.linux_foreground_pid
     assert linux.parent_pid is process.linux_parent_pid
     assert linux.running is process.linux_running
+    assert linux.zombie is process.linux_zombie
     assert linux.matches_command is process.linux_matches_command
     assert linux.terminate is process.linux_terminate
     darwin = process.platform_for("darwin")
     assert darwin.running is process.darwin_running
+    assert darwin.zombie.func is process.darwin_zombie
     assert darwin.start_ticks.func is process.darwin_start_ticks
     assert darwin.foreground_pid.func is process.darwin_foreground_pid
     assert darwin.parent_pid.func is process.darwin_parent_pid
@@ -424,6 +427,32 @@ def test_macos_shutdown_signals_only_the_recorded_process(monkeypatch):
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_a_zombie_session_process_is_not_alive():
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen(['sleep', '60']);"
+            "print(child.pid, flush=True);"
+            "time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert parent.stdout is not None
+        pid = int(parent.stdout.readline())
+        ticks = process.start_ticks(pid)
+        assert process.darwin_zombie(process.read_ps_field, pid) is False
+        process.ServerProcess(pid, ticks).stop()
+        assert process.alive(pid, ticks) is False
+        assert process.darwin_zombie(process.read_ps_field, pid) is True
+    finally:
+        parent.kill()
+        parent.wait(timeout=5)
 
 
 def test_changed_lane_branch_is_rejected_without_resetting(
@@ -1752,7 +1781,33 @@ def test_forge_slug_reads_github_remotes_and_ignores_everything_else(repo):
     assert forge.slug(repo) == "owner/name"
     git(repo, "remote", "set-url", "origin", "https://github.com/owner/name")
     assert forge.slug(repo) == "owner/name"
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://user@github.com/owner/name.git",
+    )
+    assert forge.slug(repo) == "owner/name"
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "ssh://git@ssh.github.com:443/owner/name.git",
+    )
+    assert forge.slug(repo) == "owner/name"
+    git(repo, "remote", "set-url", "origin", "https://GitHub.com/owner/name")
+    assert forge.slug(repo) == "owner/name"
     git(repo, "remote", "set-url", "origin", "git@example.com:owner/name.git")
+    assert forge.slug(repo) is None
+    git(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://user@gitlab.com/owner/name.git",
+    )
     assert forge.slug(repo) is None
 
 
@@ -2636,6 +2691,38 @@ def test_retire_removes_a_lane_and_revokes_its_credential(bridge, repo, paired):
     readded = bridge.add_participant(repo, "codex", "codex")
     assert Path(readded["lanes"]["codex"]).exists()
     assert event_summary(lane.parent, "codex")["events"] == 0
+
+
+def test_retire_releases_the_lanes_reservations_and_claims(
+    bridge, repo, paired
+):
+    _, directory = bridge.project(repo)
+    data = json.loads((directory / "project.json").read_text())
+    store.initialize(bridge.home)
+    actors = {}
+    for name in ("claude", "codex"):
+        display = data["participants"][name]["display"]
+        token = store.register(bridge.home, data["root"], display)[
+            "registration_token"
+        ]
+        actors[name] = store.authenticate(bridge.home, token)
+    claude, codex = actors["claude"], actors["codex"]
+    held = store.call(
+        bridge.home, claude, "file_reservation_paths", {"paths": ["shared.txt"]}
+    )
+    assert held["granted"]
+    queued = store.call(
+        bridge.home, codex, "request_reservation", {"paths": ["shared.txt"]}
+    )
+    assert not queued.get("granted")
+    issues.change(
+        directory, "claude", "claim", "7", participants={"claude", "codex"}
+    )
+    bridge.retire(repo, "claude")
+    active = store.active_reservations(bridge.home, data["root"])
+    assert claude["name"] not in active
+    assert active[codex["name"]] == ["shared.txt"]
+    assert issues.snapshot(directory)["issues"]["7"]["owner"] is None
 
 
 def test_retire_keeps_a_branch_that_still_holds_commits(bridge, repo, paired):

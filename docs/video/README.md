@@ -6,6 +6,14 @@ HyperFrames composition (`index.html`) and the terminal frames it shows
 release, and the README first screen plays a copy uploaded through the GitHub
 web editor, whose `user-attachments` URL GitHub renders as a video player.
 
+PyPI renders that URL as plain text, so the package build rewrites it. The
+`fancy-pypi-readme` hook in `pyproject.toml` replaces the bare URL in the
+package description with `docs/assets/launch.webp`, a still frame that links
+to the repository README. Keep `docs/assets/launch.webp`: the 0.15.1 package
+description embeds it from `main` and cannot be republished. Keep
+`docs/assets/demo-short.svg` for the same reason: the 0.15.0 description
+embeds that file from `main`.
+
 ## What is real and what is authored
 
 Every terminal frame comes from `frames.js`, which the demo recorder writes

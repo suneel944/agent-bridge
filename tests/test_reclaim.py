@@ -1079,3 +1079,98 @@ def test_size_counts_a_hard_linked_file_once(tmp_path):
     (tmp_path / "b" / "own").write_bytes(b"y" * 100)
 
     assert reclaim.size(tmp_path) == 4196
+
+
+def gone_root(bridge, repo, paired, interval=True):
+    """Removes the root of the paired project and lets supervision retire it.
+
+    Returns:
+        The project state directory and the checkpoint captured first.
+    """
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    (saved,) = recovery.capture(directory, roster.read(directory), "claude")
+    shutil.rmtree(repo)
+    supervision.poll(bridge.home, directory)
+    if interval:
+        marker = directory / supervision.ROOT_PUBLICATION
+        recorded = json.loads(marker.read_text())
+        recorded["since"] -= supervision.DEFAULTS["interval"]
+        marker.write_text(json.dumps(recorded))
+        supervision.poll(bridge.home, directory)
+    return directory, saved
+
+
+def test_gc_project_removes_a_gone_root_and_keeps_its_checkpoints(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    directory, saved = gone_root(bridge, repo, paired)
+    command = ["agent-parley", "--home", str(bridge.home), "gc"]
+    command += ["--project", str(repo)]
+    monkeypatch.setattr("sys.argv", command)
+
+    assert cli.main() == 0
+    planned = capsys.readouterr().out
+    assert directory.exists()
+    monkeypatch.setattr("sys.argv", [*command, "--apply"])
+    assert cli.main() == 0
+    printed = capsys.readouterr().out
+
+    kept = bridge.home / supervision.RECOVERED_FOLDER / directory.name
+    assert f"Would remove {directory}, the state of {repo}." in planned
+    assert "Add --apply to remove it." in planned
+    assert f"Removed {directory}, the state of {repo}." in printed
+    assert f"Kept its recovery checkpoints in {kept}." in printed
+    assert not directory.exists()
+    assert any(kept.rglob(f"*{saved['id']}*"))
+    assert not list((bridge.home / "projects").glob("*/project.json"))
+    named = {
+        entry["component"]: entry for entry in bridge.doctor()["components"]
+    }
+    assert named["projects"]["state"] == "ok"
+
+
+def test_gc_project_yes_deletes_the_checkpoints_too(bridge, repo, paired):
+    directory, _ = gone_root(bridge, repo, paired)
+
+    result = supervision.forget(
+        bridge.home, str(repo), apply=True, discard=True
+    )
+
+    assert result["checkpoints"] == ""
+    assert result["checkpoints_deleted"] is True
+    assert not directory.exists()
+    assert not (bridge.home / supervision.RECOVERED_FOLDER).exists()
+
+
+def test_gc_project_refuses_a_root_that_exists(bridge, repo, paired):
+    directory = bridge.project(repo, create=False)[1]
+
+    with pytest.raises(cli.BridgeError, match="still exists"):
+        supervision.forget(bridge.home, str(repo), apply=True)
+
+    assert (directory / "project.json").exists()
+
+
+def test_gc_project_refuses_a_lane_that_may_still_run(bridge, repo, paired):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    (directory / "claude-activity.json").write_text("{")
+    shutil.rmtree(repo)
+
+    with pytest.raises(cli.BridgeError, match="still be running: claude"):
+        supervision.forget(bridge.home, str(repo), apply=True)
+
+    assert (directory / "project.json").exists()
+
+
+def test_gc_project_waits_for_the_service_to_retire_the_root(
+    bridge, repo, paired
+):
+    directory, _ = gone_root(bridge, repo, paired, interval=False)
+
+    with pytest.raises(cli.BridgeError, match="not retired"):
+        supervision.forget(bridge.home, str(repo), apply=True)
+
+    assert (directory / "project.json").exists()

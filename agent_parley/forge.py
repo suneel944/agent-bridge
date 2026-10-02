@@ -47,13 +47,16 @@ FAILED_CHECKS = frozenset(
     }
 )
 NOT_STARTED_CHECKS = frozenset({"ACTION_REQUIRED", "STARTUP_FAILURE"})
+ACTIONS_JOB = re.compile(r"/actions/runs/(?P<run>\d+)/job/(?P<job>\d+)")
 PROVIDER_LABEL = "provider:"
 FORGES = ("github", "beads", "null")
 DEFAULT_FORGE = "github"
 
 GITHUB_REMOTE = re.compile(
-    r"^(?:https://|ssh://git@|git@)github\.com[:/]"
-    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$"
+    r"^(?:https://(?:[^@/]+@)?|ssh://git@|git@)"
+    r"(?:ssh\.)?github\.com(?::443)?[:/]"
+    r"(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
 )
 
 _selected: dict[str, str] = {}
@@ -656,7 +659,9 @@ def _failed(rollup: list | None) -> list[dict]:
         One entry per check whose outcome `_checks` counts toward a red
         verdict: its name, the forge's conclusion in lower case, and whether
         the forge reports the job never started (`action_required` or
-        `startup_failure`) rather than having run and failed.
+        `startup_failure`) rather than having run and failed. A check run
+        whose details link names an Actions run and job also carries both
+        identifiers as `run` and `job`, so one job can be re-run.
     """
     failed: list[dict] = []
     for entry in rollup or []:
@@ -668,16 +673,43 @@ def _failed(rollup: list | None) -> list[dict]:
             outcome = str(entry.get("state") or "").upper()
         if outcome not in FAILED_CHECKS:
             continue
-        failed.append(
-            {
-                "name": str(
-                    entry.get("name") or entry.get("context") or "unnamed"
-                ),
-                "conclusion": outcome.lower(),
-                "not_started": outcome in NOT_STARTED_CHECKS,
-            }
-        )
+        check = {
+            "name": str(entry.get("name") or entry.get("context") or "unnamed"),
+            "conclusion": outcome.lower(),
+            "not_started": outcome in NOT_STARTED_CHECKS,
+        }
+        job = ACTIONS_JOB.search(str(entry.get("detailsUrl") or ""))
+        if job:
+            check["run"], check["job"] = job.group("run"), job.group("job")
+        failed.append(check)
     return failed
+
+
+def rerun_job(repo: Path, run: str, job: str) -> tuple[str, bool]:
+    """Asks the forge to re-run one finished Actions job.
+
+    The request goes through the operator's own `gh` authentication, the
+    same client every forge read uses, and adds no flag that bypasses a
+    repository rule. Only the GitHub forge runs Actions jobs.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        run: Actions run identifier.
+        job: Actions job identifier within that run.
+
+    Returns:
+        The exact command an operator can run to repeat the request, and
+        whether the forge accepted it. The forge is not called when the
+        identifiers are not numeric or no GitHub project is reachable.
+    """
+    project = slug(repo) if _implementation(repo) == "github" else None
+    command = ["gh", "run", "rerun", run, "--job", job]
+    if project:
+        command += ["--repo", project]
+    shown = " ".join(command)
+    if not (project and run.isdigit() and job.isdigit() and shutil.which("gh")):
+        return shown, False
+    return shown, _run(command, 15) is not None
 
 
 JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)

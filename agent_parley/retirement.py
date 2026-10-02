@@ -156,7 +156,7 @@ def _awaits(record: dict) -> bool:
     ] == lifecycle.READY and not issues.closed(record)
 
 
-def _return_work(directory: Path, manifest: dict, name: str) -> dict:
+def return_work(directory: Path, manifest: dict, name: str) -> dict:
     """Returns every piece of work a retiring lane holds or was offered.
 
     Args:
@@ -282,7 +282,7 @@ def withdraw(directory: Path, name: str) -> dict:
                 "worktree": KEPT,
                 "dirty": [],
             }
-        work = _return_work(directory, manifest, name)
+        work = return_work(directory, manifest, name)
         worktree = _prune(manifest["root"], Path(participant["lane"]))
         at = time.time()
         mark(directory, name, at)

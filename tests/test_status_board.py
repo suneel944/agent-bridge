@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import shlex
 import shutil
 import sys
 import time
@@ -19,6 +21,7 @@ from agent_parley import (
     store,
     supervision,
 )
+from agent_parley.process import start_ticks
 from agent_parley.state import write_json
 from agent_parley.status import FORGE_ISSUES, FORGE_TIMEOUT, dormant
 
@@ -263,11 +266,22 @@ def test_the_lane_line_shows_its_own_work_not_the_operator_prompt(
     assert "are you working?" not in "\n".join(lines)
 
 
+@pytest.mark.parametrize("peer", [True, False])
 def test_orphaned_and_overdue_claims_name_the_resolving_command(
-    bridge, repo, paired, capsys
+    bridge, repo, paired, capsys, peer
 ):
     bridge.issue(paired["lanes"]["claude"], "claim", "42")
     bridge.issue(paired["lanes"]["codex"], "claim", "43")
+    if peer:
+        write_json(
+            bridge.project(repo)[1] / "codex-activity.json",
+            {
+                "session_pid": os.getpid(),
+                "session_ticks": start_ticks(os.getpid()),
+                "activity": "idle",
+                "updated": time.time(),
+            },
+        )
     edit(
         bridge,
         repo,
@@ -290,9 +304,15 @@ def test_orphaned_and_overdue_claims_name_the_resolving_command(
     bridge.board(cli.Selection(project=str(repo)), width=None)
     lines = capsys.readouterr().out.splitlines()
     start = lines.index("Needs action:")
+    at = f"--repo {shlex.quote(str(repo))}"
     assert lines[start + 1] == (
         "  #42 orphaned from claude (worktree missing); a peer lane runs "
         "agent-parley issue claim 42 --take-orphaned"
+        if peer
+        else "  #42 orphaned from claude (worktree missing); no live lane can "
+        f"take it: start one with agent-parley run NAME {at} and have it "
+        "run agent-parley issue claim 42 --take-orphaned, or run "
+        f"agent-parley issue release 42 {at}"
     )
     assert lines[start + 2].startswith("  #43 overdue 2m with codex; ")
     assert lines[start + 2].endswith(
@@ -539,4 +559,58 @@ def test_a_report_on_a_released_issue_is_labelled_and_silent_claims_named(
     assert record["current_task"] == (
         "no report on held #43, #44; "
         "#42 (not held, reported 21m ago): Issue closed"
+    )
+
+
+def test_a_held_blocked_report_followed_by_mail_on_its_issue_is_labelled(
+    bridge, repo, paired
+):
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "42")
+    bridge.report(
+        lane,
+        "blocked",
+        "Kit drafted; none posted",
+        "operator posts",
+        "",
+        issue="42",
+    )
+    path = bridge.project(repo)[1] / "claude-activity.json"
+    state = json.loads(path.read_text())
+    state["reported_at"] = time.time() - 3480
+    write_json(path, state)
+    assert lane_reading(bridge, repo)["current_task"] == (
+        "Kit drafted; none posted"
+    )
+    store.initialize(bridge.home)
+    actors = {
+        name: store.authenticate(
+            bridge.home,
+            store.register(bridge.home, paired["root"], name)[
+                "registration_token"
+            ],
+        )
+        for name in ("claude", "codex")
+    }
+    for key, sender, recipient, subject in (
+        ("posted", "codex", "claude", "Posted the #42 comments"),
+        ("decided", "claude", "codex", "Decision on #42"),
+        ("other", "codex", "claude", "Started #420"),
+    ):
+        store.call(
+            bridge.home,
+            actors[sender],
+            "send_message",
+            {
+                "to": [recipient],
+                "subject": subject,
+                "body_md": "Done.",
+                "idempotency_key": key,
+            },
+        )
+    record = lane_reading(bridge, repo)
+    assert record["report_newer_mail"] == 2
+    assert record["current_task"] == (
+        "#42 (reported 58m ago, 2 newer messages on it): "
+        "Kit drafted; none posted"
     )

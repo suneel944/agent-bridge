@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from agent_parley import cli, process, start
+from agent_parley import cli, problems, process, start, store
 
 FAKE = "#!/bin/sh\nexit 0\n"
 PLUGIN = "agent-parley@agent-parley"
@@ -115,21 +115,70 @@ def test_missing_plugin_offers_the_install(path, repo, tmp_path, capsys):
     assert "agent-parley run claude" in printed
 
 
+def running(bridge, monkeypatch):
+    """Makes the bridge's service read as running and ready."""
+    store.initialize(bridge.home)
+    (bridge.home / "server.json").write_text('{"pid": 1, "start_ticks": "1"}')
+    monkeypatch.setattr(
+        process, "identify", lambda record, home: process.ServerProcess(1, "1")
+    )
+    monkeypatch.setattr(cli.Bridge, "health", lambda self: {"status": "ready"})
+
+
 def test_running_service_and_registered_project_offer_the_dashboard(
     path, bridge, repo, paired, monkeypatch, capsys
 ):
     path("codex")
     codex_plugin()
-    (bridge.home / "server.json").write_text('{"pid": 1, "start_ticks": "1"}')
-    monkeypatch.setattr(
-        process, "identify", lambda record, home: process.ServerProcess(1, "1")
-    )
+    running(bridge, monkeypatch)
+    monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "email")
     printed = screen(capsys, bridge.home, repo)
     (bridge.home / "server.json").unlink()
     assert "Project   registered" in printed
     assert "Service   running" in printed
     assert "agent-parley run codex  Start a lane." in printed
     assert "agent-parley top" in printed
+    assert "Needs you" not in printed
+    assert "Notify" not in printed
+    assert "agent-parley problems" not in printed
+
+
+def test_problems_lead_the_screen_and_its_next_commands(
+    path, bridge, repo, paired, monkeypatch, capsys
+):
+    path("codex")
+    codex_plugin()
+    running(bridge, monkeypatch)
+    monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "email")
+    rows = [
+        {"participant": "claude", "condition": "overdue claim"},
+        {"participant": "", "condition": "pull request checks failed"},
+        {"participant": "codex", "condition": "stalled"},
+    ]
+    monkeypatch.setattr(problems, "derive", lambda home, report: rows)
+    printed = screen(capsys, bridge.home, repo)
+    (bridge.home / "server.json").unlink()
+    assert (
+        "  Needs you 3 problems: claude overdue claim, "
+        "pull request checks failed\n"
+    ) in printed
+    assert printed.split("Next:\n")[1].startswith("  agent-parley problems")
+
+
+def test_notify_off_with_lanes_offers_its_setup(
+    path, bridge, repo, paired, monkeypatch, capsys
+):
+    path("codex")
+    codex_plugin()
+    running(bridge, monkeypatch)
+    monkeypatch.delenv("AGENT_PARLEY_NOTIFY", raising=False)
+    printed = screen(capsys, bridge.home, repo)
+    (bridge.home / "server.json").unlink()
+    assert "  Notify    off\n" in printed
+    assert "agent-parley notify setup  Get told when a lane needs you." in (
+        printed
+    )
+    assert "Needs you" not in printed
 
 
 def snapshot(root):
@@ -145,10 +194,7 @@ def test_existing_state_and_checkout_are_left_untouched(
 ):
     path("claude")
     (repo / "shared.txt").write_text("changed\n")
-    (bridge.home / "server.json").write_text('{"pid": 1, "start_ticks": "1"}')
-    monkeypatch.setattr(
-        process, "identify", lambda record, home: process.ServerProcess(1, "1")
-    )
+    running(bridge, monkeypatch)
     state = snapshot(bridge.home)
     checkout = snapshot(repo)
     screen(capsys, bridge.home, repo)

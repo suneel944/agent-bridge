@@ -224,7 +224,10 @@ def test_doctor_names_a_project_whose_root_is_gone(
     named = {entry["component"]: entry for entry in reported["components"]}
     assert named["projects"]["state"] == protocol.ROOT_GONE
     assert named["projects"]["compatible"] is False
-    assert str(gone) in named["projects"]["remedy"]
+    assert (
+        f"agent-parley gc --project {gone} --apply"
+        in named["projects"]["remedy"]
+    )
     assert str(repo) not in named["projects"]["remedy"]
     assert reported["consistent"] is False
     assert str(gone) in protocol.render(reported)

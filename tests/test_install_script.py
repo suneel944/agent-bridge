@@ -33,14 +33,13 @@ def stub(directory, name, text):
     path.chmod(0o755)
 
 
-@pytest.fixture
-def machine(tmp_path):
+def build_machine(tmp_path, clis=("agent-parley", "claude")):
     home = tmp_path / "home"
     binary = tmp_path / "bin"
     state = tmp_path / "state"
     for directory in (home, binary, state):
         directory.mkdir()
-    for name in ("agent-parley", "claude"):
+    for name in clis:
         stub(binary, name, TOOL.format(name=name))
     environment = {
         "HOME": str(home),
@@ -66,7 +65,12 @@ def machine(tmp_path):
     return install, calls, binary, home
 
 
-def test_install_then_rerun_upgrades_in_place(machine):
+@pytest.fixture
+def machine(tmp_path):
+    return build_machine(tmp_path)
+
+
+def test_install_then_rerun_force_installs_the_latest(machine):
     install, calls, binary, home = machine
     stub(binary, "uv", UV)
     first = install()
@@ -84,8 +88,8 @@ def test_install_then_rerun_upgrades_in_place(machine):
     ]
     second = install()
     assert second.returncode == 0, second.stderr
-    assert "uv tool upgrade agent-parley" in calls()
-    assert calls().count("uv tool install agent-parley") == 1
+    assert "uv tool install --force agent-parley" in calls()
+    assert not any(call.startswith("uv tool upgrade") for call in calls())
     assert calls().count("agent-parley plugins install") == 2
     assert "export PATH" not in first.stdout + second.stdout
     assert list(home.iterdir()) == []
@@ -139,3 +143,27 @@ def test_native_windows_is_refused_with_the_wsl2_pointer(machine):
     result = install()
     assert result.returncode == 2
     assert result.stderr.strip() == WINDOWS_REFUSAL
+
+
+def test_next_command_prefers_codex_when_claude_is_missing(tmp_path):
+    install, _, binary, _ = build_machine(
+        tmp_path, clis=("agent-parley", "codex")
+    )
+    stub(binary, "uv", UV)
+    result = install()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == (
+        "Next: cd your-repo && agent-parley run codex"
+    )
+
+
+def test_next_command_names_both_clis_when_neither_is_installed(tmp_path):
+    install, _, binary, _ = build_machine(tmp_path, clis=("agent-parley",))
+    stub(binary, "uv", UV)
+    result = install()
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert "agent-parley run claude" not in result.stdout
+    assert "agent-parley run codex" not in result.stdout
+    assert "install claude or codex" in lines[-2]
+    assert lines[-1] == "No CLI yet? Try: agent-parley demo"

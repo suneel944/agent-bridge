@@ -12,6 +12,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import termios
 import time
 import tty
@@ -573,8 +574,12 @@ def lane_summary(start: Path) -> str:
 
     A lane worktree sits directly under its project's private state
     directory, named for its participant, so the nearest ancestor whose
-    parent holds a manifest naming it is the lane. The summary is the same
-    line `compose_title` gives the tab, without a client title.
+    parent holds a manifest naming it is the lane. A repository checked
+    out inside the lane may carry its own unrelated `project.json` files
+    (an Nx workspace, for instance), so a manifest that does not name the
+    candidate folder is skipped rather than treated as proof there is no
+    enclosing lane. The summary is the same line `compose_title` gives
+    the tab, without a client title.
 
     Args:
         start: Working directory of the native client.
@@ -587,7 +592,7 @@ def lane_summary(start: Path) -> str:
         if manifest is None:
             continue
         if lane.name not in (manifest.get("participants") or {}):
-            return ""
+            continue
         return compose_title(
             lane_title(
                 lane.name,
@@ -628,6 +633,48 @@ def _relay(data: bytes, bounded: bool) -> None:
                 os.ftruncate(1, 0)
                 os.lseek(1, 0, os.SEEK_SET)
         os.write(1, data)
+
+
+def call(command: list[str], lane: Path, env: dict[str, str]) -> int:
+    """Runs the native CLI without a terminal and forwards stop signals.
+
+    A lane launched without a terminal records the launcher as its session
+    process, so `participant stop` signals the launcher. The launcher passes
+    each `STOP_SIGNALS` signal on to the client, as `run` does, and keeps
+    waiting until the client exits, so a stop never leaves the client running
+    orphaned in the lane worktree. A signal that arrives before the client
+    has started is held and delivered as soon as the client exists.
+
+    Args:
+        command: Native CLI command line.
+        lane: Lane worktree the client runs in.
+        env: Environment for the client.
+
+    Returns:
+        The client's exit code, negative when a signal ended it.
+    """
+    stopping: list[int] = []
+    child: subprocess.Popen[bytes] | None = None
+
+    def stop(signum: int, frame: object = None) -> None:
+        """Records a termination request and passes it to the client."""
+        stopping.append(signum)
+        if child is not None:
+            child.send_signal(signum)
+
+    previous_stops = {
+        number: signal.getsignal(number) for number in STOP_SIGNALS
+    }
+    for number in STOP_SIGNALS:
+        signal.signal(number, stop)
+    try:
+        child = subprocess.Popen(command, cwd=lane, env=env)
+        if stopping:
+            child.send_signal(stopping[0])
+        return child.wait()
+    finally:
+        for number, handler in previous_stops.items():
+            signal.signal(number, handler)
 
 
 def run(
@@ -895,7 +942,7 @@ def _session(
                 control_at = time.monotonic()
                 pending_input = pending(operator, pending_input)
                 os.write(master, entered)
-                if watch.holding and ANSWERING.search(entered):
+                if watch.holding and ANSWERING.search(operator):
                     watch.answered()
             if (
                 pending_control

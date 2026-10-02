@@ -6,6 +6,8 @@ import contextvars
 import copy
 import hashlib
 import json
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -64,6 +66,7 @@ DEFAULTS = {
     "wake": True,
     "reclaim": True,
     "titles": True,
+    "rerun_cancelled": True,
 }
 
 MAX_COMPLETION_REMINDERS = 100
@@ -73,6 +76,7 @@ ENDED = issues.ENDED
 RECLAIM_INTERVAL = 900.0
 RECLAIM_PUBLICATION = "reclaim.json"
 ROOT_PUBLICATION = "root-missing.json"
+RECOVERED_FOLDER = "recovered"
 BOOT_RECORD = "boot.json"
 READINGS_PUBLICATION = "git-readings.json"
 GIT_WORKERS = 8
@@ -84,6 +88,7 @@ DEAD_MAIL_LISTED = 10
 ACTIVE = "active"
 IDLE = "idle"
 STOPPED = "stopped"
+TAKES_TURNS = lanes.LIVE | {ACTIVE}
 STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
@@ -100,10 +105,10 @@ TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
 SESSION_HELD = "busy:session"
 OPT_IN_MISSING = "setup gap: bridge tool approval not recorded"
+OPT_IN_COMMAND = "agent-parley approval resume --bridge-tools on"
 OPT_IN_REMEDY = (
-    'record "approve_bridge_tools": true or "auto_mode": true under '
-    '"supervision" in the project manifest or on this lane, or resume the '
-    "lane in your own terminal"
+    f"run `{OPT_IN_COMMAND}` (or `--auto-mode on`; add `--participant NAME` "
+    "for one lane), or resume the lane in your own terminal"
 )
 OPT_IN_WARNING = (
     "{name} is a claude lane the coordination service resumes unattended, "
@@ -201,7 +206,7 @@ def settings(value: dict) -> dict:
             "completion_reminders must be between 1 and "
             f"{MAX_COMPLETION_REMINDERS} reminders."
         )
-    for field in ("prompts", "wake", "reclaim", "titles"):
+    for field in ("prompts", "wake", "reclaim", "titles", "rerun_cancelled"):
         if type(result[field]) is not bool:
             raise BridgeError(f"{field} must be a boolean.")
     return result
@@ -1143,15 +1148,75 @@ def readings(
         return edits.result(), advances
 
 
-def base_advance_marker(paths: list[str]) -> str:
-    """Describes a base branch advance in one line, naming the paths."""
+def base_advance_marker(paths: list[str], told: float | None = None) -> str:
+    """Describes a base branch advance in one line, naming the paths.
+
+    Args:
+        paths: Held paths the base branch changed since the lane forked.
+        told: When the lane's hook delivered the notice for these paths, or
+            None when it has not been delivered yet.
+
+    Returns:
+        The marker, ending with when the lane was told, or an empty string
+        when no held path moved.
+    """
     if not paths:
         return ""
     plural = "" if len(paths) == 1 else "s"
+    delivery = (
+        time.strftime("lane told %Y-%m-%dT%H:%MZ", time.gmtime(told))
+        if told is not None
+        else "lane not told yet"
+    )
     return (
         f"base advanced over held path{plural} {', '.join(paths)} since this "
-        "lane forked; nothing was rebased"
+        f"lane forked; nothing was rebased; {delivery}"
     )
+
+
+def base_advance_told(state: dict, paths: list[str]) -> float | None:
+    """Reads when a lane's hook delivered the notice for these paths.
+
+    Args:
+        state: The lane's activity state.
+        paths: Held paths the base branch currently moved over.
+
+    Returns:
+        The delivery time, or None when the recorded notice named other
+        paths or none was recorded.
+    """
+    told = state.get("base_advance_at")
+    if (
+        not paths
+        or state.get("base_advance") != paths
+        or not isinstance(told, (int, float))
+    ):
+        return None
+    return float(told)
+
+
+def rebase_command(root: str, lane: str) -> str:
+    """Names the command that rebases a lane onto the current base head.
+
+    The base is named by the branch checked out in the base checkout, which
+    every lane worktree shares refs with, or by its commit when that checkout
+    is detached. Reading it is one Git call, taken only when a notice is
+    about to be delivered.
+
+    Args:
+        root: Base checkout.
+        lane: The lane's worktree.
+
+    Returns:
+        A shell command the lane can run, or an empty string when Git could
+        not name the base.
+    """
+    base = _read(root, "symbolic-ref", "--short", "-q", "HEAD") or _read(
+        root, "rev-parse", "HEAD"
+    )
+    if not base:
+        return ""
+    return shlex.join(["git", "-C", lane, "rebase", base])
 
 
 FIT_CHECKS = ("session", "capacity", "worktree", "mail")
@@ -4108,16 +4173,74 @@ def orphan_reason(name: str, record: dict) -> str:
     return f"{name} is dead and has no running session process{seen}"
 
 
-def orphan_marker(numbers: list[str], keys: list[str]) -> str:
-    """Describes one lane's orphaned claims in one line, naming its keys."""
+def live_peer(states: dict[str, str | None], owner: str) -> bool:
+    """Reports whether any lane besides the owner could take its claims.
+
+    Args:
+        states: Each lane's state as a status reading names it, such as
+            ``working``, ``dead`` or ``retired``, or None when unknown.
+        owner: Lane whose orphaned claims need a new holder.
+
+    Returns:
+        Whether another lane reads in a state that still takes turns. A
+        stopped, dead, reclaimed, retired or paused lane, or one whose state
+        is unknown, cannot run `issue claim --take-orphaned` now.
+    """
+    return any(
+        state in TAKES_TURNS for name, state in states.items() if name != owner
+    )
+
+
+def orphan_remedy(issue: str, root: str, peer: bool) -> str:
+    """Names who moves an orphaned claim and the command that does it.
+
+    Args:
+        issue: Issue number, or ``NUMBER`` for a remedy covering several.
+        root: Canonical project key the commands name.
+        peer: Whether a live lane besides the owner exists to take it.
+
+    Returns:
+        The peer's take command while one is live, else the operator's
+        choice of starting a lane that takes the claim or releasing it,
+        since a remedy naming a lane that does not exist moves nothing.
+    """
+    take = f"agent-parley issue claim {issue} --take-orphaned"
+    if peer:
+        return f"a peer lane runs {take}"
+    repo = f"--repo {shlex.quote(str(root))}"
+    return (
+        f"no live lane can take it: start one with agent-parley run NAME "
+        f"{repo} and have it run {take}, or run agent-parley issue release "
+        f"{issue} {repo}"
+    )
+
+
+def orphan_marker(
+    numbers: list[str], keys: list[str], root: str = "", peer: bool = True
+) -> str:
+    """Describes one lane's orphaned claims in one line, naming its keys.
+
+    Args:
+        numbers: Issue numbers the lane holds that are marked orphaned.
+        keys: Reservations the lane still holds for those claims.
+        root: Canonical project key the operator's commands name.
+        peer: Whether a live lane besides the owner exists to take them.
+
+    Returns:
+        The marker naming the claims, their keys and the remedy, or an
+        empty string when the lane holds no orphaned claim.
+    """
     if not numbers:
         return ""
     listed = ", ".join(f"#{number}" for number in numbers)
     held = f"; holds {', '.join(keys)}" if keys else ""
-    return (
-        f"orphaned claims {listed}{held}; still owned until a peer runs "
-        "issue claim --take-orphaned"
-    )
+    if peer:
+        return (
+            f"orphaned claims {listed}{held}; still owned until a peer runs "
+            "issue claim --take-orphaned"
+        )
+    issue = numbers[0] if len(numbers) == 1 else "NUMBER"
+    return f"orphaned claims {listed}{held}; {orphan_remedy(issue, root, peer)}"
 
 
 def orphan_decision(
@@ -5139,6 +5262,7 @@ PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
 CHECKS_STALLED_SECONDS = 3600.0
 CHECKS_STALLED_FACTOR = 2
+RERUN_CONCLUSIONS = frozenset({"cancelled", "timed_out"})
 
 
 def checks_ceiling(root: Path) -> float:
@@ -5157,7 +5281,9 @@ def checks_ceiling(root: Path) -> float:
     return CHECKS_STALLED_FACTOR * timeout
 
 
-def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
+def pull_request_wakes(
+    home: Path, directory: Path, manifest: dict, rerun: bool = True
+) -> None:
     """Tells a lane once when its open pull request's checks or reviews change.
 
     A lane that opens a pull request ends its turn to wait, and nothing used
@@ -5197,10 +5323,20 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
     for is recorded and announced to nobody. A forge that is missing,
     offline or unreadable leaves the record as it was and wakes nobody.
 
+    A red head whose every failing check ended `cancelled` or `timed_out`
+    with an Actions run and job named has nothing to fix, so its jobs are
+    re-run once through `forge.rerun_job`, whether or not the owning lane
+    is alive. The request is recorded on the reading for that head commit
+    and never repeated for it, and the lane is told a re-run was requested
+    so it does not push an empty commit. A check that ended `failure` is
+    never re-run.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
         manifest: Current participant manifest.
+        rerun: Whether a cancelled or timed-out run is re-run once; the
+            `rerun_cancelled` supervision setting.
     """
     path = directory / PULL_REQUEST_RECORD
     try:
@@ -5223,11 +5359,18 @@ def pull_request_wakes(home: Path, directory: Path, manifest: dict) -> None:
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
         record = _checks_clock(previous, record, now)
+        if previous.get("sha") == record["sha"] and previous.get("rerun"):
+            record["rerun"] = previous["rerun"]
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
         stalled = _stalled_checks(record, now, ceiling)
         if stalled:
             changes.append(stalled)
+        requested = _rerun_cancelled(
+            Path(manifest["root"]), previous, record, now, rerun
+        )
+        if requested:
+            changes.append(requested)
         watched = changes or record["checks"] in {"pending", "red"}
         name = _pull_request_lane(manifest, ledger, reading) if watched else ""
         if name:
@@ -5363,6 +5506,75 @@ def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
         "Re-run once: `gh run rerun --failed` for a run that ended without "
         "a conclusion, or cancel and re-run one still in progress past its "
         "job timeout; after one re-run it is an operator decision"
+    )
+
+
+def _rerun_cancelled(
+    root: Path, before: dict, record: dict, now: float, enabled: bool
+) -> str:
+    """Re-runs a red head's cancelled jobs once and describes the request.
+
+    Args:
+        root: Repository checkout that selects the forge project.
+        before: The previous reading, or an empty mapping for a first one.
+        record: This poll's reading, carrying any earlier request on the
+            same head; gains a `rerun` entry when one is requested now.
+        now: Unix time of this poll.
+        enabled: Whether an automatic re-run may be requested.
+
+    Returns:
+        One phrase for the lane naming the re-run requested, the forge's
+        refusal with the exact command, or a repeat cancellation after the
+        one re-run with the same command. Empty when re-runs are disabled,
+        when the head is not red only through cancelled or timed-out jobs
+        with a named run and job, or when this red reading was already
+        described.
+    """
+    failed = record.get("failed") or []
+    if (
+        not enabled
+        or record["checks"] != "red"
+        or not failed
+        or any(
+            check.get("conclusion") not in RERUN_CONCLUSIONS
+            or not check.get("run")
+            or not check.get("job")
+            for check in failed
+        )
+    ):
+        return ""
+    names = ", ".join(
+        f"{check['name']} {check['conclusion']}" for check in failed
+    )
+    earlier = record.get("rerun")
+    if earlier:
+        if before.get("checks") == "red":
+            return ""
+        return (
+            f"{names} again after the one automatic re-run on this head; "
+            f"run `{'; '.join(earlier['commands'])}` yourself or fix and push"
+        )
+    requests = [
+        forge.rerun_job(root, str(check["run"]), str(check["job"]))
+        for check in failed
+    ]
+    accepted = all(ok for _, ok in requests)
+    record["rerun"] = {
+        "at": now,
+        "checks": names,
+        "attempt": int(record.get("red_attempts") or 1),
+        "commands": [command for command, _ in requests],
+        "accepted": accepted,
+    }
+    if accepted:
+        return (
+            f"{names} while every other check passed; one re-run was "
+            "requested for you, so do not push an empty commit"
+        )
+    return (
+        f"{names} while every other check passed; the forge refused the "
+        f"automatic re-run, so run `{'; '.join(record['rerun']['commands'])}`"
+        " yourself"
     )
 
 
@@ -5763,9 +5975,9 @@ def missing_root(
     publication names, per lane, the claims released and the checkpoint
     each one left, fresh or from an earlier capture, so whoever takes the
     issue next can restore the work. It names the state directory for the
-    operator to remove;
-    nothing here deletes it. A root that reappears clears the record on the
-    next poll.
+    operator to remove with `agent-parley gc --project ROOT --apply`
+    (`forget`); nothing here deletes it. A root that reappears clears the
+    record on the next poll.
 
     A lane whose session process is still alive is never retired here: a
     moved repository or a dropped mount leaves its client running, and
@@ -5844,6 +6056,126 @@ def missing_root(
             "live": live,
         },
     )
+
+
+def forget(
+    home: Path, root: str, *, apply: bool = False, discard: bool = False
+) -> dict:
+    """Removes the private state of a project whose root checkout is gone.
+
+    The removal is the operator's half of `missing_root`: that poll retires
+    the lanes and records the state directory, and only this deletes it. A
+    project whose root still exists is never touched, nor one with a lane
+    whose session process is alive or unreadable, nor one the supervisor
+    has not recorded retired. The state directory is first renamed out of
+    the projects folder in one step, so no reader ever sees half of it.
+    The recovery checkpoints `missing_root` captured are moved to
+    `RECOVERED_FOLDER` under the state root, beside the project's key,
+    unless ``discard`` asks for them to be deleted with the rest.
+
+    Args:
+        home: Private bridge state root.
+        root: Recorded root checkout of the project to remove.
+        apply: Whether to remove; without it only the plan is reported.
+        discard: Whether to delete the recovery checkpoints too.
+
+    Returns:
+        The root, its state directory, whether it was removed, where the
+        recovery checkpoints were or would be kept, empty when none remain,
+        and whether they were or would be deleted.
+
+    Raises:
+        BridgeError: If no registered project names the root, the root
+            exists, a lane's session process is alive or unreadable, or the
+            supervisor has not retired the project yet.
+    """
+    wanted = {root, str(Path(root).expanduser().absolute())}
+    found = None
+    for path in sorted((home / "projects").glob("*/project.json")):
+        data = roster.normalize(json.loads(path.read_text()))
+        if str(data["root"]) in wanted:
+            found = path.parent, data
+            break
+    if found is None:
+        raise BridgeError(
+            f"No registered project names {root}; `agent-parley doctor` "
+            "lists the roots that are gone."
+        )
+    directory, data = found
+    named = str(data["root"])
+    if Path(named).exists():
+        raise BridgeError(
+            f"{named} still exists, so its project state is kept; retire "
+            "its lanes with `agent-parley participant retire` instead."
+        )
+    live = []
+    for name in data["participants"]:
+        reading = presence(directory, name)
+        if (
+            reading["process_alive"] is True
+            or reading["evidence"] == UNREADABLE
+        ):
+            live.append(name)
+    if live:
+        raise BridgeError(
+            f"Lanes of {named} may still be running: {', '.join(live)}; "
+            "stop their sessions, then run this again."
+        )
+    if not root_retired(directory):
+        raise BridgeError(
+            f"The service has not retired {named} yet; it does so one "
+            "supervision interval after it finds the root gone. Run "
+            "`agent-parley up` and try again."
+        )
+    folder = directory / recovery.RECOVERY_FOLDER
+    held = folder.is_dir() and any(folder.iterdir())
+    kept = home / RECOVERED_FOLDER / directory.name
+    if held and not discard and kept.exists():
+        kept = kept.with_name(f"{directory.name}-{int(time.time())}")
+    if apply:
+        trash = home / f".forget-{directory.name}"
+        directory.rename(trash)
+        if held and not discard:
+            kept.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (trash / recovery.RECOVERY_FOLDER).rename(kept)
+        shutil.rmtree(trash)
+    return {
+        "root": named,
+        "state_directory": str(directory),
+        "removed": apply,
+        "checkpoints": str(kept) if held and not discard else "",
+        "checkpoints_deleted": held and discard,
+    }
+
+
+def forgotten_lines(result: dict) -> list[str]:
+    """Describes what `forget` removed or would remove.
+
+    Args:
+        result: What `forget` returned.
+
+    Returns:
+        One line for the state directory, one for the recovery checkpoints
+        when any exist, and the command that applies a reported plan.
+    """
+    done = result["removed"]
+    lines = [
+        ("Removed " if done else "Would remove ")
+        + f"{result['state_directory']}, the state of {result['root']}."
+    ]
+    if result["checkpoints"]:
+        lines.append(
+            ("Kept" if done else "Would keep")
+            + f" its recovery checkpoints in {result['checkpoints']}."
+        )
+    elif result["checkpoints_deleted"]:
+        lines.append(
+            ("Deleted" if done else "Would delete")
+            + " its recovery checkpoints."
+        )
+    if not done:
+        lines.append("Add --apply to remove it.")
+    return lines
 
 
 def poll(home: Path, directory: Path) -> None:
@@ -5959,7 +6291,14 @@ def _poll(home: Path, directory: Path) -> None:
             stage,
         )
         stage("work", work, home, directory, manifest, config)
-        stage("pull requests", pull_request_wakes, home, directory, manifest)
+        stage(
+            "pull requests",
+            pull_request_wakes,
+            home,
+            directory,
+            manifest,
+            config["rerun_cancelled"],
+        )
         stage(
             "overdue claims",
             overdue_claims,
@@ -7229,8 +7568,11 @@ def wake(
     A resumed process uses a real terminal, not an unattended permission mode.
     A lane `opt_in_missing` reports is not resumed at all, because its
     session would stop at the bridge tool prompt with nobody to answer; the
-    attempt is recorded as `OPT_IN_MISSING` for the operator instead, and
-    counts toward the attempt bound, so a gap nobody closes is escalated.
+    attempt is recorded as `OPT_IN_MISSING` for the operator instead. Its
+    outcome is known from the manifest alone, so it spends no attempt and
+    never escalates the lane; the backlog waits until the operator records
+    the opt-in with `approval resume` or resumes the lane, and only the
+    first such refusal is written to the checkpoint history.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
     lane; waking only asks the lane to take its own turn.
 
@@ -7486,7 +7828,9 @@ def wake(
                     track_launcher(child)
                     result = f"resume requested (launcher {child.pid})"
         probe_exhaustion(directory, name, result)
-        counted = attempts + (not result.startswith("busy"))
+        gap = result == OPT_IN_MISSING
+        repeated = gap and record.get("result") == OPT_IN_MISSING
+        counted = attempts + (not result.startswith("busy") and not gap)
         now = time.time()
         spent = counted >= WORK_WAKE_ATTEMPTS
         store_wake(
@@ -7520,10 +7864,12 @@ def wake(
                 result,
                 (
                     "deferred"
-                    if result.startswith("busy")
+                    if result.startswith("busy") or gap
                     else "awaiting_progress"
                 ),
             )
+        if repeated:
+            return
         from agent_parley import checkpoints
 
         checkpoints.record(

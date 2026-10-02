@@ -9,6 +9,7 @@ time.
 from __future__ import annotations
 
 import contextlib
+import shlex
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 DORMANT_SECONDS = 86400.0
 ENDED_STATES = ("stopped", "dead", "reclaimed")
+OPEN_REPORTS = ("blocked", "partial")
 ATTENTION_LINES = 8
 FORGE_ISSUES = "forge-issues.json"
 FORGE_TTL = 300.0
@@ -142,11 +144,14 @@ def task_line(record: dict, fallback: str) -> str:
     current work. Such a report keeps its text, labelled with its issue and
     age, and open claims the lane has not reported on since claiming are
     named ahead of it, so a closed issue's summary never reads as the lane's
-    current task.
+    current task. A blocked or partial report on a held issue that mail
+    citing the issue has followed is labelled with its age and that mail's
+    count, because the mail may say its remaining work is done.
 
     Args:
         record: One lane record from the status reading, carrying its
-            claims, report summary, report issue and report age.
+            claims, report summary, report issue, report age and the count
+            of newer mail on a held open report.
         fallback: Registered or mailed task shown when no report exists.
 
     Returns:
@@ -157,7 +162,15 @@ def task_line(record: dict, fallback: str) -> str:
     summary = record["summary"]
     issue = record["report_issue"]
     if summary and record["report_held"]:
-        return summary[:240]
+        newer = record["report_newer_mail"]
+        if not newer:
+            return summary[:240]
+        reported = age(record["report_age_seconds"] or 0)
+        plural = "" if newer == 1 else "s"
+        return (
+            f"#{issue} (reported {reported} ago, {newer} newer "
+            f"message{plural} on it): {summary}"
+        )[:240]
     silent = ", ".join(
         f"#{claim['issue']}"
         for claim in record["claims"]
@@ -252,18 +265,24 @@ def pull_request(readings: list[dict], issue: str, branch: str) -> dict | None:
     }
 
 
-def attention(claim: dict, owner: str) -> list[str]:
+def attention(
+    claim: dict, owner: str, root: str = "", peer: bool = True
+) -> list[str]:
     """States what an open claim needs and the command that resolves it.
 
     Args:
         claim: One open claim from a lane record of the status snapshot.
         owner: Participant holding the claim.
+        root: Canonical project key the operator's commands name.
+        peer: Whether a live lane besides the owner exists to take an
+            orphaned claim; without one the operator's command is named.
 
     Returns:
         One line for a claim whose owner the supervisor marked orphaned and
         one for a claim past its deadline, each naming the single command
         that resolves it; nothing for a claim that needs no action.
     """
+    from agent_parley import supervision
     from agent_parley.tables import age
 
     number = claim["issue"]
@@ -271,8 +290,8 @@ def attention(claim: dict, owner: str) -> list[str]:
     if claim.get("orphaned"):
         lines.append(
             f"#{number} orphaned from {owner} "
-            f"({claim.get('orphan_reason') or 'no reason'}); a peer lane runs "
-            f"agent-parley issue claim {number} --take-orphaned"
+            f"({claim.get('orphan_reason') or 'no reason'}); "
+            + supervision.orphan_remedy(str(number), root, peer)
         )
     if claim.get("overdue"):
         lines.append(
@@ -466,7 +485,13 @@ class StatusMixin(BridgeCore):
                 "protocol": protocol.PROTOCOL,
                 "state": protocol.ROOT_GONE if gone else protocol.OK,
                 "remedy": (
-                    protocol.RESTORE_ROOT + ", ".join(gone) if gone else ""
+                    protocol.RESTORE_ROOT
+                    + "; ".join(
+                        protocol.FORGET_ROOT.format(root=shlex.quote(root))
+                        for root in gone
+                    )
+                    if gone
+                    else ""
                 ),
                 "compatible": not gone,
             }
@@ -732,7 +757,9 @@ class StatusMixin(BridgeCore):
             `current_task` is the lane's own last report or registered task,
             never the operator's last prompt, built by `task_line`, with
             `report_issue` naming the issue that report was about and
-            `report_held` whether the lane still holds it; each claim
+            `report_held` whether the lane still holds it and
+            `report_newer_mail` how many messages citing a held issue
+            followed a blocked or partial report on it; each claim
             carries whether it was reported on since claiming, and its
             recorded title, whether it ended on the forge, the seconds since
             it last progressed and its cached pull request. `self_wait` names
@@ -774,6 +801,7 @@ class StatusMixin(BridgeCore):
         participant = data["participants"][agent]
         name = participant["display"]
         state = activity(directory, agent)
+        told = supervision.base_advance_told(state, list(advanced))
         observed = supervision.presence(
             directory, agent, configuration["inactive_after"]
         )
@@ -784,6 +812,13 @@ class StatusMixin(BridgeCore):
             int(latest["issue"])
             if latest.get("issue") not in (None, "")
             and latest.get("summary") == state.get("summary")
+            else None
+        )
+        open_issue = (
+            report_issue
+            if state.get("outcome") in OPEN_REPORTS
+            and (ledger["issues"].get(str(report_issue)) or {}).get("owner")
+            == agent
             else None
         )
         stalled = supervision.stall(
@@ -805,8 +840,15 @@ class StatusMixin(BridgeCore):
                 condition = lanes.read(db, data["root"], agent)
                 accounts = lanes.read_accounts(db, data["root"])
                 wake = lanes.read_wake(db, data["root"], agent)
+                newer = (
+                    store.issue_mail(
+                        db, data["root"], name, open_issue, reported_at
+                    )
+                    if open_issue is not None and reported_at
+                    else 0
+                )
         except (sqlite3.Error, BridgeError, OSError, ValueError):
-            condition, accounts, wake = None, {}, {}
+            condition, accounts, wake, newer = None, {}, {}, 0
         provenance = lanes.provenance(
             condition, supervision.hook_gaps(self.home, participant)
         )
@@ -952,6 +994,10 @@ class StatusMixin(BridgeCore):
             },
             "operator_edits": list(edited),
             "base_advance_paths": list(advanced),
+            "base_advance": supervision.base_advance_marker(
+                list(advanced), told
+            ),
+            "base_advance_told_at": views.timestamp(told),
             "idle_seconds": idle["seconds"],
             "idle_complete": idle["complete"],
             "budget": {
@@ -971,6 +1017,7 @@ class StatusMixin(BridgeCore):
             "wake": None,
             "mail": None,
             "report_issue": report_issue,
+            "report_newer_mail": newer,
         }
         record["report_held"] = report_issue is not None and any(
             claim["issue"] == report_issue for claim in record["claims"]
@@ -1323,6 +1370,7 @@ class StatusMixin(BridgeCore):
             width: Columns the tables may use, or None for whole lines.
             every_claim: Also list claims whose work ended on the forge.
         """
+        from agent_parley import supervision
         from agent_parley.cli import supervision_failure, tables
 
         dormancy = " (dormant)" if project["dormant"] else ""
@@ -1337,8 +1385,13 @@ class StatusMixin(BridgeCore):
         lanes: list[tuple[str, ...]] = []
         notes: list[str] = []
         ended: list[int] = []
+        states = {
+            record["participant"]: record["lane_state"]
+            for record in project["participants"]
+        }
         for record in project["participants"]:
             owner = record["participant"]
+            peer = supervision.live_peer(states, owner)
             live = 0
             for claim in record["claims"]:
                 entry = (opened or {}).get(str(claim["issue"])) or {}
@@ -1349,7 +1402,7 @@ class StatusMixin(BridgeCore):
                     ended.append(claim["issue"])
                 else:
                     live += 1
-                    notes.extend(attention(claim, owner))
+                    notes.extend(attention(claim, owner, project["root"], peer))
                 if every_claim or not closed:
                     shown = {
                         **claim,

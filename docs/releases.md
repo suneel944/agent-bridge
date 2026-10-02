@@ -246,11 +246,12 @@ candidate step proposes the next free version of that kind and skips the
 markers and the issue count, but everything after it is the push path
 unchanged, so the version is still checked for availability, the markers are
 still raised and gated, and `Release` is still dispatched for the tag. The
-request refuses when `main` holds no commit past the approved release, so it
-cannot republish an unchanged tree. Use it when the published package is
-broken by something measurement cannot see, such as the README the index
-renders, or when a repair landed as a plain `fix:` and must not wait for a
-tenth issue:
+request refuses when `main` holds no commit past the approved release, and
+when nothing under `agent_parley/`, `plugins/agent-parley/` or the
+`[project]` table changed since it, so documentation, workflow and tooling
+changes never ship as a version on their own; they ride the next release that
+changes the package. Use it when a package repair landed as a plain `fix:` and
+must not wait for a tenth issue:
 
 ```bash
 gh workflow run release-version.yml --ref main --field kind=patch

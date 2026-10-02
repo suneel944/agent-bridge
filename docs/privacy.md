@@ -138,7 +138,19 @@ Logs are bounded automatically:
   take and complete markers.
 
 Everything else, messages and decisions included, persists until you delete
-it. To remove all coordination state, stop the server and delete the state
+it. To remove the private state of one project whose root checkout is gone,
+once the service has retired its lanes and none of its sessions runs:
+
+```sh
+agent-parley gc --project ROOT          # report what would be removed
+agent-parley gc --project ROOT --apply  # remove it
+```
+
+Its recovery checkpoints are kept under `recovered/` in the state directory
+unless you add `--yes`, which deletes them too. A project whose root still
+exists is never removed this way.
+
+To remove all coordination state, stop the server and delete the state
 directory:
 
 ```sh

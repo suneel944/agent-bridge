@@ -559,6 +559,100 @@ def test_an_attached_answer_waits_for_the_operator_to_finish_a_line():
             os.waitpid(pid, 0)
 
 
+def _reporter_harness(directory: Path, client: str) -> tuple[int, int]:
+    harness = (
+        "import os, sys\nfrom pathlib import Path\n"
+        "from agent_parley.terminal import run\n"
+        "raise SystemExit(run([sys.executable, '-c', sys.argv[2], "
+        "sys.argv[3]], "
+        "Path(sys.argv[1]), dict(os.environ), 'lane', attached=True))"
+    )
+    pid, master = pty.fork()
+    if pid == 0:
+        os.execvp(
+            sys.executable,
+            [
+                sys.executable,
+                "-c",
+                harness,
+                str(directory / "lane"),
+                client,
+                HOOK_REVIEW,
+            ],
+        )
+    return pid, master
+
+
+_REPORTER_CLIENT = (
+    "import os, sys, tty, time\ntty.setraw(0)\n"
+    "print('READY', flush=True)\n"
+    "os.read(0, 4096)\n"
+    "os.write(1, sys.argv[1].encode())\n"
+    "print('DRAWN', flush=True)\n"
+    "os.read(0, 4096)\n"
+    "os.write(1, b'\\x1b[?25l')\n"
+    "time.sleep(30)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "report", [b"\x1b[O", b"\x1b[<35;12;7M", b"\x1b[24;80R"]
+)
+def test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog(report):
+    with tempfile.TemporaryDirectory(prefix="dialog-") as temporary:
+        directory = Path(temporary)
+        (directory / "lane").mkdir()
+        project(directory, {})
+        write_json(
+            directory / "lane-activity.json",
+            {"activity": "idle", "updated": 1},
+        )
+        pid, master = _reporter_harness(directory, _REPORTER_CLIENT)
+        try:
+            marked(master, b"READY")
+            os.write(master, b"\x1b[I")
+            marked(master, b"DRAWN")
+            assert published(directory)["dialog"]["name"] == "hook-review"
+            os.write(master, report)
+            time.sleep(2.0)
+            state = json.loads((directory / "lane-activity.json").read_text())
+            assert "dialog" in state, state
+        finally:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+def test_an_operator_digit_still_answers_a_held_dialog():
+    with tempfile.TemporaryDirectory(prefix="dialog-") as temporary:
+        directory = Path(temporary)
+        (directory / "lane").mkdir()
+        project(directory, {})
+        write_json(
+            directory / "lane-activity.json",
+            {"activity": "idle", "updated": 1},
+        )
+        pid, master = _reporter_harness(directory, _REPORTER_CLIENT)
+        try:
+            marked(master, b"READY")
+            os.write(master, b"\x1b[I")
+            marked(master, b"DRAWN")
+            assert published(directory)["dialog"]["name"] == "hook-review"
+            os.write(master, b"1")
+            deadline = time.monotonic() + 10
+            state = {}
+            while time.monotonic() < deadline:
+                state = json.loads(
+                    (directory / "lane-activity.json").read_text()
+                )
+                if "dialog" not in state:
+                    break
+                time.sleep(0.1)
+            assert "dialog" not in state, state
+        finally:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
 BRIDGE_TOOL = f"{protocol.TOOL_PREFIX}__fetch_inbox"
 
 
