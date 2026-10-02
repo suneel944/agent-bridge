@@ -69,6 +69,7 @@ include = ["/agent_parley", "/plugins", "/tests", "/scripts", "/docs", "/README.
 [dependency-groups]
 dev = [
     "pytest>=8.3,<10",
+    "pytest-xdist>=3.6,<4",
     "pyyaml>=6,<7",
     "ruff>=0.14,<1",
     "mcp>=2.1.1,<3",
