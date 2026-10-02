@@ -105,8 +105,16 @@ archived copy. The archive lands at
 `dist/agent-parley-VERSION-codex-skills.zip` and contains only the merged
 manifest, `skills/` and `assets/`; the plugin-folder README stays out,
 because the portal renders the listing from the manifest rather than from a
-README. `scripts/check_policy.py` fails the gate if
-either manifest drifts from the shape its directory reads.
+README. The archived `skills/` comes from `.codex-plugin/listing-skills`, not
+from the repository skills: the portal scans each skill and flagged the full
+`coordinate` skill as a security risk once it carried operator, integration,
+permission and credential guidance. The listing skill keeps the same name and
+description and covers status, claims, handoffs, reports and mail only.
+The manifest also declares the website, privacy policy and terms of service
+URLs the listing shows. `scripts/check_policy.py` fails the gate if
+either manifest drifts from the shape its directory reads, if a listing URL
+is not https, or if a listing skill's frontmatter differs from its repository
+skill's.
 
 That archive is a release asset. `make release-artifacts` builds it into
 `dist/release` beside the wheel, the source tarball and the plugin archive,

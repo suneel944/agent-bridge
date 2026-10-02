@@ -138,6 +138,45 @@ def test_rejects_a_listing_without_capabilities(tmp_path):
     ]
 
 
+def test_rejects_a_listing_without_policy_urls(tmp_path):
+    root = copy_repository(tmp_path)
+    rewrite_codex_manifest(
+        root, lambda interface: interface.pop("privacyPolicyURL")
+    )
+    assert codex_bundle.manifest_errors(root) == [
+        "Codex interface.privacyPolicyURL must be an https URL"
+    ]
+
+
+def test_archive_packs_the_listing_skill(tmp_path):
+    bundle = codex_bundle.build(ROOT, tmp_path)
+    listing = ROOT / codex_bundle.PLUGIN_DIRECTORY / codex_bundle.LISTING_SKILLS
+    with zipfile.ZipFile(bundle) as archive:
+        skill = archive.read("skills/coordinate/SKILL.md")
+    assert skill == (listing / "coordinate" / "SKILL.md").read_bytes()
+    for text in ("verify set", "participant merge", "pre-approved"):
+        assert text not in skill.decode()
+
+
+def test_rejects_a_listing_skill_that_drifts(tmp_path):
+    root = copy_repository(tmp_path)
+    skill = (
+        root
+        / codex_bundle.PLUGIN_DIRECTORY
+        / codex_bundle.LISTING_SKILLS
+        / "coordinate"
+        / "SKILL.md"
+    )
+    skill.write_text(skill.read_text().replace("Inspect", "Read", 1))
+    assert codex_bundle.manifest_errors(root) == [
+        "listing skill coordinate frontmatter differs"
+    ]
+    skill.unlink()
+    assert codex_bundle.manifest_errors(root) == [
+        "listing skill coordinate is missing or has no repository skill"
+    ]
+
+
 def test_rejects_interface_block_in_claude_manifest(tmp_path):
     root = copy_repository(tmp_path)
     path = root / codex_bundle.PLUGIN_DIRECTORY / ".claude-plugin/plugin.json"
