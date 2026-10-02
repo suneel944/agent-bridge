@@ -46,6 +46,7 @@ FULL_PATHS = (
 )
 LIGHT_PATHS = (
     "docs/",
+    ".github/DISCUSSION_TEMPLATE/",
     ".github/ISSUE_TEMPLATE/",
     ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/CODEOWNERS",

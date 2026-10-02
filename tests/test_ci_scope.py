@@ -40,6 +40,7 @@ def test_every_tracked_path_falls_into_a_category():
         ["README.md"],
         ["CHANGELOG.md", "docs/operations.md", "docs/assets/demo.svg"],
         [".github/ISSUE_TEMPLATE/bug.yml", ".github/PULL_REQUEST_TEMPLATE.md"],
+        [".github/DISCUSSION_TEMPLATE/q-a.yml"],
         [".github/workflows/pages.yml", ".github/workflows/release.yml"],
     ],
 )
