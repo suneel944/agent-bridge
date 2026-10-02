@@ -14,6 +14,13 @@ description embeds it from `main` and cannot be republished. Keep
 `docs/assets/demo-short.svg` for the same reason: the 0.15.0 description
 embeds that file from `main`.
 
+The project site has the same problem, and the attachment URL returns 404 to
+anonymous requests, so a `<video>` element cannot point at it. The Pages
+workflow downloads `launch.mp4` from the v0.15.1 release into
+`docs/assets/`, and `scripts/pages_video.py` replaces the bare URL with a
+`<video>` element that plays that copy. After a re-cut, attach the new MP4 to
+a release and point the workflow's download at it.
+
 ## What is real and what is authored
 
 Every terminal frame comes from `frames.js`, which the demo recorder writes
