@@ -4249,12 +4249,7 @@ def dead_mail(home: Path, directory: Path, manifest: dict) -> None:
     """
     root = manifest["root"]
     now = time.time()
-    named = {
-        entry["display"]: name
-        for name, entry in manifest["participants"].items()
-    }
-    for name, participant in manifest["participants"].items():
-        display = participant["display"]
+    for name in manifest["participants"]:
         record = condition(home, root, name)
         if (
             record is None
@@ -4262,43 +4257,77 @@ def dead_mail(home: Path, directory: Path, manifest: dict) -> None:
             or now - float(record["since"]) < DEAD_MAIL_AFTER
         ):
             continue
-        with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
-            rows = store.return_stale_deliveries(
-                home,
-                root,
-                display,
-                DEAD_MAIL_AFTER,
-                f"{name} dead past {int(DEAD_MAIL_AFTER)}s",
+        _return_mail(
+            home,
+            manifest,
+            name,
+            DEAD_MAIL_AFTER,
+            f"{name} dead past {int(DEAD_MAIL_AFTER)}s",
+            f"{name} has been dead for {int(now - record['since'])}s and no "
+            "wake revived it",
+            f"Mail returned: {name} is dead",
+        )
+
+
+def _return_mail(
+    home: Path,
+    manifest: dict,
+    name: str,
+    older_than: float,
+    reason: str,
+    why: str,
+    subject: str,
+) -> None:
+    """Returns one lane's waiting mail to the lanes that sent it.
+
+    Every delivery to the lane that has waited `older_than` seconds and is
+    still unread or unacknowledged is superseded with the reason, and each
+    sender that is a lane receives one notice naming the returned messages.
+    A store that cannot be read returns nothing.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Current participant manifest.
+        name: Participant whose mail is returned.
+        older_than: Seconds a delivery must have waited to be returned.
+        reason: Supersession reason recorded on each delivery.
+        why: Clause saying why the lane will not read its mail.
+        subject: Subject of the notice each sender receives.
+    """
+    root = manifest["root"]
+    display = manifest["participants"][name]["display"]
+    named = {entry["display"] for entry in manifest["participants"].values()}
+    with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+        rows = store.return_stale_deliveries(
+            home, root, display, older_than, reason
+        )
+        senders: dict[str, list[dict]] = {}
+        for row in rows:
+            if row["sender"] in named and row["sender"] != display:
+                senders.setdefault(row["sender"], []).append(row)
+        for sender, returned in senders.items():
+            listed = "\n".join(
+                f"- message {row['message_id']} ({row['subject']})"
+                for row in returned[:DEAD_MAIL_LISTED]
             )
-            senders: dict[str, list[dict]] = {}
-            for row in rows:
-                if row["sender"] in named and row["sender"] != display:
-                    senders.setdefault(row["sender"], []).append(row)
-            for sender, returned in senders.items():
-                listed = "\n".join(
-                    f"- message {row['message_id']} ({row['subject']})"
-                    for row in returned[:DEAD_MAIL_LISTED]
+            more = len(returned) - DEAD_MAIL_LISTED
+            if more > 0:
+                listed += f"\n- and {more} more"
+            body = (
+                f"{why}, so it will not read these messages:\n{listed}\n"
+                "They are returned to you. Send what still needs an "
+                "answer to a lane that reads as fit with agent-parley "
+                "participant status, or hold the work yourself."
+            )
+            with contextlib.suppress(BridgeError):
+                store.speak(
+                    home,
+                    root,
+                    sender,
+                    subject,
+                    body,
+                    f"dead-mail-{name}-{returned[-1]['message_id']}",
                 )
-                more = len(returned) - DEAD_MAIL_LISTED
-                if more > 0:
-                    listed += f"\n- and {more} more"
-                body = (
-                    f"{name} has been dead for {int(now - record['since'])}s "
-                    "and no wake revived it, so it will not read these "
-                    f"messages:\n{listed}\n"
-                    "They are returned to you. Send what still needs an "
-                    "answer to a lane that reads as fit with agent-parley "
-                    "participant status, or hold the work yourself."
-                )
-                with contextlib.suppress(BridgeError):
-                    store.speak(
-                        home,
-                        root,
-                        sender,
-                        f"Mail returned: {name} is dead",
-                        body,
-                        f"dead-mail-{name}-{returned[-1]['message_id']}",
-                    )
 
 
 def orphan_reason(name: str, record: dict) -> str:
@@ -5000,8 +5029,6 @@ def dead_lanes(
         manifest: Current participant manifest.
         config: Resolved supervision settings.
     """
-    from agent_parley import retirement
-
     root = manifest["root"]
     proved = {
         name: reason
@@ -5019,23 +5046,64 @@ def dead_lanes(
     }
     audience = _audience(manifest, records, set(proved))
     for name, reason in proved.items():
-        try:
-            work = retirement.abandon(
-                directory, name, config["max_claims_per_lane"]
-            )
-        except (BridgeError, OSError, ValueError) as exc:
-            issues.note_supervision_error(directory, f"dead lane {name}: {exc}")
-            continue
-        try:
-            keys = store.release_dead_holder(
-                home,
-                root,
-                manifest["participants"][name]["display"],
-                f"{reason}, so the service released it",
-            )
-        except (BridgeError, OSError, sqlite3.Error):
-            keys = {"released": [], "granted": []}
-        _announce_dead(home, manifest, audience, name, reason, work, keys)
+        _return_work(
+            home,
+            directory,
+            manifest,
+            config,
+            audience,
+            name,
+            reason,
+            f"{name} is dead; its work returned",
+        )
+
+
+def _return_work(
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    config: dict,
+    audience: list[str],
+    name: str,
+    reason: str,
+    subject: str,
+) -> None:
+    """Returns the work and reservations of one lane that cannot act.
+
+    `retirement.abandon` returns its claims and offers, and
+    `store.release_dead_holder` releases its reservations to the peers
+    queued for them. A lane whose work cannot be returned is recorded as a
+    supervision error and keeps it.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+        audience: Participants told what moved.
+        name: Participant whose work is returned.
+        reason: Evidence that the lane cannot act, as one clause.
+        subject: Subject of the notice the audience receives.
+    """
+    from agent_parley import retirement
+
+    try:
+        work = retirement.abandon(
+            directory, name, config["max_claims_per_lane"]
+        )
+    except (BridgeError, OSError, ValueError) as exc:
+        issues.note_supervision_error(directory, f"dead lane {name}: {exc}")
+        return
+    try:
+        keys = store.release_dead_holder(
+            home,
+            manifest["root"],
+            manifest["participants"][name]["display"],
+            f"{reason}, so the service released it",
+        )
+    except (BridgeError, OSError, sqlite3.Error):
+        keys = {"released": [], "granted": []}
+    _announce_dead(home, manifest, audience, name, reason, work, keys, subject)
 
 
 def _announce_dead(
@@ -5046,17 +5114,19 @@ def _announce_dead(
     reason: str,
     work: dict,
     keys: dict,
+    subject: str,
 ) -> None:
-    """Tells every lane that can act once what a dead lane gave back.
+    """Tells every lane that can act once what a lane gave back.
 
     Args:
         home: Private bridge state root.
         manifest: Current participant manifest.
         audience: Participants that are neither dead, reclaimed nor retired.
-        name: Participant proved dead.
-        reason: Evidence that proved it dead.
+        name: Participant whose work was returned.
+        reason: Evidence that the lane cannot act.
         work: What `retirement.abandon` returned.
         keys: What `store.release_dead_holder` released and granted.
+        subject: Subject of the notice.
     """
 
     def listed(numbers: list[str]) -> str:
@@ -5095,10 +5165,174 @@ def _announce_dead(
                 home,
                 manifest["root"],
                 manifest["participants"][peer]["display"],
-                f"{name} is dead; its work returned",
+                subject,
                 body,
                 f"dead-lane:{digest}:{peer}",
             )
+
+
+def prompting(dialog: dict) -> str:
+    """Names what a held prompt asks, from its published record.
+
+    Args:
+        dialog: The dialog record a lane's activity state publishes.
+
+    Returns:
+        The command the watcher read above the prompt, else the tool a
+        permission request named, else the screen lines the watcher
+        recorded, else the prompt's label.
+    """
+    for key in ("command", "tool"):
+        if dialog.get(key):
+            return str(dialog[key])
+    screen = dialog.get("screen")
+    if isinstance(screen, list) and screen:
+        return " ".join(str(line) for line in screen)
+    return str(dialog.get("label") or "a native prompt")
+
+
+def headless_prompts(
+    home: Path, directory: Path, manifest: dict, config: dict
+) -> list[str]:
+    """Ends a session nobody can answer once its prompt outlives a decision.
+
+    A lane the service resumed has no terminal, so a native prompt its
+    client draws can be answered only through the operator decision the
+    dialog watcher opens. Native permission prompts never time out in
+    `timeouts`, so nothing answered such a prompt and the lane held its
+    mail and claims for as long as the session lived. Once a lane whose
+    launcher has no terminal has been parked on a prompt for
+    `timeouts.TIMEOUT_SECONDS`, the decision deadline, its session process
+    is ended through the same verified stop `participant stop` uses. The
+    prompt is never answered here and no permission is widened: ending the
+    session is the refusal. The lane is recorded stopped, the prompting
+    command becomes its wake result, the open dialog decision is retired as
+    stale, its waiting mail is returned to the lanes that sent it, and its
+    claims, offers and reservations are returned as a dead lane's are. The
+    lane is not marked operator-stopped, so new work can resume it.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+
+    Returns:
+        The lanes whose sessions this pass ended, in name order.
+    """
+    from agent_parley import checkpoints
+
+    root = manifest["root"]
+    now = time.time()
+    ended: dict[str, str] = {}
+    for name in sorted(manifest["participants"]):
+        if roster.retired(manifest["participants"][name]):
+            continue
+        state = checkpoints.activity(directory, name)
+        dialog = state.get("dialog")
+        if (
+            state.get("attached") is not False
+            or not isinstance(dialog, dict)
+            or not dialogs.parked(state)
+            or rebooted(state)
+        ):
+            continue
+        since = dialog.get("since", dialog.get("at"))
+        if not _instant(since) or now - since < timeouts.TIMEOUT_SECONDS:
+            continue
+        pid = state.get("session_pid")
+        ticks = str(state.get("session_ticks") or "")
+        if type(pid) is not int or not process.alive(pid, ticks):
+            continue
+        try:
+            process.ServerProcess(pid, ticks).stop()
+        except BridgeError as exc:
+            issues.note_supervision_error(
+                directory, f"headless prompt {name}: {exc}"
+            )
+            continue
+        reason = (
+            f"{name} was resumed without a terminal and held by "
+            f"{dialog.get('label') or 'a native prompt'} for "
+            f"{int(now - since)}s, past the "
+            f"{int(timeouts.TIMEOUT_SECONDS)}s decision deadline"
+        )
+        _stop_headless(home, directory, root, name, reason, prompting(dialog))
+        ended[name] = reason
+    if not ended:
+        return []
+    records = {
+        name: condition(home, root, name) for name in manifest["participants"]
+    }
+    audience = _audience(manifest, records, set(ended))
+    for name, reason in ended.items():
+        _return_mail(
+            home,
+            manifest,
+            name,
+            0,
+            f"{name} ended at an unanswered prompt",
+            f"{reason}, so the service ended its session",
+            f"Mail returned: {name} ended at a prompt",
+        )
+        _return_work(
+            home,
+            directory,
+            manifest,
+            config,
+            audience,
+            name,
+            f"{reason}, so the service ended its session",
+            f"{name} ended at a prompt; its work returned",
+        )
+    return sorted(ended)
+
+
+def _stop_headless(
+    home: Path,
+    directory: Path,
+    root: str,
+    name: str,
+    reason: str,
+    command: str,
+) -> None:
+    """Records a headless session the prompt watchdog ended.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        root: Canonical project key.
+        name: Participant whose session was ended.
+        reason: Why the session was ended, as one clause.
+        command: What the prompt that held the session asked about.
+    """
+    from agent_parley import checkpoints
+
+    with contextlib.suppress(BridgeError, OSError, ValueError):
+        with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+            state = checkpoints.activity(directory, name)
+            state.update(activity=STOPPED, updated=time.time())
+            state.pop("dialog", None)
+            write_json(directory / f"{name}-activity.json", state)
+    with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+        with store.connect(home, write=True) as db:
+            lanes.transition(db, root, name, lanes.STOPPED, evidence=reason)
+    with contextlib.suppress(BridgeError, OSError, ValueError):
+        for entry in decisions.list_open(directory):
+            if (
+                entry.get("lane") == name
+                and entry.get("kind") == dialogs.DECISION_KIND
+            ):
+                decisions.stale(directory, str(entry["id"]))
+    with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+        with lock(directory / f"{name}-wake.lock"):
+            record = wake_record(home, root, name, directory)
+            record.update(
+                result=f"ended: {reason}; prompting command: {command}",
+                blocked="",
+                next_at=None,
+            )
+            store_wake(home, directory, root, name, record)
 
 
 claimed_since = issues.claimed_since
@@ -6639,6 +6873,14 @@ def _poll(home: Path, directory: Path) -> None:
         store.reclaim_expired(home, manifest["root"])
     stage("deliveries", deliveries, home, directory, manifest)
     stage("dead lanes", dead_lanes, home, directory, manifest, config)
+    stage(
+        "headless prompts",
+        headless_prompts,
+        home,
+        directory,
+        manifest,
+        config,
+    )
     stage("dependencies", lifecycle.settle_dependencies, directory)
     stage("forge issues", refresh_forge_issues, directory, manifest)
     if config["prompts"]:
