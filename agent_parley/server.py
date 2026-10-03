@@ -42,6 +42,7 @@ WORKERS = 16
 DECISION_SECONDS = hook.REPLY_TIMEOUT - 0.5
 SLOW_DECISION = DECISION_SECONDS / 2
 DELIVERY_SECONDS = 0.25
+RECEIPT_SECONDS = 0.5
 TEMPORARY_SECONDS = 60.0
 UNDECIDED_LIMIT = 1
 REFUSAL_SECONDS = 5.0
@@ -993,23 +994,60 @@ class Handler(BaseHTTPRequestHandler):
                 self._raw_hook(served)
             else:
                 self._reply(200, served)
-            if delivery:
+            received = self._received()
+            if delivery and received:
                 self._delivered(path, request["participant"], delivery)
+            elif delivery:
+                log(
+                    self.server.home,
+                    "undelivered",
+                    f"{self.path} {request['participant']} reply was not "
+                    "confirmed by the client; the next event repeats it",
+                )
         finally:
             if owed:
                 self.server.recover(lane, owed)
 
-    def _delivered(self, directory: Path, agent: str, delivery: dict) -> None:
-        """Marks a written reply's coordination as delivered to the lane.
+    def _received(self) -> bool:
+        """Waits for the client to confirm it read the whole reply.
 
-        The whole reply is written before this runs, and the connection
-        closes after it, so the client reads its end of stream only once the
-        lane's state says what it was given, as the in-process path does.
+        Writing a reply succeeds into the kernel's buffer even when the
+        client already stopped waiting for it and decided in-process, so a
+        written reply proves nothing about what the lane was given. A
+        client that announces `hook.RECEIPT_HEADER` sends `hook.RECEIPT`
+        once it read the reply to its declared length, and only that byte
+        arriving within `RECEIPT_SECONDS` counts as receipt. A client that
+        gave up has exited or is deciding in-process and never sends it.
+
+        A client that does not announce the header predates the receipt,
+        as a hook client written before an upgrade and not yet rewritten
+        by a lane launch does, and is treated as having read what was
+        written so its lane keeps the delivery it had.
+
+        Returns:
+            Whether the client holds the reply.
+        """
+        if self.headers.get(hook.RECEIPT_HEADER) != hook.RECEIPT:
+            return True
+        try:
+            self.request.settimeout(RECEIPT_SECONDS)
+            return self.rfile.read(1) == hook.RECEIPT.encode()
+        except OSError:
+            return False
+
+    def _delivered(self, directory: Path, agent: str, delivery: dict) -> None:
+        """Marks a confirmed reply's coordination as delivered to the lane.
+
+        The whole reply is written and its receipt confirmed before this
+        runs, and the connection closes after it, so the client reads its
+        end of stream only once the lane's state says what it was given,
+        as the in-process path does.
         The wait for the lane's checkpoint lock is `DELIVERY_SECONDS`, which
         keeps the close inside the client's read timeout. A reply the
-        client stopped reading raised before this point, and a decision the
-        client was answered `hook.DECIDING` for never reaches it, so both
-        leave their coordination to the lane's next event.
+        client stopped reading raised before this point, a reply it never
+        confirmed is not delivered, and a decision the client was answered
+        `hook.DECIDING` for never reaches it, so all three leave their
+        coordination to the lane's next event.
 
         Args:
             directory: Common project state directory of the lane.
