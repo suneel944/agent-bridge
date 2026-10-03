@@ -515,3 +515,10 @@ the lane as stopped and stores the prompting command as its wake result. The
 lane's waiting mail goes back to its senders, and its claims, offers and
 reservations are returned the way a dead lane's are. The lane is not marked
 operator-stopped, so new work can resume it.
+
+The service still never answers that permission on the lane's behalf once
+it wakes the lane again. The next wake prompt instead names the command
+the prompt asked about and says the permission it needed was never
+granted, so the lane should use another route for that work or ask the
+operator. The note is sent once; a later wake, once this one is admitted,
+does not repeat it.
