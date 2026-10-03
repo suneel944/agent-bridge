@@ -196,6 +196,38 @@ def test_every_lane_behind_the_base_is_read_with_its_own_paths(
     }
 
 
+def test_a_retired_lane_is_never_read(bridge, repo, paired, monkeypatch):
+    reserve(bridge, paired["root"], "claude", "first.txt")
+    reserve(bridge, paired["root"], "codex", "second.txt")
+    commit(repo, "first.txt", "one\n")
+    commit(repo, "second.txt", "two\n")
+    retired = paired["participants"]["codex"]
+    retired["retired"] = 1.0
+    asked = []
+    read = supervision._read
+    dirty = supervision.dirty_paths
+
+    def reading(root, *args):
+        asked.append(args)
+        return read(root, *args)
+
+    def dirtying(root):
+        asked.append((root,))
+        return dirty(root)
+
+    monkeypatch.setattr(supervision, "_read", reading)
+    monkeypatch.setattr(supervision, "dirty_paths", dirtying)
+    assert supervision.base_advances(bridge.home, paired) == {
+        "claude": ["first.txt"]
+    }
+    assert asked
+    assert not [
+        args
+        for args in asked
+        if retired["branch"] in args or retired["lane"] in args
+    ]
+
+
 def test_a_base_advance_over_no_held_path_is_silent(bridge, repo, paired):
     reserve(bridge, paired["root"], "claude", "shared.txt")
     store.register(bridge.home, paired["root"], "codex")

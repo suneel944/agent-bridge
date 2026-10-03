@@ -4,6 +4,9 @@ import itertools
 import json
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agent_parley import checkpoints, cli, dashboard, store, supervision
@@ -214,6 +217,74 @@ def test_an_expired_publication_is_read_from_git_again(bridge, repo, paired):
     assert supervision.readings(bridge.home, paired)[0] == {
         "claude": ["shared.txt"]
     }
+
+
+def test_an_expired_reading_is_served_while_one_refresh_replaces_it(
+    bridge, paired, monkeypatch
+):
+    root = paired["root"]
+    supervision._READINGS[root] = (0.0, {"claude": ["old"]}, {}, 60)
+    release = threading.Event()
+    calls = []
+
+    def edits(home, manifest):
+        calls.append("edits")
+        assert release.wait(10)
+        return {"claude": ["new"]}
+
+    def advances(home, manifest):
+        calls.append("advances")
+        assert release.wait(10)
+        return {}
+
+    monkeypatch.setattr(supervision, "operator_edits", edits)
+    monkeypatch.setattr(supervision, "base_advances", advances)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        served = list(
+            pool.map(
+                lambda _: supervision.readings(bridge.home, paired),
+                range(16),
+            )
+        )
+    assert served == [({"claude": ["old"]}, {})] * 16
+    flight = supervision._READINGS_FLIGHTS[root]
+    release.set()
+    assert flight.done.wait(10)
+    assert sorted(calls) == ["advances", "edits"]
+    assert supervision.readings(bridge.home, paired) == (
+        {"claude": ["new"]},
+        {},
+    )
+    assert sorted(calls) == ["advances", "edits"]
+
+
+def test_concurrent_callers_without_a_reading_share_one(
+    bridge, paired, monkeypatch
+):
+    calls = []
+    start = threading.Barrier(8)
+
+    def edits(home, manifest):
+        calls.append("edits")
+        time.sleep(0.3)
+        return {"claude": ["shared.txt"]}
+
+    def advances(home, manifest):
+        calls.append("advances")
+        return {}
+
+    def ask(_):
+        start.wait(10)
+        return supervision.readings(bridge.home, paired)
+
+    monkeypatch.setattr(supervision, "operator_edits", edits)
+    monkeypatch.setattr(supervision, "base_advances", advances)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        served = list(pool.map(ask, range(8)))
+    assert served == [({"claude": ["shared.txt"]}, {})] * 8
+    assert sorted(calls) == ["advances", "edits"]
+    assert paired["root"] not in supervision._READINGS
+    assert paired["root"] not in supervision._READINGS_FLIGHTS
 
 
 def test_the_batch_matcher_agrees_with_the_pairwise_rule():
