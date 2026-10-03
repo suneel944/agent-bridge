@@ -3,6 +3,7 @@
 import contextlib
 import curses
 import functools
+import json
 import shutil
 import sqlite3
 import sys
@@ -272,6 +273,16 @@ def _cached(cache: dict, key: object, read: Callable[[], Any]) -> Any:
     return value
 
 
+def _pull_request_record(directory: Path) -> object:
+    """Reads the pull request record supervision keeps, or None if unread."""
+    try:
+        return json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+    except (OSError, ValueError):
+        return None
+
+
 def _branch(lane: Path, cache: dict) -> str:
     """Reads a lane branch at most once per branch refresh interval.
 
@@ -520,6 +531,8 @@ def _row(
         "work_offer": bool(published["offer"]),
         "offer_kind": (published["offer"] or {}).get("kind", ""),
         "work_dispatch": published.get("dispatch") or {},
+        **views.NO_OUTCOMES,
+        **context.get("outcomes", {}).get(agent, {}),
         "awaiting_approval": _awaiting_approval(directory, data, agent),
         "prompt": str(
             state.get("last_prompt") or state.get("task", "")
@@ -680,12 +693,23 @@ def collect(
                 conditions = lanes.read_all(db, data["root"])
         except (BridgeError, OSError, sqlite3.Error):
             accounts, conditions = {}, {}
+        ledger = snapshot(path.parent)
+        outcomes = metrics.pull_request_outcomes(
+            _cached(
+                branches,
+                ("pull_requests", data["root"]),
+                functools.partial(_pull_request_record, path.parent),
+            ),
+            ledger,
+            time.time() - (window or metrics.OUTCOME_WINDOW),
+        )
         context = {
             "accounts": accounts,
             "conditions": conditions,
             "usage": usage,
             "usage_read": usage_read,
-            "issues": snapshot(path.parent),
+            "issues": ledger,
+            "outcomes": outcomes["lanes"],
             "branches": branches,
             "records": cache,
             "since": since,
@@ -706,6 +730,7 @@ def collect(
                 "root": data["root"],
                 "present": present,
                 "rows": rows,
+                "pull_requests_excluded": outcomes["excluded"],
                 "ready_groups": plan.ready_groups(
                     plan.groups(path.parent),
                     context["issues"],
@@ -1169,7 +1194,8 @@ def _summary(view: dict, rate: str) -> list[str]:
 
     Returns:
         A line naming the server, the time and the reading's cost; a line
-        counting lanes by state and the issues they hold; and a line of
+        counting lanes by state, the issues they hold and, when the window
+        holds any, their pull request outcomes; and a line of
         mail, lease and enforcement totals. A count that is zero and says
         nothing, such as no awaiting approvals, is left out.
     """
@@ -1245,6 +1271,18 @@ def _summary(view: dict, rate: str) -> list[str]:
             else "",
         ]
     )
+    landed = metrics.outcome_line(
+        {
+            "lanes": dict(enumerate(rows)),
+            "excluded": sum(
+                int(project.get("pull_requests_excluded") or 0)
+                for project in view["projects"]
+            ),
+        },
+        tables.age(view.get("window") or metrics.OUTCOME_WINDOW),
+    )
+    if landed:
+        issues_line += f"   {landed}"
     traffic = (
         "Mail: "
         + listed([f"{unread} unread", f"{unacked} unacked" if unacked else ""])

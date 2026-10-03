@@ -520,6 +520,34 @@ file is the interface. The command reads the records `top` reads, holds no lock
 and writes no coordination state, and its `tokens` counter is what the native
 client counted rather than billed spend, exactly as the `TOKENS` column is.
 
+### Pull request outcomes
+
+Each lane also reports what its pull requests became over the `--since`
+window, or the last 7 days when no window is given:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `agent_parley_lane_pull_requests_opened_total` | counter | Pull requests supervision first saw open in the window |
+| `agent_parley_lane_pull_requests_merged_total` | counter | Pull requests a claim resolution recorded as merged in the window |
+| `agent_parley_lane_pull_requests_closed_total` | counter | Pull requests that left the open list in the window with no recorded merge |
+| `agent_parley_lane_first_pass_ratio` | gauge | Share of merged pull requests with a known CI round count that merged after one round and no `CHANGES_REQUESTED` review |
+| `agent_parley_lane_ci_rounds_unknown` | gauge | Merged pull requests with no stored CI round count, left out of the ratio and the median |
+| `agent_parley_lane_ci_rounds_median` | gauge | Median CI rounds over merged pull requests with a known count |
+| `agent_parley_lane_claim_to_merge_seconds_median` | gauge | Median seconds from the claim to the merge of its pull request |
+| `agent_parley_project_pull_requests_excluded` | gauge | Pull requests in the window that no lane owns, left out of every lane figure |
+
+Nothing here reads the forge. Supervision's pull request poll already keeps
+each open pull request in `pull-requests.json` with the lane it belongs to and
+when it was first seen; one that leaves the open list moves to that file's
+`history` with `gone_at`, kept for 30 days. A merge is the one a claim's
+resolution names, so its lane is the claim's holder and its claim-to-merge time
+runs from the claim to the forge's close instant. A pull request that left the
+open list without such a resolution counts as closed unmerged, which includes a
+merge no claim recorded. A window with nothing in it reports zeros. `top` adds
+one `Pull requests` summary to its issues line and `status` one line per
+project over the last 7 days, each only when the window holds any, and `top --json` carries each lane's figures
+under `pull_requests`.
+
 ## `watch`
 
 One lane can be followed as a stream. `agent-parley watch NAME` prints one line
