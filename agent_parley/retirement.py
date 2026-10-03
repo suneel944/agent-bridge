@@ -298,7 +298,9 @@ def abandon(directory: Path, name: str, cap: int | None = None) -> dict:
     proved dead, and the lane's own transitions are applied on its behalf,
     as a retirement would apply them, but the lane is not retired: its
     worktree, branch, credential and roster entry stay, so an operator can
-    still resume it, and a resumed lane finds its claims in the pool.
+    still resume it, and a resumed lane finds its claims in the pool. A lane
+    whose headless session supervision ended at a prompt nobody answered
+    returns its work the same way.
 
     Offers made to the lane are declined back to their senders. Each claim
     it holds is released to the pool, and a claim a live peer asked to take

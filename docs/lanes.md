@@ -383,3 +383,14 @@ the setting is the project default. A `claude` lane with neither recorded is
 not resumed by the service, because the resume would stop at a permission
 prompt nobody sees; `participant add`, `problems` and `doctor` name it as a
 setup gap with this command.
+
+A lane resumed without a terminal can still reach a permission prompt its
+rules do not cover. The dialog watcher opens an operator decision naming the
+prompt and the command it asks to run, which the operator can answer from a
+notification transport. The service never answers it. If the prompt is still
+unanswered after the 30-minute decision deadline, the service ends that
+session with the same verified stop `participant stop` uses. It then records
+the lane as stopped and stores the prompting command as its wake result. The
+lane's waiting mail goes back to its senders, and its claims, offers and
+reservations are returned the way a dead lane's are. The lane is not marked
+operator-stopped, so new work can resume it.
