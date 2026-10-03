@@ -647,6 +647,116 @@ def test_a_refused_rerun_names_the_exact_command(bridge, project, monkeypatch):
     assert rows[0]["command"] == f"run `{RERUN}` yourself, or fix and push"
 
 
+THIRD = "c" * 40
+
+
+def rounds_decisions(directory):
+    """Returns the open CI round decisions, oldest first."""
+    return [
+        record
+        for record in decisions.list_open(directory)
+        if record["kind"] == supervision.CI_ROUNDS_KIND
+    ]
+
+
+def exhausted_rows(directory):
+    """Returns the ci rounds exhausted rows the record yields."""
+    return [
+        row
+        for row in failed_rows(directory)
+        if row["condition"] == problems.CI_ROUNDS_EXHAUSTED
+    ]
+
+
+def red_head(directory, sha):
+    """Builds a red reading on one head commit with a failed test."""
+    return reading(
+        directory, sha=sha, checks="red", failing=["test"], failed=FAILED
+    )
+
+
+def test_two_red_rounds_exhaust_the_limit_and_a_green_head_clears_it(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, red_head(project, SHA))
+    assert exhausted_rows(project) == []
+    assert rounds_decisions(project) == []
+    observe(bridge, project, monkeypatch, red_head(project, NEXT))
+    observe(bridge, project, monkeypatch, red_head(project, NEXT))
+    [row] = exhausted_rows(project)
+    assert "#7 used 2 CI rounds: test failure" in row["detail"]
+    assert len(failed_rows(project)) == 1
+    [asked] = rounds_decisions(project)
+    assert asked["options"] == [
+        supervision.CI_ROUND_GRANT,
+        supervision.CI_ROUND_TAKEOVER,
+    ]
+    limited = [
+        body for body in received(bridge, "claude") if "stop pushing" in body
+    ]
+    assert len(limited) == 1
+    green = reading(project, sha=THIRD, checks="green")
+    observe(bridge, project, monkeypatch, green)
+    assert exhausted_rows(project) == []
+    assert rounds_decisions(project) == []
+    assert decisions.get(project, asked["id"])["state"] == decisions.CLOSED
+
+
+def test_a_rerun_of_a_timed_out_run_is_not_a_new_round(
+    bridge, project, monkeypatch
+):
+    reruns(monkeypatch)
+    observe(bridge, project, monkeypatch, cancelled(project))
+    observe(bridge, project, monkeypatch, reading(project, pending=STARTED))
+    observe(bridge, project, monkeypatch, cancelled(project))
+    record = json.loads((project / supervision.PULL_REQUEST_RECORD).read_text())
+    assert record["pull_requests"]["7"]["rounds"] == 1
+    assert exhausted_rows(project) == []
+
+
+def test_a_granted_round_lets_one_more_head_run(bridge, project, monkeypatch):
+    observe(bridge, project, monkeypatch, red_head(project, SHA))
+    observe(bridge, project, monkeypatch, red_head(project, NEXT))
+    [asked] = rounds_decisions(project)
+    decisions.answer(project, asked["id"], supervision.CI_ROUND_GRANT, "cli")
+    observe(bridge, project, monkeypatch, red_head(project, NEXT))
+    assert exhausted_rows(project) == []
+    assert "granted one more CI round" in received(bridge, "claude")[-1]
+    observe(bridge, project, monkeypatch, red_head(project, THIRD))
+    [row] = exhausted_rows(project)
+    assert "used 3 CI rounds" in row["detail"]
+    assert len(rounds_decisions(project)) == 1
+
+
+def test_a_takeover_stops_asking_about_the_pull_request(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, red_head(project, SHA))
+    observe(bridge, project, monkeypatch, red_head(project, NEXT))
+    [asked] = rounds_decisions(project)
+    decisions.answer(project, asked["id"], supervision.CI_ROUND_TAKEOVER, "cli")
+    observe(bridge, project, monkeypatch, red_head(project, THIRD))
+    assert rounds_decisions(project) == []
+    [row] = exhausted_rows(project)
+    assert row["command"] == "operator took over the branch"
+
+
+def test_the_round_limit_is_a_validated_setting(bridge, project, monkeypatch):
+    assert supervision.settings({})["ci_rounds"] == 2
+    for value in (0, 101, "2", True):
+        with pytest.raises(supervision.BridgeError):
+            supervision.settings({"ci_rounds": value})
+    monkeypatch.setattr(
+        supervision.forge,
+        "open_pull_requests",
+        lambda root: [red_head(project, SHA)],
+    )
+    supervision.pull_request_wakes(
+        bridge.home, project, manifest(project), rounds=1
+    )
+    assert len(exhausted_rows(project)) == 1
+
+
 AT = "2026-10-01T10:00:00Z"
 REVIEWS = [
     {
