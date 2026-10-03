@@ -38,15 +38,17 @@ untouched past the inactivity threshold. Uncommitted changes and unpushed
 commits keep it unless the operator forces the removal, and a forced
 removal first writes a recovery checkpoint holding both; an ignored file
 keeps it regardless, because no force can recover what was never tracked.
+Regenerable tool output alone, such as a virtual environment, bytecode and
+tool caches or package build metadata, keeps nothing: a rerun recreates it.
 """
 
 import os
 import sqlite3
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from agent_parley import forge, issues, retirement, store
+from agent_parley import forge, issues, pool, retirement, store
 from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
@@ -104,6 +106,15 @@ REMOVABLE = frozenset(
         ABANDONED,
         STALE,
         ABSORBED,
+    }
+)
+REGENERABLE = frozenset(
+    {
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
     }
 )
 BUNDLED = frozenset({ABSORBED})
@@ -639,6 +650,24 @@ def _absorbed(root: str, head: str) -> bool:
     return bool(base) and merged.splitlines()[0] == base
 
 
+def _regenerable(path: str) -> bool:
+    """Reports whether an ignored path is tool output a rerun recreates.
+
+    Args:
+        path: Worktree-relative path Git ignores.
+
+    Returns:
+        Whether any component of the path is a virtual environment, a
+        Python bytecode or tool cache, or package build metadata. Every
+        other ignored path, such as `.env` or a data directory, may hold
+        content that exists nowhere else.
+    """
+    return any(
+        part in REGENERABLE or part.endswith(".egg-info")
+        for part in PurePosixPath(path).parts
+    )
+
+
 def _stray(
     root: str,
     entry: dict,
@@ -662,7 +691,8 @@ def _stray(
         `FORCEABLE` allows a forced one. A worktree holding files Git
         ignores is always kept: `git worktree remove` would delete them
         with the tree, and no force writes a checkpoint of untracked
-        content, so a forced removal could not protect them either.
+        content, so a forced removal could not protect them either. Only
+        regenerable tool output, as `_regenerable` decides, is exempt.
     """
     path = Path(entry["path"])
     if entry["locked"]:
@@ -679,8 +709,9 @@ def _stray(
     ignored = retirement.ignored_files(str(path))
     if ignored is None:
         return UNREADABLE, []
-    if ignored:
-        return IGNORED, ignored
+    kept = [name for name in ignored if not _regenerable(name)]
+    if kept:
+        return IGNORED, kept
     head = entry["head"]
     if not head:
         return UNREADABLE, []
@@ -801,7 +832,8 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     """Assesses the worktrees lanes made beside their own lane worktrees.
 
     Every worktree the project repository registers is read, except the
-    base checkout and the participants' own lanes. Each is attributed to a
+    base checkout, the participants' own lanes and the recorded spares,
+    which `pool.sweep` assesses by their own rule. Each is attributed to a
     lane by path or branch; one directly inside the project state
     directory, or directly inside a project directory under the state root
     the product used before its rename, belongs to the project even when
@@ -838,9 +870,16 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     participants = manifest["participants"]
     lanes, prefixes = _owner_index(manifest)
     owned = owned_roots(directory)
+    spares = {
+        str(Path(spare["path"]).resolve()) for spare in pool.spares(directory)
+    }
     rows = []
     for entry in entries:
-        if entry["path"] == base or entry["path"] in lanes:
+        if (
+            entry["path"] == base
+            or entry["path"] in lanes
+            or entry["path"] in spares
+        ):
             continue
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)

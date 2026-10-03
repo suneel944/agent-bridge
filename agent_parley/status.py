@@ -709,6 +709,7 @@ class StatusMixin(BridgeCore):
             "usage": usage,
             "schedules": schedules,
             "schedules_error": failure,
+            "pull_request_record": cached,
             "pull_requests": [
                 reading
                 for reading in (
@@ -879,6 +880,9 @@ class StatusMixin(BridgeCore):
         budget = budgets.report(
             self.home, directory, data, agent, frame["usage"]
         )
+        from agent_parley import blueprints
+
+        runs = blueprints.for_lane(directory, agent)
         record = {
             "participant": agent,
             "identity": name,
@@ -967,6 +971,11 @@ class StatusMixin(BridgeCore):
                     **issues.unresolved_completion(record),
                     "convergence": convergence.current(
                         accounts, number, record.get("claim_id")
+                    ),
+                    **(
+                        {"blueprint": blueprints.line(number, runs[number])}
+                        if number in runs
+                        else {}
                     ),
                 }
                 for number, record in sorted(
@@ -1111,10 +1120,12 @@ class StatusMixin(BridgeCore):
             gone is left out; one whose root is missing or whose lanes all
             stopped over `DORMANT_SECONDS` ago reads as dormant.
         """
+        from agent_parley import pool
         from agent_parley.cli import (
             inbound_status,
             issues,
             json,
+            metrics,
             notify,
             plan,
             reported_ready,
@@ -1157,6 +1168,7 @@ class StatusMixin(BridgeCore):
                         "root_missing": not Path(data["root"]).is_dir(),
                         "dormant": dormant(data["root"], participants),
                         "reclaim": supervision.reclaim_summary(path.parent),
+                        "spares": pool.reading(path.parent, data),
                         "accounting": self._project_accounting(
                             db, data["root"]
                         ),
@@ -1171,6 +1183,13 @@ class StatusMixin(BridgeCore):
                             path.parent
                         ),
                         "supervision_poll": supervision.last_poll(path.parent),
+                        "pull_request_outcomes": (
+                            metrics.pull_request_outcomes(
+                                context.get("pull_request_record"),
+                                context["ledger"],
+                                time.time() - metrics.OUTCOME_WINDOW,
+                            )
+                        ),
                         **self._integration(path.parent, data, context),
                     }
                 )
@@ -1370,7 +1389,7 @@ class StatusMixin(BridgeCore):
             width: Columns the tables may use, or None for whole lines.
             every_claim: Also list claims whose work ended on the forge.
         """
-        from agent_parley import supervision
+        from agent_parley import metrics, supervision
         from agent_parley.cli import supervision_failure, tables
 
         dormancy = " (dormant)" if project["dormant"] else ""
@@ -1384,6 +1403,7 @@ class StatusMixin(BridgeCore):
         work: list[tuple[int, tuple[str, ...]]] = []
         lanes: list[tuple[str, ...]] = []
         notes: list[str] = []
+        runs: list[str] = []
         ended: list[int] = []
         states = {
             record["participant"]: record["lane_state"]
@@ -1403,6 +1423,8 @@ class StatusMixin(BridgeCore):
                 else:
                     live += 1
                     notes.extend(attention(claim, owner, project["root"], peer))
+                    if claim.get("blueprint"):
+                        runs.append(f"Blueprint {claim['blueprint']}")
                 if every_claim or not closed:
                     shown = {
                         **claim,
@@ -1428,6 +1450,13 @@ class StatusMixin(BridgeCore):
             print(text)
         for text in tables.lane_table(lanes, width):
             print(text)
+        for text in runs:
+            print(text)
+        if outcome := metrics.outcome_line(
+            project.get("pull_request_outcomes") or {},
+            tables.age(metrics.OUTCOME_WINDOW),
+        ):
+            print(outcome)
         if ended:
             listed = " ".join(f"#{number}" for number in sorted(ended)[:10])
             more = f" and {len(ended) - 10} more" if len(ended) > 10 else ""
@@ -1464,12 +1493,14 @@ class StatusMixin(BridgeCore):
             The number of lanes reported, so a caller can gate on a filter
             having matched at least one lane.
         """
+        from agent_parley import pool
         from agent_parley.cli import (
             Selection,
             describe,
             json,
             lane_detail,
             lanes,
+            metrics,
             narrow,
             pending_offers,
             reclaim,
@@ -1506,8 +1537,15 @@ class StatusMixin(BridgeCore):
             print(describe(snapshot(path.parent)))
             if line := landed_line(project.get("integration") or {}):
                 print(line)
+            if outcome := metrics.outcome_line(
+                project.get("pull_request_outcomes") or {},
+                tables.age(metrics.OUTCOME_WINDOW),
+            ):
+                print(outcome)
             if measured := reclaim.summary_line(project.get("reclaim") or {}):
                 print(measured)
+            if spares := pool.summary_line(project.get("spares") or {}):
+                print(spares)
             if accounted := project.get("accounting"):
                 print(f"Lanes: {lanes.describe_account(accounted)}")
             if groups := project.get("ready_groups") or []:
@@ -1529,4 +1567,8 @@ class StatusMixin(BridgeCore):
             ]
             for row in tables.status_table(rows, width):
                 print(row)
+            for record in reported:
+                for claim in record["claims"]:
+                    if claim.get("blueprint"):
+                        print(f"Blueprint {claim['blueprint']}")
         return matched

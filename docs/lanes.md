@@ -52,6 +52,60 @@ an operator shell in the base checkout: it refuses inside an assigned worktree
 and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
 a command every later lane runs. `init show` stays readable from a lane.
 
+Each launch records how long `run` took to reach the native CLI, split into
+worktree creation, `init` and CLI start (registration, the service and the
+native configuration). `participant show` prints it as `Last launch:`, and
+`participant show --json` reports it as `launch_timing`. A resumed lane records
+zero for the worktree and `init`, because it pays for neither.
+
+When `init` is most of that wait, keep prepared spare worktrees:
+
+```sh
+agent-parley pool set 2    # keep two spares ready
+agent-parley pool show     # configured size and each spare's state
+agent-parley pool fill     # prepare missing spares now, in the foreground
+agent-parley pool set 0    # keep none; the next gc removes the rest
+```
+
+A spare is a worktree on its own branch, cut from the project base, with `init`
+already run in it. It lives in the project's private state directory as
+`spare.N`, outside the target repository, and carries no participant, no
+credential profile and no registration. `run` takes a ready spare when one
+exists, renames its branch to the lane branch it would have created under the
+project branch prefix, keeps the spare's worktree path as the lane's path, and
+starts the CLI there; a detached fill then prepares a replacement, logging to
+`pool.log` in the project state directory. A spare cut from an older base,
+prepared by a different `init` command, or moved off its own branch is stale: it
+is never handed out, and the next fill or `gc --apply` removes its worktree and
+branch. `status` counts spares as ready, preparing or stale, and `gc` lists each
+one. Like `init set`, `pool set` runs only from an operator shell.
+
+### Starting on an issue
+
+```sh
+agent-parley run claude --issue 42
+```
+
+`--issue N` claims issue N for the lane before its native CLI starts, through
+the same claim `issue claim` makes, so an issue another lane owns refuses the
+launch and the project's claim cap still applies. The launcher then reads the
+issue through the configured forge (`gh` on GitHub, `bd` under Beads) and opens
+the session with a digest instead of `--task`: the issue number, the project's
+`verify` command, the expected outcome (a pull request when
+`pull_request.self_service` is on, otherwise a ready report), and the issue's
+title, body, three newest comments and the titles of up to five issues its body
+mentions by number.
+
+The quoted issue text is held to 6000 bytes. The title and linked titles are
+kept whole, each comment is cut to 600 bytes and the body gets the rest. Anything
+cut or left out is named with the command that prints the full issue, such as
+`gh issue view 42 --repo OWNER/NAME --comments`. The text sits between fixed
+markers and is labelled untrusted input that describes the work; it is not an
+instruction to the lane or the launcher. A forge that is absent, offline or
+refusing never blocks the launch: the claim stays, and the lane starts with the
+issue number and a note that hydration failed, so it reads the issue itself.
+Native authentication and permissions are unchanged.
+
 ## Steering a lane
 
 Steer one lane without taking over its terminal:
@@ -236,6 +290,14 @@ ready one; when several are ready, name one with `--issue N`, which
 `participant merge NAME` accepts too. The full policy is in
 [Operations](operations.md#requiring-a-recorded-approval).
 
+A lane is not left pushing fix after fix against red CI. The `ci_rounds`
+supervision setting (default 2) caps the CI rounds one pull request may use,
+where a round is a head commit whose checks finished and a re-run on the same
+head adds none. At the limit with red checks the lane is told to stop pushing
+and report blocked, `problems` lists `ci rounds exhausted`, and one decision
+asks you to grant one more round or take over. The cap is advisory: nothing
+refuses a push. Details are in [Operations](operations.md).
+
 ## Revising the plan
 
 A lane that finds a missing prerequisite or an obsolete edge in the applied
@@ -312,6 +374,90 @@ records the base as carrying an unverified integration, and holds every further
 merge until `participant merge --verify-recovery` passes or the repairing lane
 retries, with `--renew-recovery` once its attempts are used.
 
+## Running a claim through a blueprint
+
+`init` and `verify` are the same for every task. A blueprint gives one claim an
+ordered list of required steps, so formatting, focused tests or a push happen
+in order instead of whenever the model remembers them. The harness runs the
+deterministic steps itself, with no model call, and hands the lane only the
+steps that need judgment. Blueprints live in coordination state, not in the
+repository:
+
+```json
+{
+  "nodes": [
+    {"name": "format", "kind": "run", "command": "ruff format ."},
+    {"name": "implement", "kind": "agent", "prompt": "Implement the issue."},
+    {"name": "tests", "kind": "run", "command": ["pytest", "-q"],
+     "on_failure": "fix", "retries": 2, "next": "push"},
+    {"name": "fix", "kind": "agent", "prompt": "Fix the failing tests.",
+     "next": "tests"},
+    {"name": "push", "kind": "push"}
+  ]
+}
+```
+
+```sh
+agent-parley blueprint set feature feature.json      # record it
+agent-parley blueprint show feature                  # nodes and edges
+agent-parley blueprint run codex feature --issue 42  # start the claim on it
+agent-parley blueprint advance --issue 42            # after the lane reports
+agent-parley blueprint progress                      # where every run is
+agent-parley run codex --issue 42 --blueprint feature  # claim, launch, start
+agent-parley blueprint default bug bugfix            # label bug runs bugfix
+```
+
+`run NAME --issue N --blueprint B` claims the issue, starts the run on the
+claim, then launches the lane. Without `--blueprint`, an issue whose label
+`blueprint default` maps starts that blueprint; labels mapping to two
+blueprints are refused until `--blueprint` names one. A label default is
+removed with `blueprint default LABEL`, and a blueprint a label still names
+cannot be removed.
+
+Node kinds:
+
+- `run` runs `command`, a string split like `verify set` or a list of
+  arguments, in the lane's worktree as an argument list, never through a
+  shell, within `timeout` seconds (default and ceiling 1800). It keeps the
+  last 40 lines of output. `AGENT_PARLEY_BASE` names the base checkout.
+- `push` runs `git push --set-upstream origin HEAD` the same way.
+- `agent` writes `prompt` into the lane's inbox, with the last failing step's
+  output attached, and waits. The next `blueprint advance` after the lane
+  files a report passes the node on `ready` and fails it on `blocked`.
+- `pull-request` opens or updates the lane's pull request through the
+  repository's `pull_request.self_service` policy, with every condition of
+  that path: a ready report, the `verify` gate run before the push, the
+  assigned branch and no overlapping peer reservation. It fails while the
+  policy is off.
+- `wait-ci` reads the pull request reading the supervision poll keeps for the
+  lane's branch at its current head commit. It waits while checks are pending,
+  passes on green, and fails on red with the failing checks and the tails of
+  up to three failed-step logs attached for the next `agent` node. A red
+  verdict is judged once per head commit and re-run. When the pull request
+  used its CI rounds (`ci_rounds`), the run ends blocked for the operator.
+- `report` ends the run with `outcome` `done` (the default) or `blocked` and
+  an optional `message`.
+
+A node moves to `next` when it passes, or to the following node when `next`
+is absent; the last node ends the run as done. It moves to `on_failure` when
+it fails, or retries itself when that is absent. Failures count per node, and
+a node that fails more than its `retries` (default 0) ends the run blocked.
+`blueprint progress`, `status`, `top` and `watch` show the current node and
+the nodes passed; a claim without a run shows nothing new.
+
+`supervise` advances runs itself: each poll moves a run whose agent node has a
+new report, or that waits on CI, on a background thread, so a slow node never
+holds the poll. `blueprint advance` stays available to move a run at once.
+
+Only an operator shell in the base checkout sets, starts or advances a
+blueprint; a lane, or any process holding `AGENT_PARLEY_TOKEN`, is refused, so
+a lane cannot plant commands later lanes run. `run` and `push` nodes inherit
+the operator's environment, which is the lane's minus its coordination token,
+and no node can merge: `participant merge` and its `verify` gate stay the only
+way into the base. A run copies its blueprint when it starts, so a later
+`blueprint set` changes only the next run. A claim never started on a
+blueprint behaves exactly as before.
+
 ## Recovering an unverified integration
 
 While the base carries an unverified integration, `problems` shows one
@@ -383,3 +529,21 @@ the setting is the project default. A `claude` lane with neither recorded is
 not resumed by the service, because the resume would stop at a permission
 prompt nobody sees; `participant add`, `problems` and `doctor` name it as a
 setup gap with this command.
+
+A lane resumed without a terminal can still reach a permission prompt its
+rules do not cover. The dialog watcher opens an operator decision naming the
+prompt and the command it asks to run, which the operator can answer from a
+notification transport. The service never answers it. If the prompt is still
+unanswered after the 30-minute decision deadline, the service ends that
+session with the same verified stop `participant stop` uses. It then records
+the lane as stopped and stores the prompting command as its wake result. The
+lane's waiting mail goes back to its senders, and its claims, offers and
+reservations are returned the way a dead lane's are. The lane is not marked
+operator-stopped, so new work can resume it.
+
+The service still never answers that permission on the lane's behalf once
+it wakes the lane again. The next wake prompt instead names the command
+the prompt asked about and says the permission it needed was never
+granted, so the lane should use another route for that work or ask the
+operator. The note is sent once; a later wake, once this one is admitted,
+does not repeat it.

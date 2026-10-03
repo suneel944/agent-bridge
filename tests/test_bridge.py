@@ -277,6 +277,18 @@ def test_ps_reader_reports_a_live_process_through_the_real_command():
     assert process.read_ps_field("args=", os.getpid()) != ""
 
 
+def test_ps_reader_prints_one_start_time_whatever_the_caller_timezone(
+    monkeypatch,
+):
+    readings = set()
+    for zone, locale in (("UTC0", "C"), ("IST-5:30", "en_US.UTF-8")):
+        monkeypatch.setenv("TZ", zone)
+        monkeypatch.setenv("LC_ALL", locale)
+        readings.add(process.read_ps_field("lstart=", os.getpid()))
+    assert len(readings) == 1
+    assert "" not in readings
+
+
 def test_process_platform_is_chosen_once_for_the_running_system():
     linux = process.platform_for("linux")
     assert linux.start_ticks is process.linux_start_ticks
@@ -293,6 +305,8 @@ def test_process_platform_is_chosen_once_for_the_running_system():
     assert darwin.foreground_pid.func is process.darwin_foreground_pid
     assert darwin.parent_pid.func is process.darwin_parent_pid
     assert darwin.terminate.func is process.darwin_terminate
+    assert darwin.same_start.func is process.darwin_same_start
+    assert linux.same_start is process.linux_same_start
     with pytest.raises(BridgeError, match="Unsupported operating system"):
         process.platform_for("win32")
     assert process.running(os.getpid()) is True
@@ -384,6 +398,46 @@ def test_macos_identity_pins_the_recorded_creation_time(monkeypatch, tmp_path):
     assert process.identify(record, home) == process.ServerProcess(pid, created)
     assert process.identify({"pid": pid, "start_ticks": earlier}, home) is None
     assert process.identify(record, tmp_path / "other") is None
+
+
+def test_macos_identity_accepts_a_creation_time_recorded_in_local_time(
+    monkeypatch, tmp_path
+):
+    home = tmp_path / "private state"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    universal = "Thu Sep 10 07:22:33 2026"
+    local = "jeu 10 sep 11:22:33 2026"
+    other = "Wed Sep  9 07:22:33 2026"
+    reader = macos_ps(
+        {child.pid: universal},
+        {child.pid: f"/usr/bin/python3 -m agent_parley.server --home {home}"},
+    )
+    local_reader = macos_ps({child.pid: local}, {})
+    monkeypatch.setattr(
+        process, "PLATFORM", process.darwin_platform(reader, local_reader)
+    )
+    try:
+        assert process.alive(child.pid, universal) is True
+        assert process.alive(child.pid, local) is True
+        assert process.alive(child.pid, other) is False
+        assert process.identify(
+            {"pid": child.pid, "start_ticks": local}, home
+        ) == process.ServerProcess(child.pid, universal)
+        with pytest.raises(BridgeError, match="PID changed"):
+            process.ServerProcess(child.pid, other).stop()
+        assert child.poll() is None
+        process.ServerProcess(child.pid, local).stop()
+        child.wait(timeout=5)
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
 
 
 def test_macos_liveness_separates_a_missing_process_from_a_foreign_one(

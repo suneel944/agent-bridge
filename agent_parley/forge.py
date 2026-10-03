@@ -26,6 +26,10 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+PULL_REQUEST_FIELDS = (
+    "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
+    "latestReviews,closingIssuesReferences,files"
+)
 MAX_LANDINGS = 100
 CLOSING = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE
@@ -480,12 +484,15 @@ def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
 def open_pull_requests(repo: Path) -> list[dict] | None:
     """Reports the check, review and merge state of open pull requests.
 
-    One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests
-    with their head commit, the checks reported on it, the latest review of
-    each reviewer, whether the forge can merge it, the issues it closes and
-    the files it changes. The caller decides which lane a pull request
-    belongs to and what changed since its last reading. Only the GitHub forge
-    opens pull requests, so every other forge reports None.
+    One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests,
+    newest first, with their head commit, the checks reported on it, the
+    latest review of each reviewer, whether the forge can merge it, the
+    issues it closes and the files it changes. A reading of exactly
+    `MAX_PULL_REQUESTS` may be truncated, so the caller must not treat a pull
+    request missing from it as closed; `pull_request` reads one by number.
+    The caller decides which lane a pull request belongs to and what changed
+    since its last reading. Only the GitHub forge opens pull requests, so
+    every other forge reports None.
 
     Args:
         repo: Repository or assigned worktree that selects the forge project.
@@ -518,8 +525,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
             "--limit",
             str(MAX_PULL_REQUESTS),
             "--json",
-            "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
-            "latestReviews,closingIssuesReferences,files",
+            PULL_REQUEST_FIELDS,
         ],
         15,
     )
@@ -527,47 +533,97 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         records = json.loads(output or "null")
         if not isinstance(records, list):
             return None
-        readings: list[dict] = []
-        for record in records:
-            checks, failing = _checks(record.get("statusCheckRollup"))
-            readings.append(
-                {
-                    "number": int(record["number"]),
-                    "url": str(record.get("url") or ""),
-                    "branch": str(record.get("headRefName") or ""),
-                    "sha": str(record.get("headRefOid") or ""),
-                    "checks": checks,
-                    "failing": failing,
-                    "pending": _pending(record.get("statusCheckRollup")),
-                    "failed": _failed(record.get("statusCheckRollup")),
-                    "reviews": [
-                        {
-                            "author": str(
-                                (review.get("author") or {}).get("login") or ""
-                            ),
-                            "state": str(review.get("state") or ""),
-                            "at": str(review.get("submittedAt") or ""),
-                        }
-                        for review in record.get("latestReviews") or []
-                    ],
-                    "mergeable": str(record.get("mergeable") or "UNKNOWN"),
-                    "issues": [
-                        str(entry["number"])
-                        for entry in record.get("closingIssuesReferences") or []
-                        if entry.get("number")
-                    ],
-                    "files": sorted(
-                        {
-                            str(entry["path"])
-                            for entry in record.get("files") or []
-                            if entry.get("path")
-                        }
-                    ),
-                }
-            )
+        return [_pull_request_reading(record) for record in records]
     except (ValueError, TypeError, AttributeError, KeyError):
         return None
-    return readings
+
+
+def pull_request(repo: Path, number: int) -> dict | None:
+    """Reads one pull request by number in the shape of `open_pull_requests`.
+
+    A truncated `open_pull_requests` reading omits the oldest open pull
+    requests, so the caller re-reads one it already tracks here instead of
+    treating its absence as closed.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Pull request number.
+
+    Returns:
+        The reading `open_pull_requests` would give while it is open, an
+        empty mapping once the forge reports it merged or closed, and None
+        when the forge is unavailable or the response cannot be read.
+    """
+    if _implementation(repo) != "github":
+        return None
+    project = _reachable(repo)
+    if not project:
+        return None
+    output = _run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            project,
+            "--json",
+            f"state,{PULL_REQUEST_FIELDS}",
+        ],
+        15,
+    )
+    try:
+        record = json.loads(output or "null")
+        if not isinstance(record, dict):
+            return None
+        if record.get("state") != "OPEN":
+            return {} if record.get("state") else None
+        return _pull_request_reading(record)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
+def _pull_request_reading(record: dict) -> dict:
+    """Shapes one forge pull request record into an open reading.
+
+    Args:
+        record: One pull request object the GitHub client printed.
+
+    Returns:
+        The reading described by `open_pull_requests`.
+    """
+    checks, failing = _checks(record.get("statusCheckRollup"))
+    return {
+        "number": int(record["number"]),
+        "url": str(record.get("url") or ""),
+        "branch": str(record.get("headRefName") or ""),
+        "sha": str(record.get("headRefOid") or ""),
+        "checks": checks,
+        "failing": failing,
+        "pending": _pending(record.get("statusCheckRollup")),
+        "failed": _failed(record.get("statusCheckRollup")),
+        "reviews": [
+            {
+                "author": str((review.get("author") or {}).get("login") or ""),
+                "state": str(review.get("state") or ""),
+                "at": str(review.get("submittedAt") or ""),
+            }
+            for review in record.get("latestReviews") or []
+        ],
+        "mergeable": str(record.get("mergeable") or "UNKNOWN"),
+        "issues": [
+            str(entry["number"])
+            for entry in record.get("closingIssuesReferences") or []
+            if entry.get("number")
+        ],
+        "files": sorted(
+            {
+                str(entry["path"])
+                for entry in record.get("files") or []
+                if entry.get("path")
+            }
+        ),
+    }
 
 
 def _checks(rollup: list | None) -> tuple[str, list[str]]:
@@ -712,6 +768,85 @@ def rerun_job(repo: Path, run: str, job: str) -> tuple[str, bool]:
     return shown, _run(command, 15) is not None
 
 
+def review_feedback(repo: Path, number: int) -> tuple[str, list[dict] | None]:
+    """Reads the bodies and inline comments of a pull request's reviews.
+
+    Two bounded requests read at most one page each of the reviews and of
+    the inline review comments, through the operator's own `gh`
+    authentication. The text is the reviewers' own and is returned as data;
+    the caller decides how much of it to quote. Only the GitHub forge has
+    pull request reviews.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Pull request number.
+
+    Returns:
+        The exact commands that return the same reviews and comments, and
+        one entry per review with its author, state, submission time, body
+        and inline comments, each comment as path, line and body. None in
+        place of the reviews when the forge is unavailable or the response
+        cannot be read.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    base = f"repos/{project or 'OWNER/NAME'}/pulls/{number}"
+    shown = f"gh api {base}/reviews; gh api {base}/comments"
+    if not project:
+        return shown, None
+    reviews = _run(["gh", "api", f"{base}/reviews?per_page=100"], 15)
+    comments = _run(["gh", "api", f"{base}/comments?per_page=100"], 15)
+    try:
+        records = json.loads(reviews or "null")
+        notes = json.loads(comments or "null")
+        if not isinstance(records, list) or not isinstance(notes, list):
+            return shown, None
+        inline: dict[int, list[dict]] = {}
+        for note in notes:
+            owner = int(note.get("pull_request_review_id") or 0)
+            inline.setdefault(owner, []).append(
+                {
+                    "path": str(note.get("path") or ""),
+                    "line": note.get("line") or note.get("original_line"),
+                    "body": str(note.get("body") or ""),
+                }
+            )
+        return shown, [
+            {
+                "author": str((record.get("user") or {}).get("login") or ""),
+                "state": str(record.get("state") or ""),
+                "at": str(record.get("submitted_at") or ""),
+                "body": str(record.get("body") or ""),
+                "comments": inline.get(int(record.get("id") or 0), []),
+            }
+            for record in records
+        ]
+    except (ValueError, TypeError, AttributeError):
+        return shown, None
+
+
+def failed_log(repo: Path, run: str, job: str) -> tuple[str, str | None]:
+    """Reads the log of one Actions job's failed steps.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        run: Actions run identifier.
+        job: Actions job identifier within that run.
+
+    Returns:
+        The exact command that returns the same log, and the log text, or
+        None in its place when the identifiers are not numeric, no GitHub
+        project is reachable or the forge returns nothing.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    command = ["gh", "run", "view", run, "--job", job, "--log-failed"]
+    if project:
+        command += ["--repo", project]
+    shown = " ".join(command)
+    if not (project and run.isdigit() and job.isdigit()):
+        return shown, None
+    return shown, _run(command, 30) or None
+
+
 JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)
 
 
@@ -811,6 +946,114 @@ def _beads_title(number: str) -> str | None:
     if not _beads_reachable():
         return None
     return _title_of(_run(["bd", "show", number, "--json"], 15))
+
+
+MAX_LINKED = 5
+MENTION = re.compile(r"(?<![\w/&])#(\d+)\b")
+
+
+def issue_details(repo: Path, number: str) -> dict | None:
+    """Reads one issue's text for a launch to quote, when a forge answers.
+
+    The read is best effort and read only, like `issue_title`: a missing
+    client, a refusal or unusable output reports absence. On GitHub it
+    returns the title, body and comments from one `gh issue view`, plus the
+    titles of up to `MAX_LINKED` issues the body mentions by number; on
+    Beads only the title. Callers bound the text before using it.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        A dict with ``title``, ``body``, ``comments`` (dicts with ``author``
+        and ``body``, oldest first), ``linked`` (number to title) and
+        ``command``, the client command that prints the full issue, or None
+        when no forge returns a usable reading.
+    """
+    chosen = _implementation(repo)
+    if chosen == "beads":
+        title = _beads_title(number)
+        command = f"bd show {number}"
+        return (
+            None
+            if title is None
+            else {
+                "title": title,
+                "body": "",
+                "comments": [],
+                "linked": {},
+                "command": command,
+            }
+        )
+    project = _reachable(repo) if chosen == "github" else None
+    if project is None or not number.isdigit():
+        return None
+    output = _run(
+        [
+            "gh",
+            "issue",
+            "view",
+            number,
+            "--repo",
+            project,
+            "--json",
+            "title,body,comments",
+        ],
+        15,
+    )
+    try:
+        record = json.loads(output or "")
+        title, body = record["title"], record.get("body") or ""
+        comments = [
+            {
+                "author": str((entry.get("author") or {}).get("login") or ""),
+                "body": str(entry.get("body") or ""),
+            }
+            for entry in record.get("comments") or []
+        ]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(title, str) or not isinstance(body, str):
+        return None
+    linked: dict[str, str] = {}
+    for mention in MENTION.findall(body):
+        if mention == number or mention in linked:
+            continue
+        if len(linked) == MAX_LINKED:
+            break
+        linked[mention] = issue_title(repo, mention) or ""
+    return {
+        "title": title[:MAX_TITLE],
+        "body": body,
+        "comments": comments,
+        "linked": linked,
+        "command": f"gh issue view {number} --repo {project} --comments",
+    }
+
+
+def issue_labels(repo: Path, number: str) -> list[str] | None:
+    """Reads the label names one GitHub issue carries, best effort.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        The sorted label names, or None when no GitHub project answers.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    if project is None or not number.isdigit():
+        return None
+    output = _run(
+        ["gh", "issue", "view", number, "--repo", project, "--json", "labels"],
+        15,
+    )
+    try:
+        labels = json.loads(output or "")["labels"] or []
+        return sorted({str(label["name"]) for label in labels})
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def issue_pull_request_paths(repo: Path, number: str) -> list[str]:

@@ -1492,6 +1492,108 @@ def test_a_waiting_only_offer_is_delivered_once_per_generation(
     assert dispatch["state"] == "awaiting_progress"
 
 
+def test_a_delivered_offer_is_not_delivered_again_in_a_new_generation(
+    bridge, repo, paired, monkeypatch
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    alive(directory, "claude", updated=time.time() - 500)
+    bridge.issue(lane, "claim", "2")
+    committed(lane)
+    bridge.report(lane, "ready", "Issue 2 ready", "", "Run gate")
+    requested = []
+    monkeypatch.setattr(
+        terminal,
+        "request",
+        lambda path, name: requested.append(name) or "accepted",
+    )
+    supervision.poll(bridge.home, directory)
+    manifest = json.loads((directory / "project.json").read_text())
+    config = supervision.configuration(bridge.home, manifest)
+    observed = supervision.presence(
+        directory, "claude", config["inactive_after"]
+    )
+    unthrottle(bridge.home, directory, "claude")
+    supervision.wake(
+        bridge.home, directory, manifest, "claude", observed, config
+    )
+    assert requested == ["claude"]
+    path = directory / "claude-work.json"
+    published = json.loads(path.read_text())
+    offer = published["offer"]
+    assert published["delivered"] == [offer["id"]]
+    published.pop("dispatch")
+    write_json(path, {**published, "offer": None})
+    supervision.poll(bridge.home, directory)
+
+    republished = supervision.published_work(directory, "claude")
+    assert republished["offer"]["id"] == offer["id"]
+    assert "delivered" not in republished["dispatch"]
+    for _ in range(3):
+        unthrottle(bridge.home, directory, "claude")
+        supervision.wake(
+            bridge.home, directory, manifest, "claude", observed, config
+        )
+    assert requested == ["claude"]
+
+
+def waiting_beside_peer(bridge, paired):
+    """Leaves claude holding ready work while codex holds issue 3."""
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    peer = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    alive(directory, "claude", updated=time.time() - 500)
+    bridge.issue(lane, "claim", "2")
+    committed(lane)
+    bridge.report(lane, "ready", "Issue 2 ready", "", "Run gate")
+    bridge.issue(peer, "claim", "3")
+    manifest = json.loads((directory / "project.json").read_text())
+    return peer, directory, manifest
+
+
+def published_text(bridge, directory, manifest, config):
+    """Publishes work offers and returns the text offered to claude."""
+    supervision.work(bridge.home, directory, manifest, config)
+    return supervision.published_work(directory, "claude")["offer"]["text"]
+
+
+def test_a_peer_claim_quiet_for_fifteen_minutes_is_not_named_stalled(
+    bridge, repo, paired, monkeypatch
+):
+    _, directory, manifest = waiting_beside_peer(bridge, paired)
+    quiet = time.time() - 900
+    monkeypatch.setattr(issues, "last_progress", lambda record: quiet)
+    config = supervision.configuration(bridge.home, manifest)
+
+    text = published_text(bridge, directory, manifest, config)
+    assert "No held claim can move now" in text
+    assert "ask for #3" not in text
+    shorter = {**config, "claim_idle_after": 600}
+    text = published_text(bridge, directory, manifest, shorter)
+    assert "ask for #3, held by codex" in text
+
+
+def test_a_peer_claim_held_on_purpose_is_never_named_stalled(
+    bridge, repo, paired, monkeypatch
+):
+    peer, directory, manifest = waiting_beside_peer(bridge, paired)
+    bridge.report(
+        peer, "blocked", "Holding", "Hold until the operator decides", ""
+    )
+    quiet = time.time() - 86400
+    monkeypatch.setattr(issues, "last_progress", lambda record: quiet)
+    config = {
+        **supervision.configuration(bridge.home, manifest),
+        "claim_idle_after": 600,
+    }
+
+    text = published_text(bridge, directory, manifest, config)
+    assert "No held claim can move now" in text
+    assert "ask for #3" not in text
+
+
 def test_issue_progress_resets_a_rebalance_dispatch_generation(
     bridge, repo, paired
 ):

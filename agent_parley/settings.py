@@ -242,6 +242,71 @@ class SettingsMixin(BridgeCore):
             "checkout while it runs."
         )
 
+    def pool(self, repo: Path, size: int | None = None) -> str:
+        """Reports or records how many prepared spare worktrees to keep.
+
+        Recording a size starts a detached fill, so the command returns at
+        once and `status` shows the spares as they become ready. Size zero
+        keeps none; the spares already prepared are removed by the next
+        `gc` sweep.
+
+        Args:
+            repo: Any checkout of the target repository.
+            size: Spare worktrees to keep, or None to report the current
+                setting without changing it.
+
+        Returns:
+            An account of the configured pool and its spares.
+
+        Raises:
+            BridgeError: If the repository has no project yet, the size is
+                out of range, or a change comes from a lane or a process
+                holding a lane's token.
+        """
+        from agent_parley import pool, unattended
+        from agent_parley.cli import lock, roster, write_json
+
+        root, directory = self.project(repo, create=False)
+        data = roster.read(directory)
+        if size is not None:
+            unattended.operator_only(
+                repo, root, data, "The spare worktree pool is set"
+            )
+            with lock(directory / "setup.lock"):
+                data = roster.read(directory)
+                data["pool"] = roster.pool_size(size)
+                write_json(directory / "project.json", data)
+            pool.replenish(self.home, root, directory)
+        configured = int(data.get("pool") or 0)
+        line = pool.summary_line(pool.reading(directory, data))
+        if not configured:
+            return f"{root} keeps no spare worktrees." + (
+                f" {line}." if line else ""
+            )
+        return (
+            f"{root} keeps {configured} spare worktrees prepared from the "
+            f"current base for new lanes. {line}."
+        )
+
+    def fill_pool(self, repo: Path) -> str:
+        """Brings the spare worktree pool to its configured size now.
+
+        Args:
+            repo: Any checkout of the target repository.
+
+        Returns:
+            The pool's status line once the fill finished.
+        """
+        from agent_parley import pool
+        from agent_parley.cli import roster
+
+        root, directory = self.project(repo, create=False)
+        data = roster.read(directory)
+        pool.fill(root, directory, data)
+        return pool.summary_line(pool.reading(directory, data)) or (
+            f"{root} keeps no spare worktrees."
+        )
+
     def commands(self, repo: Path) -> dict:
         """Reports the commands a repository configured, without running them.
 

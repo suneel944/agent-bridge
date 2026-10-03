@@ -116,8 +116,11 @@ if TYPE_CHECKING:
         git,
         has_branch,
         initialize_lane,
+        launch_line,
+        preparation,
         verify_base,
     )
+    from agent_parley.worktrees import launched as launched
     from agent_parley.worktrees import preserve_pending as preserve_pending
 
 from agent_parley import BridgeError, refusal
@@ -199,6 +202,9 @@ MOVED_CALLABLES = {
         "git",
         "has_branch",
         "initialize_lane",
+        "launch_line",
+        "launched",
+        "preparation",
         "preserve_pending",
         "verify_base",
     ),
@@ -927,6 +933,8 @@ def lane_detail(record: dict, data: dict) -> None:
         print(
             "    " + drift(agent, data["participants"][agent], record["branch"])
         )
+    if timing := launch_line(data["participants"][agent].get("launch")):
+        print(f"    {timing}")
     if record["idle"]["stalled"]:
         print(f"    {record['idle']['marker']}")
     if record["budget"]["marker"]:
@@ -974,6 +982,8 @@ def lane_detail(record: dict, data: dict) -> None:
                     else ""
                 )
             )
+        if claim.get("blueprint"):
+            print(f"    Blueprint {claim['blueprint']}")
     print(f"    Reported outcome: {record['outcome']}")
     approval = record["approval"] or {}
     if approval.get("state", approvals.UNREPORTED) != approvals.UNREPORTED:
@@ -2560,7 +2570,11 @@ class Bridge(
                     for item in saved
                 )
         if data.get("initialize"):
+            started = time.monotonic()
             initialize_lane(lane, data["initialize"], Path(data["root"]))
+            self.record_launch(
+                directory, name, preparation(0.0, time.monotonic() - started)
+            )
         self._record_operator(
             directory, name, checkpoints.Reason.OPERATOR_RESTARTED, "starting"
         )
@@ -2596,15 +2610,37 @@ class Bridge(
         """
         directory, data, participant = self._lane(repo, name)
         if self._self_opened(repo, data, participant):
-            with lock(
-                directory / f"{name}-integration.lock",
-                f"{name} is already opening its own pull request.",
-            ):
-                return self._pull_request(
-                    repo, name, self._authorize(directory, data, name)
-                )
+            return self.self_service_pull_request(repo, name)
         with lock(directory / f"{name}.session.lock"):
             return self._pull_request(repo, name)
+
+    def self_service_pull_request(self, repo: Path, name: str) -> str:
+        """Opens or updates a lane's pull request under its self-service policy.
+
+        The lane's own `pull-request` command and a blueprint's
+        ``pull-request`` node both come here, so either one is admitted only
+        while every condition of `_authorize` holds and only one attempt per
+        lane runs at a time.
+
+        Args:
+            repo: Any checkout of the target repository.
+            name: Participant whose committed work is reviewed.
+
+        Returns:
+            The pushed branch and opened or refreshed pull request.
+
+        Raises:
+            BridgeError: If a condition of the policy does not hold, another
+                attempt is in flight, or integration is refused.
+        """
+        directory, data, _ = self._lane(repo, name)
+        with lock(
+            directory / f"{name}-integration.lock",
+            f"{name} is already opening its own pull request.",
+        ):
+            return self._pull_request(
+                repo, name, self._authorize(directory, data, name)
+            )
 
     def _self_opened(self, repo: Path, data: dict, participant: dict) -> bool:
         """Reports whether a lane is opening the pull request for its own work.
@@ -3016,7 +3052,10 @@ class Bridge(
         assessed by `reclaim.strays`, and a worktree no lane made is never
         removed. Git's own removal refuses a dirty or locked worktree, so
         nothing with uncommitted work is lost unless the operator forces
-        it, and a forced removal writes a recovery checkpoint first.
+        it, and a forced removal writes a recovery checkpoint first. The
+        spare worktrees a project pool keeps are assessed by `pool.sweep`
+        in the same pass: a stale spare or one beyond the pool size is
+        removed with its branch, and a usable one is kept.
 
         Args:
             repo: Any checkout of the target repository.
@@ -3030,14 +3069,18 @@ class Bridge(
             One row per worktree, as `reclaim.strays` shapes it, carrying
             whether it was removed when applied and any checkpoint written.
         """
+        from agent_parley import pool
+
         root, directory = self.project(repo, create=False)
-        rows = reclaim.strays(directory, roster.read(directory), sizes=sizes)
+        manifest = roster.read(directory)
+        rows = reclaim.strays(directory, manifest, sizes=sizes)
+        spares = pool.sweep(root, directory, manifest, apply=apply)
         if not apply:
-            return rows
+            return rows + spares
         return [
             reclaim.remove(str(root), directory, row, force=force)
             for row in rows
-        ]
+        ] + spares
 
 
 COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3063,6 +3106,8 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "unattended",
             "timeout",
             "init",
+            "pool",
+            "blueprint",
             "branch",
             "forge",
             "deadlines",
@@ -4048,6 +4093,23 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     run.add_argument(
         "--task", default="Check shared coordination state and await my task."
     )
+    run.add_argument(
+        "--issue",
+        default="",
+        help=(
+            "Claim this issue for the lane and open with a bounded digest of "
+            "it fetched from the forge; replaces --task."
+        ),
+    )
+    run.add_argument(
+        "--blueprint",
+        default="",
+        help=(
+            "Run the --issue claim through this recorded blueprint; without "
+            "it, a default mapped to one of the issue's labels applies. "
+            "Base checkout only."
+        ),
+    )
     run.add_argument("--json", action="store_true", help=JSON_HELP)
     report = commands.add_parser(
         "report",
@@ -4926,6 +4988,62 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     waiting_set.add_argument("--repo", type=Path, default=Path.cwd())
+    blueprint = commands.add_parser(
+        "blueprint",
+        help="Set, show or run the ordered steps a claim runs through.",
+    )
+    blueprint_actions = blueprint.add_subparsers(dest="action", required=True)
+    blueprint_list = blueprint_actions.add_parser(
+        "list", help="List the recorded blueprints."
+    )
+    blueprint_show = blueprint_actions.add_parser(
+        "show", help="Show one blueprint node by node, or list them all."
+    )
+    blueprint_show.add_argument("name", nargs="?", metavar="NAME")
+    blueprint_set = blueprint_actions.add_parser(
+        "set", help="Record a blueprint from a JSON file. Base checkout only."
+    )
+    blueprint_set.add_argument("name", metavar="NAME")
+    blueprint_set.add_argument("file", type=Path, metavar="FILE")
+    blueprint_remove = blueprint_actions.add_parser(
+        "remove", help="Remove a recorded blueprint. Base checkout only."
+    )
+    blueprint_remove.add_argument("name", metavar="NAME")
+    blueprint_run = blueprint_actions.add_parser(
+        "run",
+        help="Start a lane's claim on a blueprint. Base checkout only.",
+    )
+    blueprint_run.add_argument("participant", metavar="NAME")
+    blueprint_run.add_argument("blueprint", metavar="BLUEPRINT")
+    blueprint_run.add_argument("--issue", required=True)
+    blueprint_advance = blueprint_actions.add_parser(
+        "advance",
+        help="Move a claim's run on after its lane reports. Base checkout "
+        "only.",
+    )
+    blueprint_advance.add_argument("--issue", required=True)
+    blueprint_progress = blueprint_actions.add_parser(
+        "progress", help="Show each run's current node and nodes passed."
+    )
+    blueprint_progress.add_argument("--issue")
+    blueprint_default = blueprint_actions.add_parser(
+        "default",
+        help="Map an issue label to the blueprint run --issue starts; omit "
+        "BLUEPRINT to clear it. Base checkout only.",
+    )
+    blueprint_default.add_argument("label", metavar="LABEL")
+    blueprint_default.add_argument("blueprint", nargs="?", metavar="BLUEPRINT")
+    for blueprint_action in (
+        blueprint_list,
+        blueprint_show,
+        blueprint_set,
+        blueprint_remove,
+        blueprint_run,
+        blueprint_advance,
+        blueprint_progress,
+        blueprint_default,
+    ):
+        blueprint_action.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -4949,6 +5067,33 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     recording.add_argument("--repo", type=Path, default=Path.cwd())
+    pooling = commands.add_parser(
+        "pool",
+        help="Show or set how many prepared spare worktrees new lanes take.",
+    )
+    pools = pooling.add_subparsers(dest="action", required=True)
+    pool_show = pools.add_parser(
+        "show", help="Show the pool size and the condition of each spare."
+    )
+    pool_show.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_show.add_argument("--json", action="store_true", help=JSON_HELP)
+    pool_set = pools.add_parser(
+        "set", help="Set how many spare worktrees to keep prepared."
+    )
+    pool_set.add_argument(
+        "size",
+        type=int,
+        metavar="N",
+        help=(
+            "Spare worktrees kept on fresh branches from the current base "
+            "with init already run; 0 keeps none."
+        ),
+    )
+    pool_set.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_fill = pools.add_parser(
+        "fill", help="Prepare missing spares now and remove stale ones."
+    )
+    pool_fill.add_argument("--repo", type=Path, default=Path.cwd())
     naming = commands.add_parser(
         "branch",
         help="Show or set the prefix new lane branches are created under.",
@@ -5539,6 +5684,8 @@ def main() -> int:
                 args.provider,
                 args.credentials,
                 resume=args.resume,
+                issue=args.issue,
+                blueprint=args.blueprint,
             )
             if args.json:
                 print(
@@ -6162,6 +6309,37 @@ def main() -> int:
                 )
             else:
                 print(timeouts.show(bridge, repository))
+        elif args.command == "blueprint":
+            from agent_parley import blueprints
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                account = blueprints.define(
+                    bridge, repository, args.name, args.file
+                )
+            elif args.action == "remove":
+                account = blueprints.define(bridge, repository, args.name, None)
+            elif args.action == "run":
+                account = blueprints.start(
+                    bridge,
+                    repository,
+                    args.participant,
+                    args.blueprint,
+                    args.issue,
+                )
+            elif args.action == "advance":
+                account = blueprints.advance(bridge, repository, args.issue)
+            elif args.action == "progress":
+                account = blueprints.progress(bridge, repository, args.issue)
+            elif args.action == "default":
+                account = blueprints.default(
+                    bridge, repository, args.label, args.blueprint
+                )
+            else:
+                account = blueprints.describe(
+                    bridge, repository, getattr(args, "name", None)
+                )
+            print(account)
         elif args.command == "unattended":
             from agent_parley import unattended
 
@@ -6180,6 +6358,22 @@ def main() -> int:
                 )
             else:
                 print(unattended.describe(bridge, repository))
+        elif args.command == "pool":
+            from agent_parley import pool
+
+            repository = args.repo.resolve()
+            if args.action == "fill":
+                print(bridge.fill_pool(repository))
+            elif args.action == "show" and args.json:
+                _, directory = bridge.project(repository, create=False)
+                print(
+                    views.render(
+                        "pool",
+                        pool.reading(directory, roster.read(directory)),
+                    )
+                )
+            else:
+                print(bridge.pool(repository, getattr(args, "size", None)))
         elif args.command in ("verify", "init"):
             repository = args.repo.resolve()
             if getattr(args, "json", False):

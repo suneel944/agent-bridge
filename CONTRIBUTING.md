@@ -71,6 +71,11 @@ The `Check` workflow scopes pull requests by the paths they change;
 `pyproject.toml`, `uv.lock` or `.github/workflows/check.yml` also add `wsl`.
 Documentation, templates and other workflows run only the Ubuntu 3.12 leg. A
 path no list recognises, a push to `main` and a manual run select every leg.
+One exception: a file whose only edits are version lines, as in the release
+version bump commit, does not add `wsl`, because the commit before it already
+ran that leg on the same code. Runs on `main` group by commit, so the run for
+a version bump starts at once instead of queueing behind the run for the
+merge before it; pull request runs still cancel when a new commit arrives.
 Skipped legs still report their required check names. The `check` job fails
 if a needed Python or macOS leg did not succeed; `wsl` reports as its own
 required check and gates the merge, so it carries no `continue-on-error`.
@@ -78,7 +83,12 @@ Each of its steps has its own `timeout-minutes`, and a failed or hung WSL
 setup is retried once inside the job, so a stuck runner fails within the
 step's ceiling instead of holding a green pull request at the job's.
 
-Open a focused issue before proposing a substantial behavior change. Branch from
+Open a focused issue before proposing a substantial behavior change. The
+`Issue hygiene` workflow checks every opened or edited issue: a `bug: ` or
+`feature: ` title, each required section of the matching template, an
+assignee, a change-type label and a milestone. Issue forms only apply in the
+web form, so an issue filed with `gh issue create --body` must carry the same
+sections by hand. Branch from
 current `main`, keep commits reviewable, and use the PR template. Explain the
 problem, final behavior, exact verification, and compatibility risks. Every PR
 must pass the required checks and resolve review conversations. Protected `main`

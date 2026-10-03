@@ -74,6 +74,7 @@ SIGNATURE_CHARS = 200
 REPORT_CHARS = 1200
 REPORT_LINES = 4
 REPORT_WIDTH = 100
+COMMAND_CHARS = 300
 OPTION_LABEL = 60
 ESCALATE_AFTER = 30.0
 REPEAT_LIMIT = 2
@@ -729,6 +730,32 @@ def _shell_rows(data: bytes) -> list[str]:
     return body
 
 
+def requested_command(screen: str, text: str, data: bytes) -> str:
+    """Reads what a permission prompt asks to run from the rows above it.
+
+    The question and its options say only that something waits for
+    approval; the operator answering from a notice, and a later wake of a
+    lane whose session ended at the prompt, need the command itself. A
+    shell prompt's command rows are read as `_shell_rows` reads them, and
+    any other prompt yields the text drawn above its question.
+
+    Args:
+        screen: Flattened screen text.
+        text: Part of the screen that draws the prompt's question and options.
+        data: Terminal bytes the screen was flattened from.
+
+    Returns:
+        The command or tool description, at most `COMMAND_CHARS` characters
+        from its end, or an empty string when nothing is drawn above it.
+    """
+    shown = " ".join(_shell_rows(data))
+    if not shown:
+        region = screen[-REGION_CHARS:]
+        head = region[: max(0, len(region) - len(text))]
+        shown = " ".join(BOX.sub(" ", head).split())
+    return shown[-COMMAND_CHARS:]
+
+
 def standing_reply(manifest: dict, name: str) -> str:
     """Reads the reply an operator recorded for a lane's own questions.
 
@@ -974,6 +1001,10 @@ class Watch:
                 ],
             }
         else:
+            if dialog.name == PERMISSION:
+                detail = {
+                    "command": requested_command(screen, found.text, self._tail)
+                }
             answer = self._answers.get(dialog.name, "")
             if (
                 not answer
@@ -1047,8 +1078,10 @@ class Watch:
         """Parks the lane on a screen no configured answer covers.
 
         A question carries its own text and option lines into the record and
-        the notice, so the operator can answer from the notice alone. A
-        recognized dialog that offers options is also recorded as a decision
+        the notice, so the operator can answer from the notice alone; a
+        permission prompt leads with the command it asks to run, from
+        `requested_command`, for the same reason. A recognized dialog that
+        offers options is also recorded as a decision
         offering those options, so the operator can answer it from the chat;
         a prompt this watcher cannot read is named as terminal-only instead.
         """
@@ -1060,6 +1093,8 @@ class Watch:
         shown = " ".join(report(screen))
         if extra.get("options"):
             shown = " | ".join((label, *extra["options"]))
+        if extra.get("command"):
+            shown = f"{extra['command']} | {shown}"
         if dialog is None:
             shown = f"{TERMINAL_ONLY} | {shown}"
         self._notify(label, shown, self._ask(dialog, label, screen, shown))
@@ -1178,6 +1213,15 @@ class Watch:
         )
         self.answered()
         return pressed
+
+    def close(self) -> None:
+        """Retires the open decision when the launcher stops relaying.
+
+        Once the launcher exits, no screen is left to press an answer on, so
+        a later answer is refused instead of being recorded and never
+        carried out.
+        """
+        self._retire()
 
     def _retire(self) -> None:
         """Marks the decision for a screen that is gone as stale.

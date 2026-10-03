@@ -205,6 +205,75 @@ def verify_base(
     )
 
 
+def preparation(worktree: float, init: float) -> dict:
+    """Records how long one lane's preparation took before its launch.
+
+    The record is kept on the lane's roster entry with ``start`` unset. The
+    launch that follows completes it, which is how that launch tells a lane
+    it prepared itself from one an earlier run left behind.
+
+    Args:
+        worktree: Seconds spent creating the worktree and its branch.
+        init: Seconds spent running the project's ``init`` command.
+
+    Returns:
+        The partial launch timing, in seconds rounded to milliseconds.
+    """
+    return {
+        "worktree": round(worktree, 3),
+        "init": round(init, 3),
+        "start": None,
+    }
+
+
+def launched(prepared: object, total: float) -> dict:
+    """Completes a lane's launch timing at the moment its CLI starts.
+
+    Args:
+        prepared: Timing recorded on the roster entry, if any. Only one that
+            no launch has completed yet counts toward this launch; a lane an
+            earlier run prepared cost this run neither step.
+        total: Seconds from the start of ``run`` to the native CLI's start.
+
+    Returns:
+        The worktree, ``init`` and CLI start shares, their total, and the
+        wall-clock time the CLI started. The CLI start share is everything
+        else ``run`` did first: registration, the service and the native
+        configuration.
+    """
+    fresh = prepared if isinstance(prepared, dict) else {}
+    if fresh.get("start") is not None:
+        fresh = {}
+    worktree = float(fresh.get("worktree") or 0.0)
+    init = float(fresh.get("init") or 0.0)
+    return {
+        "worktree": worktree,
+        "init": init,
+        "start": round(max(total - worktree - init, 0.0), 3),
+        "total": round(total, 3),
+        "at": time.time(),
+    }
+
+
+def launch_line(timing: object) -> str:
+    """Describes a lane's last launch timing for ``participant show``.
+
+    Args:
+        timing: Launch timing from the lane's roster entry, if any.
+
+    Returns:
+        One line splitting the time to CLI start, or an empty string when no
+        launch has completed a timing yet.
+    """
+    if not isinstance(timing, dict) or timing.get("total") is None:
+        return ""
+    return (
+        f"Last launch: {timing['total']:.2f}s to CLI start (worktree "
+        f"{timing['worktree']:.2f}s, init {timing['init']:.2f}s, CLI start "
+        f"{timing['start']:.2f}s)"
+    )
+
+
 def initialize_lane(lane: Path, command: list[str], base: Path) -> None:
     """Prepares a newly created lane before its native client starts.
 

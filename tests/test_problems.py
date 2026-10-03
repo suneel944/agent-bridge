@@ -21,6 +21,7 @@ from agent_parley import (
     problems,
     protocol,
     roster,
+    status,
     store,
     supervision,
 )
@@ -1577,6 +1578,82 @@ def test_a_ready_report_waiting_on_its_pull_request_replaces_retirement(
     [row] = [row for row in held if row["condition"] == problems.INTEGRATE]
     assert row["command"] == "agent-parley approve claude --repo /root"
     assert "approve" in declared()
+
+
+def test_a_lane_pull_request_past_the_newest_window_blocks_retirement(
+    bridge, paired, monkeypatch
+):
+    store.initialize(bridge.home)
+    store.register(bridge.home, paired["root"], "claude")
+    monkeypatch.setattr(supervision, "PULL_REQUEST_SECONDS", 0.0)
+    monkeypatch.setattr(supervision, "dirty_paths", lambda lane: [])
+    directory = Path(paired["lanes"]["claude"]).parent
+    data = roster.read(directory)
+    branch = data["participants"]["claude"]["branch"]
+    oldest = {
+        "number": 1,
+        "url": "https://example.test/pull/1",
+        "branch": branch,
+        "sha": "a" * 40,
+        "checks": "green",
+        "failing": [],
+        "reviews": [],
+        "mergeable": "MERGEABLE",
+        "issues": ["42"],
+    }
+    opened = [oldest] + [
+        {**oldest, "number": number, "branch": f"other-{number}", "issues": []}
+        for number in range(2, 36)
+    ]
+    newest = sorted(opened, key=lambda item: -item["number"])
+    monkeypatch.setattr(
+        supervision.forge, "open_pull_requests", lambda root: [oldest]
+    )
+    supervision.pull_request_wakes(bridge.home, directory, data)
+    monkeypatch.setattr(
+        supervision.forge,
+        "open_pull_requests",
+        lambda root: newest[: supervision.forge.MAX_PULL_REQUESTS],
+    )
+    monkeypatch.setattr(
+        supervision.forge,
+        "pull_request",
+        lambda root, number: next(
+            item for item in opened if item["number"] == number
+        ),
+    )
+    supervision.pull_request_wakes(bridge.home, directory, data)
+    cached = json.loads(
+        (directory / supervision.PULL_REQUEST_RECORD).read_text()
+    )
+    found = status.pull_request(
+        list(cached["pull_requests"].values()), "42", branch
+    )
+    assert found is not None and found["number"] == 1
+    record = lane_record(
+        claims=[{**ORPHANED[0], "pull_request": found}],
+        availability=GONE,
+        report_issue=42,
+        waiting=[
+            {
+                "kind": "report_integration",
+                "action": "pending",
+                "seconds": 7200,
+                "complete": False,
+            }
+        ],
+    )
+    rows = problems._lane_rows(
+        record,
+        {"lane": "/lane", "branch": "work"},
+        "/root",
+        {**supervision.DEFAULTS, "wake": False},
+        600,
+        time.time(),
+    )
+    conditions = {row["condition"] for row in rows}
+    assert problems.READY not in conditions
+    assert problems.INTEGRATE in conditions
 
 
 def test_a_live_lane_with_orphan_markers_is_never_offered_retirement(

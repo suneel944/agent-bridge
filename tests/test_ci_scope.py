@@ -86,6 +86,66 @@ def test_a_push_or_manual_run_selects_every_leg(monkeypatch, capsys):
     assert {k: json.loads(v) for k, v in printed.items()} == EVERY_LEG
 
 
+RELEASE = [
+    "CHANGELOG.md",
+    "agent_parley/__init__.py",
+    "plugins/agent-parley/.claude-plugin/plugin.json",
+    "pyproject.toml",
+    "uv.lock",
+]
+BUMPS = frozenset({"agent_parley/__init__.py", "pyproject.toml", "uv.lock"})
+
+
+def test_a_pushed_version_bump_runs_every_leg_but_wsl():
+    outputs = ci_scope.plan(RELEASE, BUMPS, every=True)
+    assert {k: json.loads(v) for k, v in outputs.items()} == {
+        **EVERY_LEG,
+        "wsl": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("paths", "bumps"),
+    [
+        (["docs/operations.md"], frozenset()),
+        ([*RELEASE, "agent_parley/launch.py"], BUMPS),
+        (RELEASE, BUMPS - {"uv.lock"}),
+    ],
+)
+def test_a_push_runs_wsl_unless_it_only_bumps_versions(paths, bumps):
+    outputs = ci_scope.plan(paths, bumps, every=True)
+    assert {k: json.loads(v) for k, v in outputs.items()} == EVERY_LEG
+
+
+def git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_version_only_reads_the_diff(monkeypatch, tmp_path):
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "ci@example.invalid")
+    git(tmp_path, "config", "user.name", "ci")
+    git(tmp_path, "config", "commit.gpgsign", "false")
+    (tmp_path / "pyproject.toml").write_text('name = "x"\nversion = "1.0"\n')
+    (tmp_path / "mod.py").write_text('__version__ = "1.0"\nVALUE = 1\n')
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    git(tmp_path, "tag", "base")
+    (tmp_path / "pyproject.toml").write_text('name = "x"\nversion = "1.1"\n')
+    (tmp_path / "mod.py").write_text('__version__ = "1.1"\nVALUE = 2\n')
+    git(tmp_path, "commit", "-q", "-am", "bump")
+    monkeypatch.chdir(tmp_path)
+    assert ci_scope.version_only("base", "pyproject.toml")
+    assert not ci_scope.version_only("base", "mod.py")
+    assert not ci_scope.version_only("base", "missing.py")
+    assert not ci_scope.version_only("0" * 40, "pyproject.toml")
+
+
 def test_an_unreadable_base_falls_back_to_every_leg(monkeypatch, tmp_path):
     output = tmp_path / "output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
@@ -126,6 +186,7 @@ def test_required_checks_keep_their_names_and_gate_the_aggregator():
     assert workflow["concurrency"]["cancel-in-progress"] == (
         "${{ github.ref != 'refs/heads/main' }}"
     )
+    assert "github.sha" in workflow["concurrency"]["group"]
 
 
 def test_the_required_wsl_job_gates_and_bounds_each_step():

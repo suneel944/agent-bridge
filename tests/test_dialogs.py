@@ -6,6 +6,7 @@ import os
 import pty
 import select
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1164,6 +1165,40 @@ def test_an_answer_the_screen_no_longer_offers_is_retired(tmp_path, delivered):
     assert watch.advance(b"", 1.0) == b""
     assert decisions.get(tmp_path, record["id"])["state"] == decisions.STALE
     assert watch.holding is True
+
+
+def test_a_launcher_that_exits_retires_its_open_decision(
+    tmp_path, delivered, monkeypatch
+):
+    """Refuses an answer once no launcher is left to press it."""
+    watch = dialogs.Watch(tmp_path, "lane")
+    watch.advance(TOOL_PERMISSION.encode(), 0.0)
+    watch.advance(b"", 0.5)
+    [record] = decisions.list_open(tmp_path)
+    monkeypatch.setattr(dialogs, "watcher", lambda directory, name: watch)
+    master, slave = os.openpty()
+    os.close(slave)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        terminal._session(
+            0,
+            master,
+            listener,
+            [signal.SIGTERM],
+            name="lane",
+            lane=tmp_path / "lane",
+            activity=tmp_path / "lane-activity.json",
+            ledger=tmp_path / "issues.json",
+            attached=False,
+            saved=None,
+            titling=False,
+            bounded=False,
+            inactive_after=60.0,
+            home=None,
+        )
+    retired = decisions.get(tmp_path, record["id"])
+    assert retired["state"] == decisions.STALE
+    with pytest.raises(BridgeError):
+        decisions.answer(tmp_path, record["id"], "Yes", "operator")
 
 
 def test_an_option_that_widens_a_permission_needs_confirming(
