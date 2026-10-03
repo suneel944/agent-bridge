@@ -3063,6 +3063,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "unattended",
             "timeout",
             "init",
+            "blueprint",
             "branch",
             "forge",
             "deadlines",
@@ -4926,6 +4927,54 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     waiting_set.add_argument("--repo", type=Path, default=Path.cwd())
+    blueprint = commands.add_parser(
+        "blueprint",
+        help="Set, show or run the ordered steps a claim runs through.",
+    )
+    blueprint_actions = blueprint.add_subparsers(dest="action", required=True)
+    blueprint_list = blueprint_actions.add_parser(
+        "list", help="List the recorded blueprints."
+    )
+    blueprint_show = blueprint_actions.add_parser(
+        "show", help="Show one blueprint node by node, or list them all."
+    )
+    blueprint_show.add_argument("name", nargs="?", metavar="NAME")
+    blueprint_set = blueprint_actions.add_parser(
+        "set", help="Record a blueprint from a JSON file. Base checkout only."
+    )
+    blueprint_set.add_argument("name", metavar="NAME")
+    blueprint_set.add_argument("file", type=Path, metavar="FILE")
+    blueprint_remove = blueprint_actions.add_parser(
+        "remove", help="Remove a recorded blueprint. Base checkout only."
+    )
+    blueprint_remove.add_argument("name", metavar="NAME")
+    blueprint_run = blueprint_actions.add_parser(
+        "run",
+        help="Start a lane's claim on a blueprint. Base checkout only.",
+    )
+    blueprint_run.add_argument("participant", metavar="NAME")
+    blueprint_run.add_argument("blueprint", metavar="BLUEPRINT")
+    blueprint_run.add_argument("--issue", required=True)
+    blueprint_advance = blueprint_actions.add_parser(
+        "advance",
+        help="Move a claim's run on after its lane reports. Base checkout "
+        "only.",
+    )
+    blueprint_advance.add_argument("--issue", required=True)
+    blueprint_progress = blueprint_actions.add_parser(
+        "progress", help="Show each run's current node and nodes passed."
+    )
+    blueprint_progress.add_argument("--issue")
+    for blueprint_action in (
+        blueprint_list,
+        blueprint_show,
+        blueprint_set,
+        blueprint_remove,
+        blueprint_run,
+        blueprint_advance,
+        blueprint_progress,
+    ):
+        blueprint_action.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -6162,6 +6211,33 @@ def main() -> int:
                 )
             else:
                 print(timeouts.show(bridge, repository))
+        elif args.command == "blueprint":
+            from agent_parley import blueprints
+
+            repository = args.repo.resolve()
+            if args.action == "set":
+                account = blueprints.define(
+                    bridge, repository, args.name, args.file
+                )
+            elif args.action == "remove":
+                account = blueprints.define(bridge, repository, args.name, None)
+            elif args.action == "run":
+                account = blueprints.start(
+                    bridge,
+                    repository,
+                    args.participant,
+                    args.blueprint,
+                    args.issue,
+                )
+            elif args.action == "advance":
+                account = blueprints.advance(bridge, repository, args.issue)
+            elif args.action == "progress":
+                account = blueprints.progress(bridge, repository, args.issue)
+            else:
+                account = blueprints.describe(
+                    bridge, repository, getattr(args, "name", None)
+                )
+            print(account)
         elif args.command == "unattended":
             from agent_parley import unattended
 

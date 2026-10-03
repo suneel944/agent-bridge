@@ -151,6 +151,13 @@ on standard output and export to a file.
 | `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal; `--issue N` names the claim when the lane holds several ready ones. Base checkout only. |
 | `init show` | Show the command every new lane runs before it starts. |
 | `init set COMMAND` | Set that command; an empty string removes it. |
+| `blueprint list` | List the recorded blueprints, each as its node order. |
+| `blueprint show [NAME]` | Show one blueprint node by node with its success and failure edges and retry limit, or list them all. |
+| `blueprint set NAME FILE` | Record or replace a blueprint from a JSON file (see [Running a claim through a blueprint](lanes.md#running-a-claim-through-a-blueprint)). Base checkout only. |
+| `blueprint remove NAME` | Remove a recorded blueprint. Base checkout only. |
+| `blueprint run NAME BLUEPRINT --issue N` | Start lane `NAME`'s claim on issue `N` on a blueprint and run its nodes until one waits on the lane or the run ends. Base checkout only. |
+| `blueprint advance --issue N` | Move that run on after the lane reports; deterministic nodes run, an agent node passes on a ready report and fails on a blocked one. Base checkout only. |
+| `blueprint progress [--issue N]` | Show each run's status, current node and nodes passed. |
 | `mail show ID` | Print one message this lane sent or received; `--full` adds the whole attachment. |
 | `mail thread ID` | Read this lane's messages in a thread; `--after-id` pages forward. |
 | `mail search QUERY` | Search this lane's mail with an optional `--limit`. |
