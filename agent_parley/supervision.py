@@ -3217,7 +3217,11 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
     issue's closing pull request, or work another lane landed still goes
     through reminders and the operator. A pull request merged into the
     project's integration base ends the claim the same way, with the base
-    kept in the evidence, though the issue stays open on the forge.
+    kept in the evidence, though the issue stays open on the forge. A claim
+    whose holder already reported ready ends as complete once the forge
+    reports its issue closed, even when the issue closed before the claim
+    or closed by hand without a closing pull request, since no participant
+    would otherwise end it; the reason names which case applied.
 
     Args:
         directory: Private project state directory.
@@ -3229,11 +3233,14 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
     resolved = []
     for number, seen in ended.items():
         commit = str(seen.get("commit") or "")
-        if (
-            seen.get("state") != "MERGED"
-            or not seen.get("claim_id")
-            or seen.get("landed_by")
-            or not lifecycle.COMMIT.fullmatch(commit)
+        closed = seen.get("closed")
+        if not seen.get("claim_id") or (
+            not closed
+            and (
+                seen.get("state") != "MERGED"
+                or seen.get("landed_by")
+                or not lifecycle.COMMIT.fullmatch(commit)
+            )
         ):
             continue
         with contextlib.suppress(BridgeError):
@@ -3248,7 +3255,14 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
                 outcome="complete",
                 actor="supervisor",
                 reason=(
-                    f"pull request merged into integration base {seen['base']}"
+                    "ready claim on an issue closed on the forge before "
+                    "the claim"
+                    if closed == "before"
+                    else "ready claim on an issue closed by hand without a "
+                    "closing pull request"
+                    if closed
+                    else f"pull request merged into integration base "
+                    f"{seen['base']}"
                     if seen.get("base")
                     else "merged pull request closed the issue on the forge"
                 ),
@@ -5423,7 +5437,9 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
         for, and `base` for work that landed in the integration base.
         `landed_by` names another lane whose lane branch carried the closing
         pull request, or whose worktree alone checked out the per-issue
-        branch it came from.
+        branch it came from. A claim whose holder reported ready is also
+        observed when its issue closed before the generation or closed with
+        no closing pull request, with `closed` set to `before` or `by hand`.
     """
     root = Path(manifest["root"])
     base = str(manifest.get("integration_base") or "")
@@ -5465,7 +5481,14 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 if number not in landings:
                     continue
                 reading = landings[number]
-            if reading["closed_at"] < since:
+            execution = lifecycle.state(record)
+            ready = (
+                execution["state"] == lifecycle.READY
+                and execution["claim_id"] == record.get("claim_id")
+                and not reading.get("base")
+            )
+            before = reading["closed_at"] < since
+            if before and not ready:
                 continue
             seen = {
                 "branch": reading["branch"] or f"issue #{number}",
@@ -5477,6 +5500,11 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                 "commit": reading["commit"],
                 "claim_id": record.get("claim_id"),
                 **({"base": reading["base"]} if reading.get("base") else {}),
+                **(
+                    {"closed": "before" if before else "by hand"}
+                    if ready and (before or not reading["pull_request"])
+                    else {}
+                ),
             }
             landed = lanes.get(reading["branch"])
             if not landed and reading["branch"]:

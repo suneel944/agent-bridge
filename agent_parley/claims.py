@@ -121,7 +121,9 @@ class ClaimsMixin(ReportsMixin):
 
         A claim additionally attempts a read-only forge lookup for the issue
         title. That lookup is optional context: an unavailable forge resolves
-        to no title and never blocks or fails the claim.
+        to no title and never blocks or fails the claim. The same forge
+        refuses a claim on an issue it reports closed, since that work is
+        already over; a forge that cannot be read allows the claim.
 
         A completed claim or release is then mirrored onto the host forge as
         an assignment, so the issue reads as worked outside Agent Parley. The
@@ -227,6 +229,16 @@ class ClaimsMixin(ReportsMixin):
             if action == "claim"
             else None
         )
+        closed = (
+            forge.issue_completion(repo, parse_issue(number))
+            if action == "claim"
+            else None
+        )
+        if closed and closed.get("state") != "OPEN":
+            raise BridgeError(
+                f"Issue #{parse_issue(number)} is closed on the forge; "
+                "claim an open issue instead."
+            )
         carried = (
             self._carry(repo, directory, data, agent, to or "", remaining)
             if action == "offer"

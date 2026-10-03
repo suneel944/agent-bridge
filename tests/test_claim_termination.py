@@ -390,6 +390,75 @@ def test_a_pull_request_another_lane_landed_is_left_to_the_operator(
     assert record(claimed)["owner"] == "claude"
 
 
+def closed_issue(monkeypatch, closed_at, pull_request=0, state="CLOSED"):
+    """Reports the claimed issue closed on the forge at a fixed instant."""
+    reading = {
+        "state": state,
+        "closed_at": closed_at,
+        "pull_request": pull_request,
+        "url": "",
+        "branch": "",
+        "commit": "abcdef1234567" if pull_request else "",
+    }
+    monkeypatch.setattr(forge, "issue_completion", lambda *args: reading)
+    completion(monkeypatch, None, 0.0)
+    evidence(monkeypatch, None, 0.0)
+
+
+def reported_ready(lane):
+    """Files the holder's ready report for the claimed issue."""
+    lifecycle.record_report(
+        lane.parent, "claude", lifecycle.READY, "1234567abcdef", "", issue="1"
+    )
+
+
+def test_a_closed_issue_cannot_be_claimed(bridge, paired, monkeypatch):
+    registered(bridge, paired)
+    closed_issue(monkeypatch, time.time() - HOUR)
+    with pytest.raises(BridgeError, match="is closed on the forge"):
+        bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+
+
+def test_an_unreadable_forge_never_blocks_a_claim(bridge, paired, monkeypatch):
+    registered(bridge, paired)
+    monkeypatch.setattr(forge, "issue_completion", lambda *args: None)
+    lane = Path(paired["lanes"]["claude"])
+    assert bridge.issue(lane, "claim", "1")["owner"] == "claude"
+
+
+@pytest.mark.parametrize(
+    ("offset", "pull_request", "state", "reason"),
+    [
+        (-HOUR, 1328, "MERGED", "closed on the forge before the claim"),
+        (1.0, 0, "CLOSED", "closed by hand"),
+    ],
+)
+def test_a_ready_claim_on_a_closed_issue_ends(
+    bridge, claimed, monkeypatch, offset, pull_request, state, reason
+):
+    reported_ready(claimed)
+    closed_issue(monkeypatch, time.time() + offset, pull_request, state)
+    supervision.poll(bridge.home, claimed.parent)
+    ended = record(claimed)
+    assert ended["owner"] is None
+    assert lifecycle.state(ended)["state"] == lifecycle.COMPLETE
+    resolution = ended["resolution"]
+    assert resolution["actor"] == "supervisor"
+    assert resolution["outcome"] == "complete"
+    assert reason in resolution["reason"]
+    assert resolution["evidence"]["state"] == state
+    assert resolution["evidence"]["closed_at"]
+
+
+@pytest.mark.parametrize("offset", [-HOUR, 1.0])
+def test_a_claim_not_ready_on_a_closed_issue_stays(
+    bridge, claimed, monkeypatch, offset
+):
+    closed_issue(monkeypatch, time.time() + offset)
+    supervision.poll(bridge.home, claimed.parent)
+    assert record(claimed)["owner"] == "claude"
+
+
 def test_a_resolution_is_not_an_owner_filed_completion(
     bridge, repo, claimed, monkeypatch
 ):
