@@ -61,6 +61,7 @@ LIGHT_PATHS = (
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
     ".github/release-history.json",
+    ".github/workflows/issue-hygiene.yml",
     ".github/workflows/pages.yml",
     ".github/workflows/pr-hygiene.yml",
     ".github/workflows/release.yml",

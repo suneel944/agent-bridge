@@ -83,7 +83,12 @@ Each of its steps has its own `timeout-minutes`, and a failed or hung WSL
 setup is retried once inside the job, so a stuck runner fails within the
 step's ceiling instead of holding a green pull request at the job's.
 
-Open a focused issue before proposing a substantial behavior change. Branch from
+Open a focused issue before proposing a substantial behavior change. The
+`Issue hygiene` workflow checks every opened or edited issue: a `bug: ` or
+`feature: ` title, each required section of the matching template, an
+assignee, a change-type label and a milestone. Issue forms only apply in the
+web form, so an issue filed with `gh issue create --body` must carry the same
+sections by hand. Branch from
 current `main`, keep commits reviewable, and use the PR template. Explain the
 problem, final behavior, exact verification, and compatibility risks. Every PR
 must pass the required checks and resolve review conversations. Protected `main`
