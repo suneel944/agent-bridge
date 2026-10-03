@@ -805,3 +805,89 @@ def test_review_feedback_reports_absence_instead_of_raising(
     monkeypatch.setattr(forge, "_run", lambda args, timeout: None)
     assert forge.failed_log(tmp_path, "5", "6") == (LOG_COMMAND, None)
     assert forge.failed_log(tmp_path, "x", "6")[1] is None
+
+
+def window(directory):
+    """Builds a full newest-first reading of other branches' pull requests."""
+    return [
+        reading(directory, number=number, branch=f"other-{number}")
+        for number in range(40, 40 - forge.MAX_PULL_REQUESTS, -1)
+    ]
+
+
+def cached(directory):
+    """Returns the pull request numbers supervision last cached."""
+    path = directory / supervision.PULL_REQUEST_RECORD
+    return set(json.loads(path.read_text())["pull_requests"])
+
+
+def test_a_lane_pull_request_past_the_newest_window_stays_tracked(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, reading(project))
+    asked = []
+
+    def answer(found):
+        def view(root, number):
+            asked.append(number)
+            return found
+
+        monkeypatch.setattr(supervision.forge, "pull_request", view)
+
+    answer(reading(project, checks="green"))
+    observe(bridge, project, monkeypatch, *window(project))
+    assert asked == [7]
+    assert "7" in cached(project)
+    [notice] = received(bridge, "claude")
+    assert "#7" in notice and "checks passed" in notice
+    answer(None)
+    observe(bridge, project, monkeypatch, *window(project))
+    assert "7" in cached(project)
+    answer({})
+    observe(bridge, project, monkeypatch, *window(project))
+    assert "7" not in cached(project)
+    assert len(received(bridge, "claude")) == 1
+
+
+def test_an_unowned_pull_request_past_the_window_is_kept_unread(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, reading(project, branch="stray"))
+    monkeypatch.setattr(
+        supervision.forge,
+        "pull_request",
+        lambda root, number: pytest.fail("an unowned one was re-read"),
+    )
+    observe(bridge, project, monkeypatch, *window(project))
+    assert "7" in cached(project)
+    observe(bridge, project, monkeypatch, *window(project)[1:])
+    assert "7" not in cached(project)
+
+
+def test_the_forge_reads_one_pull_request_by_number(monkeypatch, tmp_path):
+    forge.select(tmp_path, {"forge": "github"})
+    monkeypatch.setattr(forge, "_reachable", lambda repo: "owner/name")
+    calls = []
+
+    def run(state):
+        def answer(args, timeout):
+            calls.append(args)
+            return json.dumps(
+                {"state": state, "number": 7, "headRefName": "lane"}
+            )
+
+        monkeypatch.setattr(forge, "_run", answer)
+
+    run("OPEN")
+    found = forge.pull_request(tmp_path, 7)
+    assert found is not None
+    assert (found["number"], found["branch"]) == (7, "lane")
+    assert calls[0][:4] == ["gh", "pr", "view", "7"]
+    run("MERGED")
+    assert forge.pull_request(tmp_path, 7) == {}
+    monkeypatch.setattr(forge, "_run", lambda *args: None)
+    assert forge.pull_request(tmp_path, 7) is None
+    monkeypatch.setattr(forge, "_run", lambda *args: "[]")
+    assert forge.pull_request(tmp_path, 7) is None
+    forge.select(tmp_path, {"forge": "null"})
+    assert forge.pull_request(tmp_path, 7) is None

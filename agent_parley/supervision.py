@@ -5447,7 +5447,9 @@ def pull_request_wakes(
     one lane owning every claimed issue it closes, else to the lane
     `branch_lane` attributes its head branch to. One no lane can be named
     for is recorded and announced to nobody. A forge that is missing,
-    offline or unreadable leaves the record as it was and wakes nobody.
+    offline or unreadable leaves the record as it was and wakes nobody. A
+    reading truncated at `forge.MAX_PULL_REQUESTS` never drops an older
+    tracked pull request; `_past_the_window` re-reads or keeps it.
 
     A red head whose every failing check ended `cancelled` or `timed_out`
     with an Actions run and job named has nothing to fix, so its jobs are
@@ -5479,8 +5481,10 @@ def pull_request_wakes(
         return
     before = seen.get("pull_requests") or {}
     ledger = issues.snapshot(directory)["issues"]
-    ceiling = checks_ceiling(Path(manifest["root"]))
     kept: dict[str, dict] = {}
+    if len(readings) >= forge.MAX_PULL_REQUESTS:
+        readings, kept = _past_the_window(manifest, ledger, before, readings)
+    ceiling = checks_ceiling(Path(manifest["root"]))
     for reading in readings:
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
@@ -5542,6 +5546,46 @@ def pull_request_wakes(
         path,
         {"read_at": now, "pull_requests": kept},
     )
+
+
+def _past_the_window(
+    manifest: dict, ledger: dict, before: dict, readings: list[dict]
+) -> tuple[list[dict], dict[str, dict]]:
+    """Accounts for tracked pull requests a truncated reading left out.
+
+    `forge.open_pull_requests` reads only the newest
+    `forge.MAX_PULL_REQUESTS`, so a full reading says nothing about an older
+    pull request. Each one already tracked that a lane owns is re-read by
+    number: still open, it joins the readings and keeps its wakes; merged or
+    closed, it is dropped. One the forge cannot answer for, or that no lane
+    owns, keeps its last reading untouched rather than being taken as closed.
+
+    Args:
+        manifest: Current participant manifest.
+        ledger: Issue records from the project ledger.
+        before: Previous readings keyed by pull request number.
+        readings: This poll's truncated reading.
+
+    Returns:
+        The readings with every re-read open lane pull request added, and the
+        previous readings kept unchanged keyed by pull request number.
+    """
+    root = Path(manifest["root"])
+    read = {str(reading["number"]) for reading in readings}
+    found = list(readings)
+    carried: dict[str, dict] = {}
+    for number, previous in before.items():
+        if number in read or not isinstance(previous, dict):
+            continue
+        owned = previous.get("lane") or _pull_request_lane(
+            manifest, ledger, previous
+        )
+        current = forge.pull_request(root, int(number)) if owned else None
+        if current is None:
+            carried[number] = previous
+        elif current:
+            found.append(current)
+    return found, carried
 
 
 def _pending_clock(before: dict, after: dict, now: float) -> dict:
