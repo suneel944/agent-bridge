@@ -415,6 +415,23 @@ def test_a_missed_deadline_returns_to_the_sender_with_its_reason(
     assert len(returned(bridge, "claude")) == 1
 
 
+def test_a_resent_request_after_retirement_stays_a_duplicate(
+    bridge, repo, paired
+):
+    actor = registered(bridge, paired, "claude")
+    registered(bridge, paired, "codex")
+    request = request_ack(bridge, actor, ["codex"], "resent", within=60)
+    assert request_ack(bridge, actor, ["codex"], "resent", within=60)[
+        "duplicate"
+    ]
+    assert store.retire_acknowledgement(
+        bridge.home, paired["root"], request["id"]
+    )
+    again = request_ack(bridge, actor, ["codex"], "resent", within=60)
+    assert again["duplicate"] and again["id"] == request["id"]
+    assert outstanding(bridge, paired, "codex") == []
+
+
 def test_an_acknowledged_request_never_returns_to_its_sender(
     bridge, repo, paired
 ):
