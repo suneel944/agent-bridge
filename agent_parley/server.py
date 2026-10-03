@@ -532,10 +532,16 @@ class Server(ThreadingHTTPServer):
         request: socket.socket | tuple[bytes, socket.socket],
         client_address: tuple,
     ) -> None:
-        """Rejects overload rather than creating unbounded worker threads."""
+        """Rejects overload rather than creating unbounded worker threads.
+
+        The refusal is recorded before the connection is closed, so the log
+        entry exists by the time the client observes the close.
+        """
         if not self.slots.acquire(blocking=False):
-            self.shutdown_request(request)
-            self.refuse()
+            try:
+                self.refuse()
+            finally:
+                self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
