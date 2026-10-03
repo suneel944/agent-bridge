@@ -135,6 +135,66 @@ def test_nothing_changed_wakes_nobody(bridge, project, monkeypatch):
     assert received(bridge, "claude") == []
 
 
+def test_a_repeated_review_state_wakes_the_lane_each_time(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, reading(project))
+    states = ["CHANGES_REQUESTED", "APPROVED", "CHANGES_REQUESTED"]
+    for index, state in enumerate(states):
+        review = {"author": "alice", "state": state, "at": f"t{index}"}
+        observe(
+            bridge, project, monkeypatch, reading(project, reviews=[review])
+        )
+        observe(
+            bridge, project, monkeypatch, reading(project, reviews=[review])
+        )
+    notices = received(bridge, "claude")
+    assert len(notices) == 3
+    assert "alice CHANGES_REQUESTED" in notices[2]
+
+
+def test_a_repeated_merge_state_wakes_the_lane_each_time(
+    bridge, project, monkeypatch
+):
+    for state in ["MERGEABLE", "CONFLICTING", "MERGEABLE", "CONFLICTING"]:
+        observe(bridge, project, monkeypatch, reading(project, mergeable=state))
+        observe(bridge, project, monkeypatch, reading(project, mergeable=state))
+    notices = received(bridge, "claude")
+    assert len(notices) == 3
+    assert "merge state is now CONFLICTING" in notices[2]
+
+
+def test_a_repeated_red_verdict_wakes_the_lane_each_time(
+    bridge, project, monkeypatch
+):
+    red = reading(project, checks="red", failing=["lint"])
+    for state in [red, reading(project, checks="pending"), red]:
+        observe(bridge, project, monkeypatch, state)
+        observe(bridge, project, monkeypatch, state)
+    observe(bridge, project, monkeypatch, reading(project, checks="green"))
+    observe(bridge, project, monkeypatch, red)
+    notices = received(bridge, "claude")
+    assert len(notices) == 4
+    assert [notice.count("checks failed: lint") for notice in notices] == [
+        1,
+        1,
+        0,
+        1,
+    ]
+
+
+def test_a_poll_retried_before_its_record_is_written_wakes_once(
+    bridge, project, monkeypatch
+):
+    observe(bridge, project, monkeypatch, reading(project))
+    green = reading(project, checks="green")
+    with monkeypatch.context() as patch:
+        patch.setattr(supervision, "write_json", lambda path, value: None)
+        observe(bridge, project, monkeypatch, green)
+    observe(bridge, project, monkeypatch, green)
+    assert len(received(bridge, "claude")) == 1
+
+
 def test_a_pull_request_closing_a_claimed_issue_wakes_its_holder(
     bridge, paired, project, monkeypatch
 ):

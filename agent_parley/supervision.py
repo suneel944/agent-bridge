@@ -5688,7 +5688,11 @@ def pull_request_wakes(
     seen for the first time with finished checks or reviews is announced
     once as well. A message reporting a new review or failed checks also
     quotes the review text and failed-step logs `_pull_request_feedback`
-    reads, within `PULL_REQUEST_FEEDBACK_BYTES` and the message limit.
+    reads, within `PULL_REQUEST_FEEDBACK_BYTES` and the message limit. A
+    notice is deduplicated by the reading it was measured against, so a
+    later repeat of an earlier state, such as a second request for changes
+    or a second conflict at the same head, wakes the lane again, while a
+    poll retried before its record was written does not.
 
     Each reading keeps when its current head was first seen pending, and a
     new head or a finished run restarts that clock. A head still pending
@@ -5811,7 +5815,8 @@ def pull_request_wakes(
         if feedback:
             body = f"{body}\n\n{feedback}"
         digest = hashlib.sha256(
-            f"{reading['number']}\x00{name}\x00{body}".encode()
+            f"{reading['number']}\x00{name}\x00{body}\x00"
+            f"{seen.get('read_at') or 0}".encode()
         ).hexdigest()[:32]
         with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
             store.speak(
