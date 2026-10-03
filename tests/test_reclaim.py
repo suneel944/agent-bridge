@@ -637,13 +637,41 @@ def test_a_worktree_with_unmerged_commits_is_kept(bridge, repo, idle):
     assert path.exists()
 
 
-def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
-    path = made(repo, idle["directory"], "pr-4")
+def excluded(repo, *patterns):
+    """Makes Git ignore the patterns in every worktree of a repository."""
     exclude = Path(git(repo, "rev-parse", "--git-common-dir"))
     if not exclude.is_absolute():
         exclude = repo / exclude
     (exclude / "info").mkdir(exist_ok=True)
-    (exclude / "info" / "exclude").write_text(".env\n")
+    (exclude / "info" / "exclude").write_text(
+        "".join(f"{pattern}\n" for pattern in patterns)
+    )
+
+
+def cached(path):
+    """Fills a worktree with the output tests and linters leave behind."""
+    for name in (".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"):
+        (path / name).mkdir()
+        (path / name / "data").write_text("cache\n")
+    (path / "__pycache__").mkdir()
+    (path / "__pycache__" / "m.pyc").write_bytes(b"\0")
+    (path / "pkg.egg-info").mkdir()
+    (path / "pkg.egg-info" / "PKG-INFO").write_text("Name: pkg\n")
+
+
+CACHES = (
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "*.egg-info",
+)
+
+
+def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-4")
+    excluded(repo, ".env")
     (path / ".env").write_text("SECRET=1\n")
     aged(path)
 
@@ -655,6 +683,40 @@ def test_an_ignored_file_keeps_a_worktree_a_lane_made(bridge, repo, idle):
     assert kept["reclaim"] is False
     assert path.exists()
     assert (path / ".env").exists()
+
+
+def test_a_worktree_holding_only_caches_is_reclaimed(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-6")
+    excluded(repo, *CACHES)
+    cached(path)
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    row = worktree_of(swept, path)
+    assert row["reason"] == reclaim.CONTAINED
+    assert row["removed"] is True
+    assert not path.exists()
+
+
+def test_caches_beside_user_files_keep_a_worktree(bridge, repo, idle):
+    path = made(repo, idle["directory"], "pr-7")
+    excluded(repo, *CACHES, ".env", "data/")
+    cached(path)
+    (path / ".env").write_text("SECRET=1\n")
+    (path / "data").mkdir()
+    (path / "data" / "rows.csv").write_text("1\n")
+    aged(path)
+
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    kept = worktree_of(swept, path)
+    assert kept["reason"] == reclaim.IGNORED
+    assert kept["paths"] == [".env", "data"]
+    assert kept["reclaim"] is False
+    assert (path / ".env").exists()
+    assert (path / "data" / "rows.csv").exists()
+    assert (path / ".venv" / "data").exists()
 
 
 def test_a_worktree_no_lane_made_is_never_touched(bridge, repo, idle, tmp_path):
