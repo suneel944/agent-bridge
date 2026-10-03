@@ -166,6 +166,82 @@ def test_a_headless_prompt_past_the_deadline_ends_and_returns_the_lane(
     assert store.waiting(bridge.home, paired["root"], "claude")["kind"] is None
 
 
+def unthrottle(home, directory, root, name):
+    """Ages a lane's recorded wake spacing so the next poll is admitted."""
+    record = supervision.wake_record(home, root, name)
+    supervision.store_wake(home, directory, root, name, {**record, "at": 0})
+
+
+def test_a_wake_after_a_headless_stop_names_its_command(
+    bridge, repo, paired, quiet, session, monkeypatch
+):
+    lane = actors(bridge, paired)
+    directory = Path(paired["lanes"]["claude"]).parent
+    with store.connect(bridge.home, write=True) as db:
+        supervision.lanes.transition(
+            db,
+            paired["root"],
+            "claude",
+            supervision.lanes.WORKING,
+            session="native-1",
+        )
+    held(directory, session)
+    elapse(directory, timeouts.TIMEOUT_SECONDS + 1)
+
+    assert sweep(bridge, directory) == ["claude"]
+
+    store.call(
+        bridge.home,
+        lane["codex"],
+        "send_message",
+        {
+            "to": ["claude"],
+            "subject": "New work",
+            "body_md": "Please pick this up.",
+            "idempotency_key": "headless-note-1",
+        },
+    )
+    manifest = supervision.roster.read(directory)
+    manifest["participants"]["claude"]["approve_bridge_tools"] = True
+    config = supervision.settings({})
+    observed = supervision.presence(
+        directory, "claude", config["inactive_after"]
+    )
+    assert observed["process_alive"] is False
+
+    launched = []
+
+    class Child:
+        pid = 4321
+
+    monkeypatch.setattr(
+        supervision.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append(command) or Child(),
+    )
+    monkeypatch.setattr(supervision, "track_launcher", lambda child: None)
+
+    supervision.wake(
+        bridge.home, directory, manifest, "claude", observed, config
+    )
+
+    assert launched
+    first = launched[0][launched[0].index("--task") + 1]
+    assert COMMAND in first
+    assert "no rule granted" in first
+
+    launched.clear()
+    unthrottle(bridge.home, directory, paired["root"], "claude")
+
+    supervision.wake(
+        bridge.home, directory, manifest, "claude", observed, config
+    )
+
+    assert launched
+    second = launched[0][launched[0].index("--task") + 1]
+    assert COMMAND not in second
+
+
 def test_a_prompt_in_a_terminal_is_left_for_its_operator(
     bridge, repo, paired, quiet, session
 ):

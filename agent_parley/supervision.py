@@ -7705,8 +7705,39 @@ def _wake_flags(home: Path, directory: Path, name: str) -> dict:
         }
 
 
+HEADLESS_PROMPT_NOTE = (
+    "This lane was last stopped at an unanswered permission prompt for "
+    "`{command}`, which no rule granted. Use another route for that work "
+    "or ask the operator; do not retry that command expecting it to be "
+    "answered."
+)
+_HEADLESS_PROMPT_MARKER = "; prompting command: "
+
+
+def _prompting_command(record: dict) -> str:
+    """Reads the command a prior headless-prompt stop recorded.
+
+    Args:
+        record: Wake record read before the current wake decision.
+
+    Returns:
+        The command `_stop_headless` recorded as the reason the lane was
+        last ended, or "" when the last wake result was not that stop.
+    """
+    result = str(record.get("result") or "")
+    if not result.startswith("ended: ") or (
+        _HEADLESS_PROMPT_MARKER not in result
+    ):
+        return ""
+    return result.partition(_HEADLESS_PROMPT_MARKER)[2]
+
+
 def _select_work_prompt(
-    home: Path, directory: Path, name: str, offer: dict | None
+    home: Path,
+    directory: Path,
+    name: str,
+    offer: dict | None,
+    note: str = "",
 ) -> bool:
     """Publishes a prompt fenced to current lane and issue state."""
     path = directory / f"{name}-wake-work.json"
@@ -7739,6 +7770,7 @@ def _select_work_prompt(
             "bindings": bindings,
             "flags": flags,
             "selected_at": time.time(),
+            "note": note,
         },
     )
     return True
@@ -8225,6 +8257,12 @@ def wake(
     root = manifest["root"]
     window = config["inactive_after"]
     parked = wake_record(home, root, name, directory)
+    stopped_command = _prompting_command(parked)
+    note = (
+        HEADLESS_PROMPT_NOTE.format(command=stopped_command)
+        if stopped_command
+        else ""
+    )
     recorded = condition(home, root, name)
     if lanes.rebooted(recorded):
         return
@@ -8408,7 +8446,7 @@ def wake(
             _park_wake(home, directory, root, name, record, refused, due)
             return
         result = WAKE_ATTENTION
-        selected = _select_work_prompt(home, directory, name, work_offer)
+        selected = _select_work_prompt(home, directory, name, work_offer, note)
         if not selected:
             result = "busy:stale"
         elif observed["process_alive"]:

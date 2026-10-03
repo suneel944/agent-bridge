@@ -93,6 +93,23 @@ def _work_bindings(ledger: dict, numbers: list[str]) -> list[dict]:
     return bindings
 
 
+def _noted(text: str, record: dict) -> str:
+    """Leads a selected prompt with its recorded headless-prompt note.
+
+    Args:
+        text: Prompt text chosen before the note.
+        record: Published wake-work record the note was read from.
+
+    Returns:
+        The note followed by `text`, bounded by `MAX_WORK_PROMPT`, or
+        `text` alone, truncated the same way, when no note was recorded.
+    """
+    note = str(record.get("note") or "")
+    if not note:
+        return text[:MAX_WORK_PROMPT]
+    return f"{note} {text}"[:MAX_WORK_PROMPT]
+
+
 def selected_prompt(
     directory: Path, name: str, home: Path | None = None
 ) -> str | None:
@@ -102,6 +119,9 @@ def selected_prompt(
     context does not cross the control socket, and a malformed or obsolete
     publication refuses delivery. A missing selection is the ordinary
     coordination prompt used by launchers outside the supervisor wake path.
+    A selection recorded with a note from a prior headless-prompt stop
+    leads the prompt with that note, naming the command and saying the
+    permission it needed was never granted.
 
     Args:
         directory: Private project state directory.
@@ -137,7 +157,9 @@ def selected_prompt(
     if offer is None:
         try:
             return (
-                PROMPT if _wake_flags(directory, name, home) == flags else None
+                _noted(PROMPT, record)
+                if _wake_flags(directory, name, home) == flags
+                else None
             )
         except (BridgeError, OSError, ValueError):
             return None
@@ -160,14 +182,15 @@ def selected_prompt(
     identifier = str(offer.get("id", ""))
     detail = str(offer.get("text", ""))
     if not identifier or not detail:
-        return PROMPT
+        return _noted(PROMPT, record)
     issues = ", ".join(f"#{number}" for number in offer.get("issues", [])[:5])
     heading = f"Act on work offer {identifier}"
     if issues:
         heading += f" for {issues}"
-    return (f"{heading}. {detail} Delivery does not claim or complete work.")[
-        :MAX_WORK_PROMPT
-    ]
+    return _noted(
+        f"{heading}. {detail} Delivery does not claim or complete work.",
+        record,
+    )
 
 
 def sweep_sockets(home: Path) -> list[str]:
