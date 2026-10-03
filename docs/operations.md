@@ -500,6 +500,7 @@ condition, that count, its age and what clears it:
 | `crossing ready` | The project records an integration base, no claim is held, at least one issue landed there by a merged pull request is still open on the forge, and the cached reading holds every open issue. One row per project names the landed issues still open and ages from the newest landing or the newest claim end, whichever is later; with notifications configured it opens one decision, which never applies anything. The decision opens only while that age is under one day. | `gh pr create --head BRANCH`, naming each landed issue as `Closes #N`; review and merge it yourself, since that merge cannot be undone. |
 | `checks stalled` | Supervision marked an open pull request's pending head stalled; the lane was already told once. The row names the pending checks and clears when the head finishes or changes. | `gh pr checks URL`, then re-run once with `gh run rerun RUN --failed`, cancelling first a run still in progress past its job timeout. |
 | `checks failed` | An open pull request's checks are red with at least one check the forge ran and failed, or its head is pending on the one automatic re-run supervision requested. The row names the attempt and the failed checks. | `gh pr checks URL`, then fix and push or re-run; while the automatic re-run is pending, wait for its conclusion; after it, run the re-run command the row names yourself, or fix and push. |
+| `ci rounds exhausted` | An open pull request's head is red after it used its CI rounds: the `ci_rounds` supervision setting (2) plus any round the operator granted. A round is a head commit whose checks finished; a re-run on the same head is not a new round. The lane was told once to stop pushing and report blocked, and one decision offers `grant one more round` or `take over`. The row replaces `checks failed` for that pull request and clears on a green head. | Answer the decision: a grant lets the lane push once more; a takeover stops further decisions for that pull request. The limit is advisory and never refuses a push. |
 | `checks refused` | A required check the forge never started blocks one or more open pull requests. One row per check name and forge conclusion names every pull request it blocks. | Resolve it at the forge (billing, spending limit or manual approval), then re-run once. |
 | `session outliving its claim` | The lane holds no claim, yet a native session in a worktree the lane made showed activity in the last 60 seconds. | `agent-parley status NAME`; Agent Parley never stops such a session. |
 | `root missing` | The project root checkout is gone. Once it has been gone an interval, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
@@ -1950,7 +1951,8 @@ The private project manifest accepts `"supervision"` with `interval` (default
 (300 seconds), `max_claims_per_lane` (2 claims, 1 to 100),
 `convergence_repeats` (3 failures, 1 to 100), `convergence_after`
 (14400 seconds), `prompts`, `wake`,
-`reclaim`, `titles` and `rerun_cancelled` (all true). Numeric second values range from 1 to 86400 seconds.
+`reclaim`, `titles` and `rerun_cancelled` (all true), and `ci_rounds`
+(2 rounds, 1 to 100). Numeric second values range from 1 to 86400 seconds.
 
 Issue convergence is accounted separately from wakes and liveness.
 `convergence.py` keeps one account per owned issue and claim generation in
@@ -2153,6 +2155,17 @@ name and forge conclusion is grouped into one `checks refused` row naming
 every affected pull request, and one decision, opened through
 `decisions.open_or_refresh` and keyed by that check name and conclusion, so
 the operator answers the shared cause once rather than once per lane.
+
+Each pull request also counts its CI rounds: a head commit whose checks
+finished, counted once per commit, so neither the automatic re-run nor a
+manual re-run on the same head adds a round. A red head at or past the
+`ci_rounds` supervision setting (default 2) tells its lane once to stop
+pushing and report blocked, lists a `ci rounds exhausted` row in place of
+`checks failed`, and opens one decision offering `grant one more round` or
+`take over`. A grant raises that pull request's allowance by one round and
+tells the lane; a takeover stops further decisions for it. A green head, or
+a head back under the allowance, closes the decision. The limit is advisory
+like reservations: nothing refuses a push.
 
 Repeating a reminder at a lane that has stopped answering changes nothing, so
 the supervisor counts the reminders left unanswered on a claim observed

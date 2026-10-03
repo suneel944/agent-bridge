@@ -67,9 +67,11 @@ DEFAULTS = {
     "reclaim": True,
     "titles": True,
     "rerun_cancelled": True,
+    "ci_rounds": 2,
 }
 
 MAX_COMPLETION_REMINDERS = 100
+MAX_CI_ROUNDS = 100
 MAX_CLAIMS_PER_LANE = 100
 MAX_CONVERGENCE_REPEATS = 100
 ENDED = issues.ENDED
@@ -205,6 +207,11 @@ def settings(value: dict) -> dict:
         raise BridgeError(
             "completion_reminders must be between 1 and "
             f"{MAX_COMPLETION_REMINDERS} reminders."
+        )
+    rounds = result["ci_rounds"]
+    if type(rounds) is not int or not 1 <= rounds <= MAX_CI_ROUNDS:
+        raise BridgeError(
+            f"ci_rounds must be between 1 and {MAX_CI_ROUNDS} rounds."
         )
     for field in ("prompts", "wake", "reclaim", "titles", "rerun_cancelled"):
         if type(result[field]) is not bool:
@@ -5263,6 +5270,9 @@ PULL_REQUEST_RECORD = "pull-requests.json"
 CHECKS_STALLED_SECONDS = 3600.0
 CHECKS_STALLED_FACTOR = 2
 RERUN_CONCLUSIONS = frozenset({"cancelled", "timed_out"})
+CI_ROUNDS_KIND = "ci_rounds_exhausted"
+CI_ROUND_GRANT = "grant one more round"
+CI_ROUND_TAKEOVER = "take over"
 
 
 def checks_ceiling(root: Path) -> float:
@@ -5282,7 +5292,11 @@ def checks_ceiling(root: Path) -> float:
 
 
 def pull_request_wakes(
-    home: Path, directory: Path, manifest: dict, rerun: bool = True
+    home: Path,
+    directory: Path,
+    manifest: dict,
+    rerun: bool = True,
+    rounds: int = DEFAULTS["ci_rounds"],
 ) -> None:
     """Tells a lane once when its open pull request's checks or reviews change.
 
@@ -5331,12 +5345,22 @@ def pull_request_wakes(
     so it does not push an empty commit. A check that ended `failure` is
     never re-run.
 
+    Each reading counts the CI rounds its pull request has used: a head
+    commit whose checks finished, counted once per commit, so a re-run on
+    the same head is not a new round. A red head at or past `rounds`, plus
+    any rounds the operator granted, tells its lane once to stop pushing
+    and report blocked, and opens one decision offering one more round or
+    a takeover. The limit is advisory: nothing refuses a push. A head
+    under the limit, or a green one, closes the decision still open.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
         manifest: Current participant manifest.
         rerun: Whether a cancelled or timed-out run is re-run once; the
             `rerun_cancelled` supervision setting.
+        rounds: CI rounds a pull request may use before its lane is told
+            to stop; the `ci_rounds` supervision setting.
     """
     path = directory / PULL_REQUEST_RECORD
     try:
@@ -5359,10 +5383,16 @@ def pull_request_wakes(
         previous = before.get(str(reading["number"])) or {}
         record = _pending_clock(previous, reading, now)
         record = _checks_clock(previous, record, now)
+        record = _ci_rounds(previous, record)
         if previous.get("sha") == record["sha"] and previous.get("rerun"):
             record["rerun"] = previous["rerun"]
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
+        limited = _ci_round_limit(
+            directory, manifest["root"], previous, record, rounds, now
+        )
+        if limited:
+            changes.append(limited)
         stalled = _stalled_checks(record, now, ceiling)
         if stalled:
             changes.append(stalled)
@@ -5468,6 +5498,109 @@ def _checks_clock(before: dict, after: dict, now: float) -> dict:
     record["red_since"] = now
     record["red_attempts"] = int(record.get("red_attempts") or 0) + 1
     return record
+
+
+def _ci_rounds(before: dict, after: dict) -> dict:
+    """Carries a pull request's CI round count and operator grants forward.
+
+    Args:
+        before: The previous reading, or an empty mapping for a first one.
+        after: This poll's reading, already carrying its clocks.
+
+    Returns:
+        A copy of `after` whose `rounds` counts each head commit seen with
+        finished checks once, `round_sha` naming the last one counted. A
+        re-run on a counted head adds nothing. Rounds the operator granted
+        and a recorded takeover carry over unchanged.
+    """
+    record = dict(after)
+    for field in ("rounds", "round_sha", "granted", "taken_over", "exhausted"):
+        if before.get(field):
+            record[field] = before[field]
+    if after["checks"] in {"green", "red"} and after["sha"] != before.get(
+        "round_sha"
+    ):
+        record["rounds"] = int(before.get("rounds") or 0) + 1
+        record["round_sha"] = after["sha"]
+    return record
+
+
+def _ci_round_limit(
+    directory: Path,
+    project: str,
+    before: dict,
+    record: dict,
+    limit: int,
+    now: float,
+) -> str:
+    """Applies the CI round limit to one pull request reading.
+
+    An answered decision is carried out once through `decisions.applied`:
+    a grant raises this pull request's allowance by one round, a takeover
+    stops further decisions for it. A red head at or past the allowance is
+    marked `exhausted` with its round count and keeps one decision open
+    unless the operator took over; any other head closes that decision.
+
+    Args:
+        directory: Private project state directory.
+        project: Canonical project root.
+        before: The previous reading, or an empty mapping for a first one.
+        record: This poll's reading with its round count; updated in place.
+        limit: The `ci_rounds` supervision setting.
+        now: Unix time of this poll.
+
+    Returns:
+        One phrase for the lane when the limit is first reached on this
+        round count, or when the operator just granted a round; else empty.
+    """
+    number = str(record["number"])
+    name = decisions.identifier(project, "", CI_ROUNDS_KIND, number)
+    granted = False
+    with contextlib.suppress(BridgeError, OSError, ValueError):
+        answer = str(decisions.get(directory, name).get("answer") or "")
+        if answer and decisions.applied(directory, name, now):
+            if answer == CI_ROUND_GRANT:
+                record["granted"] = int(record.get("granted") or 0) + 1
+                granted = True
+            else:
+                record["taken_over"] = True
+    allowed = limit + int(record.get("granted") or 0)
+    used = int(record.get("rounds") or 0)
+    if record["checks"] != "red" or used < allowed:
+        record.pop("exhausted", None)
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            decisions.close(directory, name, now)
+        if granted:
+            return (
+                f"the operator granted one more CI round ({used} of "
+                f"{allowed} used); fix and push once more"
+            )
+        return ""
+    record["exhausted"] = used
+    if not record.get("taken_over"):
+        with contextlib.suppress(BridgeError, OSError, ValueError):
+            decisions.open_or_refresh(
+                directory,
+                project=project,
+                lane="",
+                kind=CI_ROUNDS_KIND,
+                key=number,
+                question=(
+                    f"Pull request #{number} used {used} of {allowed} CI "
+                    "rounds and its checks are still red: "
+                    + ", ".join(record.get("failing") or [])
+                ),
+                options=(CI_ROUND_GRANT, CI_ROUND_TAKEOVER),
+                recommended=CI_ROUND_TAKEOVER,
+                now=now,
+            )
+    if before.get("exhausted") == used:
+        return ""
+    return (
+        f"CI round limit reached ({used} of {allowed} rounds red): stop "
+        "pushing to this branch and report blocked; the operator decides "
+        "whether to grant one more round or take over"
+    )
 
 
 def _stalled_checks(record: dict, now: float, ceiling: float) -> str:
@@ -6298,6 +6431,7 @@ def _poll(home: Path, directory: Path) -> None:
             directory,
             manifest,
             config["rerun_cancelled"],
+            config["ci_rounds"],
         )
         stage(
             "overdue claims",

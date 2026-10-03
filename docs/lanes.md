@@ -236,6 +236,14 @@ ready one; when several are ready, name one with `--issue N`, which
 `participant merge NAME` accepts too. The full policy is in
 [Operations](operations.md#requiring-a-recorded-approval).
 
+A lane is not left pushing fix after fix against red CI. The `ci_rounds`
+supervision setting (default 2) caps the CI rounds one pull request may use,
+where a round is a head commit whose checks finished and a re-run on the same
+head adds none. At the limit with red checks the lane is told to stop pushing
+and report blocked, `problems` lists `ci rounds exhausted`, and one decision
+asks you to grant one more round or take over. The cap is advisory: nothing
+refuses a push. Details are in [Operations](operations.md).
+
 ## Revising the plan
 
 A lane that finds a missing prerequisite or an obsolete edge in the applied

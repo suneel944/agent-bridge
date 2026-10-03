@@ -84,6 +84,7 @@ CHECKS = "checks stalled"
 CROSSING = "crossing ready"
 CHECKS_FAILED = "checks failed"
 CHECKS_REFUSED = "checks refused"
+CI_ROUNDS_EXHAUSTED = "ci rounds exhausted"
 CHILD_SESSION = "session outliving its claim"
 CHILD_RECENT = 60
 
@@ -1743,6 +1744,25 @@ def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
         ]
         if not ran:
             continue
+        failing = ", ".join(
+            f"{check['name']} {check['conclusion']}" for check in ran
+        )
+        if reading.get("exhausted"):
+            rows.append(
+                _row(
+                    CI_ROUNDS_EXHAUSTED,
+                    f"pull request #{reading.get('number')} used "
+                    f"{reading.get('exhausted')} CI rounds: {failing}",
+                    "operator took over the branch"
+                    if reading.get("taken_over")
+                    else "answer the decision: grant one more round or "
+                    "take over; the lane stops pushing",
+                    _age(reading.get("red_since"), now),
+                    str(reading.get("lane") or ""),
+                    root,
+                )
+            )
+            continue
         attempt = int(reading.get("red_attempts") or 1)
         waiting = bool(rerun.get("accepted")) and attempt <= int(
             rerun.get("attempt") or 1
@@ -1762,9 +1782,7 @@ def _checks_failed_rows(directory: Path, root: str, now: float) -> list[dict]:
                 f"(attempt {attempt}"
                 + (", re-run requested" if waiting else "")
                 + "): "
-                + ", ".join(
-                    f"{check['name']} {check['conclusion']}" for check in ran
-                ),
+                + failing,
                 remedy,
                 _age(reading.get("red_since"), now),
                 str(reading.get("lane") or ""),
