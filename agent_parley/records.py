@@ -663,7 +663,9 @@ def _advance(path: Path, fold: Fold, reading: dict) -> dict:
     return reading
 
 
-def reported_tokens(home: Path, participant: dict, cache: dict) -> int | None:
+def reported_tokens(
+    home: Path, participant: dict, cache: dict, whole: bool = False
+) -> int | None:
     """Reports the tokens a lane's own native client recorded for itself.
 
     The value is read from the client's session records under the config home
@@ -678,6 +680,9 @@ def reported_tokens(home: Path, participant: dict, cache: dict) -> int | None:
         participant: Manifest entry naming the lane, provider and account.
         cache: Caller-owned mapping of lane to its previous reading, which
             keeps a live refresh reading only newly appended records.
+        whole: Read on past ``MAX_READ`` until the record's size when this
+            call began, so a caller comparing the count with a limit sees
+            every recorded token now rather than over later refreshes.
 
     Returns:
         The reported token count, or None when this lane has no readable
@@ -694,7 +699,13 @@ def reported_tokens(home: Path, participant: dict, cache: dict) -> int | None:
         if path is None:
             cache.pop(key, None)
             return None
+        size = path.stat().st_size
         reading = _advance(path, fold, cache.get(key, {}))
+        while whole and reading["offset"] < size:
+            before = reading["offset"]
+            reading = _advance(path, fold, reading)
+            if reading["offset"] <= before:
+                break
     except (BridgeError, KeyError, OSError, ValueError):
         return None
     cache[key] = reading
