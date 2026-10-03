@@ -130,7 +130,9 @@ AVAILABILITY = {
 
 _LAUNCHERS: list[subprocess.Popen[bytes]] = []
 _LAUNCHERS_LOCK = threading.Lock()
-_READINGS: dict[str, tuple[float, dict, dict]] = {}
+_READINGS: dict[str, tuple[float, dict, dict, float]] = {}
+_READINGS_FLIGHTS: dict[str, "_ReadingsFlight"] = {}
+_READINGS_LOCK = threading.Lock()
 _COMPLETIONS: dict[tuple[str, str], tuple[float, tuple[str, float] | None]] = {}
 _REFRESHING: set[tuple[str, str]] = set()
 _REFRESHING_LOCK = threading.Lock()
@@ -965,7 +967,9 @@ def base_advances(home: Path, manifest: dict) -> dict[str, list[str]]:
     branch every lane merges back into, is read once per project and
     compared with the point each lane branched from; a lane whose fork point
     is still that head is current, and the store is not read at all when no
-    lane is behind.
+    lane is behind. A retired lane is never read: it stays in the roster with
+    its branch, so walking it made the cost grow with lane history instead
+    of with the lanes still working.
 
     Where the base did advance, the paths it changed since the fork point are
     matched against the lane's active reservations, using the same overlap
@@ -993,7 +997,11 @@ def base_advances(home: Path, manifest: dict) -> dict[str, list[str]]:
     head = _read(root, "rev-parse", "HEAD")
     if not head:
         return {}
-    participants = manifest["participants"]
+    participants = {
+        name: participant
+        for name, participant in manifest["participants"].items()
+        if not roster.retired(participant)
+    }
 
     def fork_point(participant: dict) -> str | None:
         """Reads where a lane's branch forked from the base head."""
@@ -1053,6 +1061,8 @@ def refresh_readings(
     hook of every lane used to run `operator_edits` and `base_advances`
     itself, one Git status and one merge-base per participant each time,
     which is the scan that held decisions past their deadline under load.
+    The operator edits are read on a second thread while the base advances
+    are read, since neither waits on the other.
 
     Args:
         home: Private bridge state root.
@@ -1062,12 +1072,12 @@ def refresh_readings(
     Returns:
         The operator edits and the base advances, keyed by participant.
     """
-    edits = operator_edits(home, manifest)
-    advances = base_advances(home, manifest)
+    edits, advances = _take_readings(home, manifest)
     _READINGS[manifest["root"]] = (
         time.monotonic() + lifetime,
         edits,
         advances,
+        lifetime,
     )
     if directory := roster.locate(home, manifest["root"]):
         with contextlib.suppress(OSError):
@@ -1080,6 +1090,44 @@ def refresh_readings(
                 },
             )
     return edits, advances
+
+
+def _take_readings(
+    home: Path, manifest: dict
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Asks Git for the project's readings without keeping them.
+
+    The operator edits are read on a second thread while the base advances
+    are read, since neither waits on the other.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Project manifest naming the base checkout and the roster.
+
+    Returns:
+        The operator edits and the base advances, keyed by participant.
+    """
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        edits = pool.submit(operator_edits, home, manifest)
+        advances = base_advances(home, manifest)
+        return edits.result(), advances
+
+
+class _ReadingsFlight:
+    """One running reading of a project's Git state that callers share.
+
+    Attributes:
+        done: Set once the reading ends, whether or not it succeeded.
+        reading: The operator edits and base advances, or None until the
+            reading succeeds.
+    """
+
+    def __init__(self) -> None:
+        """Starts a flight with no reading yet."""
+        self.done = threading.Event()
+        self.reading: (
+            tuple[dict[str, list[str]], dict[str, list[str]]] | None
+        ) = None
 
 
 def _published_readings(
@@ -1120,16 +1168,24 @@ def _published_readings(
 def readings(
     home: Path, manifest: dict
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Returns the project's Git readings, from the poll's copy if current.
+    """Returns the project's Git readings, from the kept copy when one exists.
+
+    A kept copy is served even past its window: the hook path never runs
+    project-wide Git work while one exists. An expired copy starts one
+    background refresh that replaces it, and every caller arriving while
+    that refresh runs is served the expired copy without starting another.
+    Every hook used to take the readings again on its own request path once
+    the copy expired, concurrently and keeping nothing, so latency grew
+    with the hooks in flight.
 
     The poll also publishes its reading in the project state directory, so
     a separate process such as `agent-parley status` reuses it instead of
     asking Git for a status and a merge-base per lane again. A process with
-    neither a current copy nor a current publication, such as a hook
-    deciding in-process while the service is down, takes the readings
-    itself and keeps nothing, so only the poll decides how often Git is
-    asked. It reads the operator edits on a second thread while it reads
-    the base advances, since neither waits on the other.
+    neither a kept copy nor a current publication, such as a hook deciding
+    in-process while the service is down, takes the readings once and
+    keeps nothing, so only the poll decides how often Git is asked;
+    concurrent callers wait for that one reading and share it instead of
+    each taking their own.
 
     Args:
         home: Private bridge state root.
@@ -1138,15 +1194,75 @@ def readings(
     Returns:
         The operator edits and the base advances, keyed by participant.
     """
-    kept = _READINGS.get(manifest["root"])
-    if kept is not None and time.monotonic() < kept[0]:
+    root = manifest["root"]
+    kept = _READINGS.get(root)
+    if kept is not None:
+        if time.monotonic() >= kept[0]:
+            flight, leader = _join_readings_flight(root)
+            if leader:
+                threading.Thread(
+                    target=_fly_readings,
+                    args=(
+                        root,
+                        flight,
+                        refresh_readings,
+                        home,
+                        manifest,
+                        kept[3],
+                    ),
+                    name="agent-parley-readings",
+                    daemon=True,
+                ).start()
         return kept[1], kept[2]
     if (published := _published_readings(home, manifest)) is not None:
         return published
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        edits = pool.submit(operator_edits, home, manifest)
-        advances = base_advances(home, manifest)
-        return edits.result(), advances
+    flight, leader = _join_readings_flight(root)
+    if leader:
+        _fly_readings(root, flight, _take_readings, home, manifest)
+    else:
+        flight.done.wait()
+    if flight.reading is not None:
+        return flight.reading
+    return _take_readings(home, manifest)
+
+
+def _join_readings_flight(root: str) -> tuple[_ReadingsFlight, bool]:
+    """Joins the running reading of a project, or starts the only one.
+
+    Args:
+        root: Base checkout naming the project.
+
+    Returns:
+        The flight, and whether the caller started it and must run it.
+    """
+    with _READINGS_LOCK:
+        if (flight := _READINGS_FLIGHTS.get(root)) is not None:
+            return flight, False
+        flight = _READINGS_FLIGHTS[root] = _ReadingsFlight()
+        return flight, True
+
+
+def _fly_readings(
+    root: str,
+    flight: _ReadingsFlight,
+    take: Callable[..., tuple[dict[str, list[str]], dict[str, list[str]]]],
+    *args: object,
+) -> None:
+    """Runs a started reading, shares its result and ends the flight.
+
+    Args:
+        root: Base checkout naming the project.
+        flight: Flight returned to its starter by `_join_readings_flight`.
+        take: Reading to run, `refresh_readings` to replace the kept copy
+            or `_take_readings` to keep nothing.
+        *args: Arguments passed to `take`.
+    """
+    try:
+        flight.reading = take(*args)
+    finally:
+        with _READINGS_LOCK:
+            _READINGS_FLIGHTS.pop(root, None)
+        flight.done.set()
 
 
 def base_advance_marker(paths: list[str], told: float | None = None) -> str:
