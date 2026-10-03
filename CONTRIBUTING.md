@@ -71,6 +71,11 @@ The `Check` workflow scopes pull requests by the paths they change;
 `pyproject.toml`, `uv.lock` or `.github/workflows/check.yml` also add `wsl`.
 Documentation, templates and other workflows run only the Ubuntu 3.12 leg. A
 path no list recognises, a push to `main` and a manual run select every leg.
+One exception: a file whose only edits are version lines, as in the release
+version bump commit, does not add `wsl`, because the commit before it already
+ran that leg on the same code. Runs on `main` group by commit, so the run for
+a version bump starts at once instead of queueing behind the run for the
+merge before it; pull request runs still cancel when a new commit arrives.
 Skipped legs still report their required check names. The `check` job fails
 if a needed Python or macOS leg did not succeed; `wsl` reports as its own
 required check and gates the merge, so it carries no `continue-on-error`.
