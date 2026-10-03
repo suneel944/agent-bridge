@@ -1040,6 +1040,8 @@ def test_service_start_removes_wake_sockets_nobody_listens_on():
         live = home / "wake-live.sock"
         with socket.socket(socket.AF_UNIX) as dead:
             dead.bind(str(stale))
+        aged = time.time() - terminal.SOCKET_GRACE - 1
+        os.utime(stale, (aged, aged))
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(str(live))
             listener.listen(1)
@@ -1049,6 +1051,22 @@ def test_service_start_removes_wake_sockets_nobody_listens_on():
             assert live.exists()
         assert removed == ["wake-stale.sock"]
         assert not stale.exists()
+
+
+def test_a_sweep_keeps_a_wake_socket_bound_but_not_yet_listening():
+    with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
+        path = Path(temporary) / "wake-x.sock"
+        with (
+            socket.socket(socket.AF_UNIX) as server,
+            socket.socket(socket.AF_UNIX) as client,
+        ):
+            server.bind(str(path))
+
+            removed = terminal.sweep_sockets(Path(temporary))
+
+            server.listen(1)
+            client.connect(str(path))
+        assert removed == []
 
 
 def test_a_lane_orphaned_past_the_ceiling_is_ready_to_retire():
