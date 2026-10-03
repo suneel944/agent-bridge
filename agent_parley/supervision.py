@@ -5663,6 +5663,7 @@ def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
 
 PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
+PULL_REQUEST_HISTORY_SECONDS = 30 * 86400.0
 CHECKS_STALLED_SECONDS = 3600.0
 CHECKS_STALLED_FACTOR = 2
 RERUN_CONCLUSIONS = frozenset({"cancelled", "timed_out"})
@@ -5748,6 +5749,12 @@ def pull_request_wakes(
     reading truncated at `forge.MAX_PULL_REQUESTS` never drops an older
     tracked pull request; `_past_the_window` re-reads or keeps it.
 
+    Each reading keeps `opened_at`, when supervision first saw the pull
+    request. One that a reading shorter than `forge.MAX_PULL_REQUESTS` no
+    longer lists is moved to the record's `history` with `gone_at`, and the
+    history keeps `PULL_REQUEST_HISTORY_SECONDS`, so outcome metrics can
+    read pull requests that merged or closed without another forge read.
+
     A red head whose every failing check ended `cancelled` or `timed_out`
     with an Actions run and job named has nothing to fix, so its jobs are
     re-run once through `forge.rerun_job`, whether or not the owning lane
@@ -5797,6 +5804,8 @@ def pull_request_wakes(
         record = _pending_clock(previous, reading, now)
         record = _checks_clock(previous, record, now)
         record = _ci_rounds(previous, record)
+        if not previous or previous.get("opened_at"):
+            record["opened_at"] = float(previous.get("opened_at") or now)
         if previous.get("sha") == record["sha"] and previous.get("rerun"):
             record["rerun"] = previous["rerun"]
         kept[str(reading["number"])] = record
@@ -5856,9 +5865,22 @@ def pull_request_wakes(
                 f"pull-request:{digest}",
             )
     _not_started_decisions(directory, manifest["root"], kept, now)
+    history = [
+        item
+        for item in [
+            *(seen.get("history") or []),
+            *(
+                {**record, "gone_at": now}
+                for number, record in before.items()
+                if number not in kept
+                and len(readings) < forge.MAX_PULL_REQUESTS
+            ),
+        ]
+        if now - float(item.get("gone_at") or 0) < PULL_REQUEST_HISTORY_SECONDS
+    ]
     write_json(
         path,
-        {"read_at": now, "pull_requests": kept},
+        {"read_at": now, "pull_requests": kept, "history": history},
     )
 
 

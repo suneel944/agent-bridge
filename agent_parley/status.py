@@ -709,6 +709,7 @@ class StatusMixin(BridgeCore):
             "usage": usage,
             "schedules": schedules,
             "schedules_error": failure,
+            "pull_request_record": cached,
             "pull_requests": [
                 reading
                 for reading in (
@@ -1116,6 +1117,7 @@ class StatusMixin(BridgeCore):
             inbound_status,
             issues,
             json,
+            metrics,
             notify,
             plan,
             reported_ready,
@@ -1173,6 +1175,13 @@ class StatusMixin(BridgeCore):
                             path.parent
                         ),
                         "supervision_poll": supervision.last_poll(path.parent),
+                        "pull_request_outcomes": (
+                            metrics.pull_request_outcomes(
+                                context.get("pull_request_record"),
+                                context["ledger"],
+                                time.time() - metrics.OUTCOME_WINDOW,
+                            )
+                        ),
                         **self._integration(path.parent, data, context),
                     }
                 )
@@ -1372,7 +1381,7 @@ class StatusMixin(BridgeCore):
             width: Columns the tables may use, or None for whole lines.
             every_claim: Also list claims whose work ended on the forge.
         """
-        from agent_parley import supervision
+        from agent_parley import metrics, supervision
         from agent_parley.cli import supervision_failure, tables
 
         dormancy = " (dormant)" if project["dormant"] else ""
@@ -1430,6 +1439,11 @@ class StatusMixin(BridgeCore):
             print(text)
         for text in tables.lane_table(lanes, width):
             print(text)
+        if outcome := metrics.outcome_line(
+            project.get("pull_request_outcomes") or {},
+            tables.age(metrics.OUTCOME_WINDOW),
+        ):
+            print(outcome)
         if ended:
             listed = " ".join(f"#{number}" for number in sorted(ended)[:10])
             more = f" and {len(ended) - 10} more" if len(ended) > 10 else ""
@@ -1473,6 +1487,7 @@ class StatusMixin(BridgeCore):
             json,
             lane_detail,
             lanes,
+            metrics,
             narrow,
             pending_offers,
             reclaim,
@@ -1509,6 +1524,11 @@ class StatusMixin(BridgeCore):
             print(describe(snapshot(path.parent)))
             if line := landed_line(project.get("integration") or {}):
                 print(line)
+            if outcome := metrics.outcome_line(
+                project.get("pull_request_outcomes") or {},
+                tables.age(metrics.OUTCOME_WINDOW),
+            ):
+                print(outcome)
             if measured := reclaim.summary_line(project.get("reclaim") or {}):
                 print(measured)
             if spares := pool.summary_line(project.get("spares") or {}):
