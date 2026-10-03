@@ -820,7 +820,10 @@ def resolve(
 
     A merged pull request names the commit that carries the work, so the
     ``complete`` outcome records that commit and frees the issues waiting on
-    it. A closed pull request integrated nothing, so the ``release`` outcome
+    it. The supervisor may also complete a claim whose holder reported ready
+    once the forge reports its issue closed without such a pull request,
+    and then records the commit the ready report named. A closed pull
+    request integrated nothing, so the ``release`` outcome
     returns the work to the queue instead; it supersedes a stale ready state,
     because the generation that reported ready has ended on the forge.
 
@@ -847,13 +850,13 @@ def resolve(
     if outcome not in ("complete", "release"):
         raise BridgeError("Resolution outcome must be complete or release.")
     commit = str(evidence.get("commit") or "")
-    if outcome == "complete" and (
-        evidence.get("state") != "MERGED" or not COMMIT.fullmatch(commit)
-    ):
-        raise BridgeError(
-            "Completion needs a merged pull request naming its merge commit; "
-            "release the claim instead."
-        )
+    merged = evidence.get("state") == "MERGED" and COMMIT.fullmatch(commit)
+    refusal = (
+        "Completion needs a merged pull request naming its merge commit; "
+        "release the claim instead."
+    )
+    if outcome == "complete" and not merged and claim_id is None:
+        raise BridgeError(refusal)
     with lock(directory / "issues.lock", timeout=1):
         ledger = _snapshot(directory)
         record = ledger["issues"].get(issue)
@@ -875,6 +878,15 @@ def resolve(
         holder = record["owner"]
         now = time.time()
         execution = state(record)
+        if outcome == "complete" and not merged:
+            commit = str(execution.get("commit") or "")
+            if (
+                evidence.get("state") not in ("MERGED", "CLOSED")
+                or execution["state"] != READY
+                or execution["claim_id"] != record.get("claim_id")
+                or not COMMIT.fullmatch(commit)
+            ):
+                raise BridgeError(refusal)
         if outcome == "complete":
             execution.update(
                 state=COMPLETE,

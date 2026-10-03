@@ -2087,7 +2087,12 @@ issue is still open and the cached reading holds every open issue,
 notifications configured one decision asks the operator to open the crossing
 pull request (`gh pr create --head BRANCH`, naming each issue as `Closes #N`).
 Nothing opens or merges it for you: a merge to the default branch cannot be
-undone. Forge lookups are bounded and best effort; an offline forge cannot
+undone. A claim whose holder already reported ready also ends as complete
+with actor `supervisor` once the forge reports its issue closed, even when
+the issue closed before the claim or was closed by hand without a closing
+pull request; the reason names the case and the evidence keeps the state and
+close instant. `issue claim` refuses an issue the forge reports closed, and
+allows the claim when the forge cannot be read. Forge lookups are bounded and best effort; an offline forge cannot
 establish completion. Reminders appear in issue/status output and
 at checkpoints. An explicit subsequent message reaching every waiting peer
 marks a response observed; that is delivery evidence, not proof of a complete
