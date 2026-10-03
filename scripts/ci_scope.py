@@ -7,6 +7,13 @@ process code changes. A path this module does not recognise, a push to
 ``main``, a manual run and any failure to read the diff all select every leg,
 so uncertainty never skips a check.
 
+One exception narrows the WSL leg: a file whose only edits are version lines,
+as in the release automation's version bump commit, counts as tooling rather
+than package code. The commit before the bump already ran the WSL leg on the
+same code, and the WSL leg is the slowest one, so a bump pushed straight after
+a crossing merge would otherwise hold ``main`` for another full suite. Every
+Ubuntu and macOS leg still runs for it.
+
 The ruleset on ``main`` requires the macOS and WSL check names, so the
 workflow skips those jobs with a job-level condition rather than a trigger
 filter: a skipped job still reports its check, while a workflow that never
@@ -15,6 +22,7 @@ starts leaves the check pending.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +31,7 @@ PYTHON_VERSIONS = ("3.12", "3.13", "3.14")
 WSL = "wsl"
 FULL = "full"
 LIGHT = "light"
+VERSION_LINE = re.compile(r'(__version__|version) = "[^"]*"')
 WSL_PATHS = (
     "agent_parley/",
     "tests/test_wsl.py",
@@ -97,20 +106,27 @@ def category(path: str) -> str | None:
     return None
 
 
-def plan(paths: list[str] | None) -> dict[str, str]:
+def plan(
+    paths: list[str] | None,
+    bumps: frozenset[str] = frozenset(),
+    every: bool = False,
+) -> dict[str, str]:
     """Chooses the Check legs for a set of changed paths.
 
     Args:
         paths: Changed paths, or None when the change could not be read.
+        bumps: Changed paths whose only edits are version lines.
+        every: True for a push or manual run, which runs every leg unless
+            the change is a version bump and nothing else needs WSL.
 
     Returns:
         Workflow outputs: ``pythons``, a JSON list of Ubuntu Python versions,
         and ``macos`` and ``wsl``, each ``true`` or ``false``.
     """
-    found = {category(path) for path in paths or ()}
+    found = {FULL if path in bumps else category(path) for path in paths or ()}
     wide = not paths or None in found
-    full = wide or bool(found & {WSL, FULL})
-    wsl = wide or WSL in found
+    full = every or wide or bool(found & {WSL, FULL})
+    wsl = wide or WSL in found or (every and not bumps)
     versions = PYTHON_VERSIONS if full else PYTHON_VERSIONS[:1]
     return {
         "pythons": json.dumps(list(versions)),
@@ -141,11 +157,46 @@ def changed_paths(base: str) -> list[str] | None:
     return result.stdout.splitlines()
 
 
+def version_only(base: str, path: str) -> bool:
+    """Tells whether a change edits nothing in a file but version lines.
+
+    Args:
+        base: Commit the change is compared against.
+        path: Repository-relative path the change touches.
+
+    Returns:
+        True when every added and removed line of the file is a version
+        assignment, False when any other line changes or Git cannot compare.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "-U0", "--no-color", f"{base}...HEAD", "--", path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    edits = [
+        line[1:].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    return bool(edits) and all(VERSION_LINE.fullmatch(e) for e in edits)
+
+
 def main() -> None:
     """Writes the chosen legs to the step outputs, or prints them."""
     base = os.environ.get("BASE_SHA", "")
     pull = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
-    outputs = plan(changed_paths(base) if pull and base else None)
+    paths = changed_paths(base) if base else None
+    bumps = frozenset(
+        path
+        for path in paths or ()
+        if category(path) == WSL and version_only(base, path)
+    )
+    outputs = plan(paths, bumps, every=not pull)
     lines = "".join(f"{name}={value}\n" for name, value in outputs.items())
     target = os.environ.get("GITHUB_OUTPUT")
     if target:
