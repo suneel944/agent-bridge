@@ -531,15 +531,16 @@ def participant_detail(record: dict, participant: dict) -> dict:
 
     Returns:
         Every field the status reading carries for that lane, with the
-        worktree, the advisory limits and the wake setting the manifest
-        records. No credential value is reported; a profile name is not a
-        credential.
+        worktree, the advisory limits, the wake setting and the last launch
+        timing the manifest records. No credential value is reported; a
+        profile name is not a credential.
     """
     return {
         **record,
         "worktree": participant["lane"],
         "budget_limits": participant.get("budget") or {},
         "wake_enabled": participant.get("wake", True),
+        "launch_timing": participant.get("launch") or {},
     }
 
 

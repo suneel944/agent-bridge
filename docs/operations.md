@@ -1712,7 +1712,7 @@ Every document carries the same envelope:
 | Field | Meaning |
 | --- | --- |
 | `schema` | `agent-parley/read/v1`, the version of this contract. |
-| `kind` | The command reported: `status`, `top`, `metrics`, `version`, `issues`, `issue`, `issue_next`, `issue_match`, `participants`, `participant`, `history`, `mail_thread`, `mail_show`, `mail_search`, `mail_list`, `mail_pending`, `mail_cancel`, `decide`, `decision_list`, `report_show`, `report_review`, `plan`, `plan_diff`, `plan_proposals`, `plan_revision`, `approval`, `verify`, `init`, `branch`, `forge`, `deadlines`, `budget`, `state`, `setup`, `up`, `down`, `run`, `say`, `approve`, `reject`, `problems`, `problems_ack`, `doctor`, `notify`, `gc`, `resources`, `providers`, `provider`, `credentials`, `credentials_show` or `error`. |
+| `kind` | The command reported: `status`, `top`, `metrics`, `version`, `issues`, `issue`, `issue_next`, `issue_match`, `participants`, `participant`, `history`, `mail_thread`, `mail_show`, `mail_search`, `mail_list`, `mail_pending`, `mail_cancel`, `decide`, `decision_list`, `report_show`, `report_review`, `plan`, `plan_diff`, `plan_proposals`, `plan_revision`, `approval`, `verify`, `init`, `pool`, `branch`, `forge`, `deadlines`, `budget`, `state`, `setup`, `up`, `down`, `run`, `say`, `approve`, `reject`, `problems`, `problems_ack`, `doctor`, `notify`, `gc`, `resources`, `providers`, `provider`, `credentials`, `credentials_show` or `error`. |
 | `generated_at` | RFC 3339 UTC instant the snapshot was taken. |
 
 Repeated rows are arrays rather than objects keyed by name, so a reader pages
@@ -1729,7 +1729,13 @@ reports the `issue` asked for, the ledger `revision`, its `record` as the
 the advisory `reservations` its owner holds, and the same `history` document
 `history issue N --json` prints. `participant show --json` reports every field
 a `status` participant carries, plus the `worktree` the lane lives in, the
-advisory `budget_limits` the manifest records and `wake_enabled`.
+advisory `budget_limits` the manifest records, `wake_enabled`, and
+`launch_timing`: the `worktree`, `init` and `start` seconds of the lane's last
+launch, their `total`, and the epoch time `at` the native CLI started, or an
+empty object before the first launch completes. `pool show --json` reports the
+configured `size` and one `spares` row per spare naming its `worktree`,
+`branch`, `base` and `state` (`ready`, `preparing` or `stale`); `status --json`
+carries the same reading as each project's `spares`.
 `mail list --json` reports `limit`, `messages` newest first and `has_more`.
 `approval show --json` reports `root`, the `approval` steps and `required`;
 `branch show --json` reports `root` and `prefix`; `forge show --json` reports

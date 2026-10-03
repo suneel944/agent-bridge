@@ -378,6 +378,7 @@ reported.
             gemini,
             json,
             lanes,
+            launched,
             lock,
             opencode,
             parse_issue,
@@ -391,6 +392,7 @@ reported.
             write_json,
         )
 
+        began = time.monotonic()
         number = parse_issue(issue) if issue else ""
         process.check_repository_host(repo)
         directory = self.project(repo, create=False)[1]
@@ -708,6 +710,11 @@ reported.
                         lanes.STARTING,
                         evidence="launch: session process started",
                     )
+            self.record_launch(
+                directory,
+                agent,
+                launched(participant.get("launch"), time.monotonic() - began),
+            )
             try:
                 with delivery.polling(
                     self.home, lane.parent, agent, entry["adapter"]

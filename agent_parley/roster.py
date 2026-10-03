@@ -69,6 +69,7 @@ RESERVED = frozenset(
 )
 LEGACY_DISPLAY = {"claude": "GreenCastle", "codex": "BlueLake"}
 MAX_PARTICIPANTS = 32
+MAX_POOL = 8
 MAX_VERIFY_ARGUMENTS = 64
 MAX_STANDING_REPLY = 500
 MAX_UNATTENDED_ISSUES = 100
@@ -241,6 +242,26 @@ def integration_base(value: object) -> str:
             "integration/1.0.0, or an empty string to remove it."
         )
     return str(value)
+
+
+def pool_size(value: object) -> int:
+    """Validates the number of spare worktrees a project keeps prepared.
+
+    Args:
+        value: Candidate pool size.
+
+    Returns:
+        The accepted size; zero keeps no spares.
+
+    Raises:
+        BridgeError: If the value is not a whole number from zero to
+            `MAX_POOL`.
+    """
+    if type(value) is not int or not 0 <= value <= MAX_POOL:
+        raise BridgeError(
+            f"The pool size must be a whole number from 0 to {MAX_POOL}."
+        )
+    return value
 
 
 def next_lane_branch(manifest: dict, key: str, taken: set[str]) -> str:
@@ -1116,6 +1137,11 @@ def normalize(manifest: dict) -> dict:
         ),
         "verify": list(manifest.get("verify") or []),
         "initialize": list(manifest.get("initialize") or []),
+        **(
+            {"pool": pool_size(manifest["pool"])}
+            if manifest.get("pool")
+            else {}
+        ),
         "resources": resources(list(manifest.get("resources") or [])),
         "deadlines": deadlines(dict(manifest.get("deadlines") or {})),
         "budget": budget(dict(manifest.get("budget") or {})),

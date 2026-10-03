@@ -1111,6 +1111,7 @@ class StatusMixin(BridgeCore):
             gone is left out; one whose root is missing or whose lanes all
             stopped over `DORMANT_SECONDS` ago reads as dormant.
         """
+        from agent_parley import pool
         from agent_parley.cli import (
             inbound_status,
             issues,
@@ -1157,6 +1158,7 @@ class StatusMixin(BridgeCore):
                         "root_missing": not Path(data["root"]).is_dir(),
                         "dormant": dormant(data["root"], participants),
                         "reclaim": supervision.reclaim_summary(path.parent),
+                        "spares": pool.reading(path.parent, data),
                         "accounting": self._project_accounting(
                             db, data["root"]
                         ),
@@ -1464,6 +1466,7 @@ class StatusMixin(BridgeCore):
             The number of lanes reported, so a caller can gate on a filter
             having matched at least one lane.
         """
+        from agent_parley import pool
         from agent_parley.cli import (
             Selection,
             describe,
@@ -1508,6 +1511,8 @@ class StatusMixin(BridgeCore):
                 print(line)
             if measured := reclaim.summary_line(project.get("reclaim") or {}):
                 print(measured)
+            if spares := pool.summary_line(project.get("spares") or {}):
+                print(spares)
             if accounted := project.get("accounting"):
                 print(f"Lanes: {lanes.describe_account(accounted)}")
             if groups := project.get("ready_groups") or []:

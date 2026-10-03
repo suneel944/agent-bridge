@@ -621,7 +621,8 @@ def lane_summary(start: Path) -> str:
     """Summarizes the lane containing a directory for a native status line.
 
     A lane worktree sits directly under its project's private state
-    directory, named for its participant, so the nearest ancestor whose
+    directory, named for its participant or, when it began as a spare,
+    recorded as that participant's lane, so the nearest ancestor whose
     parent holds a manifest naming it is the lane. A repository checked
     out inside the lane may carry its own unrelated `project.json` files
     (an Nx workspace, for instance), so a manifest that does not name the
@@ -639,12 +640,22 @@ def lane_summary(start: Path) -> str:
         manifest = _read_json(lane.parent / "project.json")
         if manifest is None:
             continue
-        if lane.name not in (manifest.get("participants") or {}):
+        participants = manifest.get("participants") or {}
+        name = next(
+            (
+                key
+                for key, entry in participants.items()
+                if isinstance(entry, dict)
+                and str(entry.get("lane") or "") == str(lane)
+            ),
+            lane.name if lane.name in participants else "",
+        )
+        if not name:
             continue
         return compose_title(
             lane_title(
-                lane.name,
-                _read_json(lane.parent / f"{lane.name}-activity.json"),
+                name,
+                _read_json(lane.parent / f"{name}-activity.json"),
                 _read_json(lane.parent / "issues.json"),
                 False,
             ),
