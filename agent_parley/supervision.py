@@ -92,6 +92,7 @@ TAKES_TURNS = lanes.LIVE | {ACTIVE}
 STARTING = "starting; awaiting native hook"
 NOT_STARTED = "not started; no native hook"
 WORK_WAKE_ATTEMPTS = 3
+DELIVERED_OFFERS = 20
 BLOCKED_ESCALATE_AFTER = 1800.0
 KEY_HOLD_DEADLINE = 900.0
 KEY_HOLDS = "key-holds.json"
@@ -2204,9 +2205,16 @@ def _idle_leads(
     nothing to resume, and a wake that only says continue leaves it idle. The
     next work it could do is read here, in the order the wake names it: peer
     mail that asks for an answer, the top candidate `agent-parley issue next`
-    ranks, and a peer claim with no progress past the stall interval that the
-    lane could request. Each reading is best effort, and none carries an age,
-    so the wake text stays the same until the work itself changes.
+    ranks, and a peer claim with no progress past the claim idle interval
+    that the lane could request. Each reading is best effort, and none
+    carries an age, so the wake text stays the same until the work itself
+    changes.
+
+    The interval is the caller's `claim_idle_after`, never the lane
+    `stalled_after`: ten minutes between progress reports is normal for a
+    backtest or a long CI loop, and naming such a claim offered running work
+    to other lanes. A claim its holder reported blocked, including one held
+    on purpose until an operator decides, is not active and is never named.
 
     Args:
         home: Private bridge state root.
@@ -2214,7 +2222,7 @@ def _idle_leads(
         manifest: Current participant manifest.
         name: Participant the wake is for.
         ledger: Current issue ledger.
-        after: Stall interval a peer claim must pass without progress.
+        after: Claim idle interval a peer claim must pass without progress.
 
     Returns:
         The mail senders with their message identifiers, the top candidate
@@ -2311,8 +2319,8 @@ def _continue_text(
     if stalled := leads.get("stalled"):
         steps.append(
             f"ask for #{stalled['issue']}, held by {stalled['owner']} with "
-            "no progress past the stall interval, with agent-parley issue "
-            f"request {stalled['issue']}"
+            "no progress past the claim idle interval, with agent-parley "
+            f"issue request {stalled['issue']}"
         )
     if steps:
         listed = "; then ".join(steps)
@@ -2696,13 +2704,22 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             ledger,
             after,
             recipients,
-            _idle_leads(home, directory, manifest, name, ledger, after),
+            _idle_leads(
+                home,
+                directory,
+                manifest,
+                name,
+                ledger,
+                config["claim_idle_after"],
+            ),
         )
         with lock(directory / f"{name}-work.lock", timeout=1):
             previous = published_work(directory, name)
             published = {**result, "offer": offer}
             if offer:
                 published["dispatch"] = _work_dispatch(previous, offer)
+            if previous.get("delivered"):
+                published["delivered"] = previous["delivered"]
             path = directory / f"{name}-work.json"
             if _work_changed(previous, published):
                 write_json(path, published)
@@ -6861,6 +6878,13 @@ def _work_backlog(
     escalation. A change to the ledger or to the leads publishes a new
     generation, which is delivered once.
 
+    The identifier is a digest of the offer text, and a lane that answered a
+    waiting-only offer, often by turning its suggestion down, has nothing
+    else to record. Every identifier a wake delivered is therefore kept in
+    the publication's `delivered` list, across new dispatch generations and
+    polls that publish no offer, so the same text is never delivered again;
+    only a change to the text gives the lane a new offer to answer.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -6911,7 +6935,12 @@ def _work_backlog(
             config,
         ),
         _idle_leads(
-            home, directory, manifest, name, ledger, config["stalled_after"]
+            home,
+            directory,
+            manifest,
+            name,
+            ledger,
+            config["claim_idle_after"],
         ),
     )
     if not current or (
@@ -6921,7 +6950,10 @@ def _work_backlog(
         return None
     if (
         current["kind"] == "continue"
-        and dispatch.get("delivered")
+        and (
+            dispatch.get("delivered")
+            or current["id"] in (record.get("delivered") or [])
+        )
         and not lifecycle.actionable(ledger, name)
     ):
         return None
@@ -7025,7 +7057,9 @@ def _write_work_dispatch(
     generation delivered, so `_work_backlog` does not wake the lane again
     with a waiting-only offer it already read. A busy refusal, an
     unavailable socket or manual attention never reached the lane and
-    leave the mark unset.
+    leave the mark unset. A delivered identifier is also appended to the
+    publication's `delivered` list, newest last and bounded by
+    `DELIVERED_OFFERS`, which outlives the dispatch generation.
 
     Args:
         directory: Private project state directory.
@@ -7052,6 +7086,14 @@ def _write_work_dispatch(
         )
         if result == "accepted" or result.startswith("resume requested"):
             dispatch["delivered"] = True
+            delivered = [
+                item
+                for item in current.get("delivered") or []
+                if item != offer.get("id")
+            ]
+            current["delivered"] = [*delivered, offer.get("id")][
+                -DELIVERED_OFFERS:
+            ]
         current["dispatch"] = dispatch
         write_json(path, current)
 
