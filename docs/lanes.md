@@ -52,6 +52,34 @@ an operator shell in the base checkout: it refuses inside an assigned worktree
 and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
 a command every later lane runs. `init show` stays readable from a lane.
 
+Each launch records how long `run` took to reach the native CLI, split into
+worktree creation, `init` and CLI start (registration, the service and the
+native configuration). `participant show` prints it as `Last launch:`, and
+`participant show --json` reports it as `launch_timing`. A resumed lane records
+zero for the worktree and `init`, because it pays for neither.
+
+When `init` is most of that wait, keep prepared spare worktrees:
+
+```sh
+agent-parley pool set 2    # keep two spares ready
+agent-parley pool show     # configured size and each spare's state
+agent-parley pool fill     # prepare missing spares now, in the foreground
+agent-parley pool set 0    # keep none; the next gc removes the rest
+```
+
+A spare is a worktree on its own branch, cut from the project base, with `init`
+already run in it. It lives in the project's private state directory as
+`spare.N`, outside the target repository, and carries no participant, no
+credential profile and no registration. `run` takes a ready spare when one
+exists, renames its branch to the lane branch it would have created under the
+project branch prefix, keeps the spare's worktree path as the lane's path, and
+starts the CLI there; a detached fill then prepares a replacement, logging to
+`pool.log` in the project state directory. A spare cut from an older base,
+prepared by a different `init` command, or moved off its own branch is stale: it
+is never handed out, and the next fill or `gc --apply` removes its worktree and
+branch. `status` counts spares as ready, preparing or stale, and `gc` lists each
+one. Like `init set`, `pool set` runs only from an operator shell.
+
 ### Starting on an issue
 
 ```sh

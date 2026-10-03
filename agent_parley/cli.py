@@ -116,8 +116,11 @@ if TYPE_CHECKING:
         git,
         has_branch,
         initialize_lane,
+        launch_line,
+        preparation,
         verify_base,
     )
+    from agent_parley.worktrees import launched as launched
     from agent_parley.worktrees import preserve_pending as preserve_pending
 
 from agent_parley import BridgeError, refusal
@@ -199,6 +202,9 @@ MOVED_CALLABLES = {
         "git",
         "has_branch",
         "initialize_lane",
+        "launch_line",
+        "launched",
+        "preparation",
         "preserve_pending",
         "verify_base",
     ),
@@ -927,6 +933,8 @@ def lane_detail(record: dict, data: dict) -> None:
         print(
             "    " + drift(agent, data["participants"][agent], record["branch"])
         )
+    if timing := launch_line(data["participants"][agent].get("launch")):
+        print(f"    {timing}")
     if record["idle"]["stalled"]:
         print(f"    {record['idle']['marker']}")
     if record["budget"]["marker"]:
@@ -2560,7 +2568,11 @@ class Bridge(
                     for item in saved
                 )
         if data.get("initialize"):
+            started = time.monotonic()
             initialize_lane(lane, data["initialize"], Path(data["root"]))
+            self.record_launch(
+                directory, name, preparation(0.0, time.monotonic() - started)
+            )
         self._record_operator(
             directory, name, checkpoints.Reason.OPERATOR_RESTARTED, "starting"
         )
@@ -3016,7 +3028,10 @@ class Bridge(
         assessed by `reclaim.strays`, and a worktree no lane made is never
         removed. Git's own removal refuses a dirty or locked worktree, so
         nothing with uncommitted work is lost unless the operator forces
-        it, and a forced removal writes a recovery checkpoint first.
+        it, and a forced removal writes a recovery checkpoint first. The
+        spare worktrees a project pool keeps are assessed by `pool.sweep`
+        in the same pass: a stale spare or one beyond the pool size is
+        removed with its branch, and a usable one is kept.
 
         Args:
             repo: Any checkout of the target repository.
@@ -3030,14 +3045,18 @@ class Bridge(
             One row per worktree, as `reclaim.strays` shapes it, carrying
             whether it was removed when applied and any checkpoint written.
         """
+        from agent_parley import pool
+
         root, directory = self.project(repo, create=False)
-        rows = reclaim.strays(directory, roster.read(directory), sizes=sizes)
+        manifest = roster.read(directory)
+        rows = reclaim.strays(directory, manifest, sizes=sizes)
+        spares = pool.sweep(root, directory, manifest, apply=apply)
         if not apply:
-            return rows
+            return rows + spares
         return [
             reclaim.remove(str(root), directory, row, force=force)
             for row in rows
-        ]
+        ] + spares
 
 
 COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3063,6 +3082,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "unattended",
             "timeout",
             "init",
+            "pool",
             "blueprint",
             "branch",
             "forge",
@@ -5006,6 +5026,33 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     recording.add_argument("--repo", type=Path, default=Path.cwd())
+    pooling = commands.add_parser(
+        "pool",
+        help="Show or set how many prepared spare worktrees new lanes take.",
+    )
+    pools = pooling.add_subparsers(dest="action", required=True)
+    pool_show = pools.add_parser(
+        "show", help="Show the pool size and the condition of each spare."
+    )
+    pool_show.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_show.add_argument("--json", action="store_true", help=JSON_HELP)
+    pool_set = pools.add_parser(
+        "set", help="Set how many spare worktrees to keep prepared."
+    )
+    pool_set.add_argument(
+        "size",
+        type=int,
+        metavar="N",
+        help=(
+            "Spare worktrees kept on fresh branches from the current base "
+            "with init already run; 0 keeps none."
+        ),
+    )
+    pool_set.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_fill = pools.add_parser(
+        "fill", help="Prepare missing spares now and remove stale ones."
+    )
+    pool_fill.add_argument("--repo", type=Path, default=Path.cwd())
     naming = commands.add_parser(
         "branch",
         help="Show or set the prefix new lane branches are created under.",
@@ -6265,6 +6312,22 @@ def main() -> int:
                 )
             else:
                 print(unattended.describe(bridge, repository))
+        elif args.command == "pool":
+            from agent_parley import pool
+
+            repository = args.repo.resolve()
+            if args.action == "fill":
+                print(bridge.fill_pool(repository))
+            elif args.action == "show" and args.json:
+                _, directory = bridge.project(repository, create=False)
+                print(
+                    views.render(
+                        "pool",
+                        pool.reading(directory, roster.read(directory)),
+                    )
+                )
+            else:
+                print(bridge.pool(repository, getattr(args, "size", None)))
         elif args.command in ("verify", "init"):
             repository = args.repo.resolve()
             if getattr(args, "json", False):

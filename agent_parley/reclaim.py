@@ -46,7 +46,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_parley import forge, issues, retirement, store
+from agent_parley import forge, issues, pool, retirement, store
 from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
@@ -801,7 +801,8 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     """Assesses the worktrees lanes made beside their own lane worktrees.
 
     Every worktree the project repository registers is read, except the
-    base checkout and the participants' own lanes. Each is attributed to a
+    base checkout, the participants' own lanes and the recorded spares,
+    which `pool.sweep` assesses by their own rule. Each is attributed to a
     lane by path or branch; one directly inside the project state
     directory, or directly inside a project directory under the state root
     the product used before its rename, belongs to the project even when
@@ -838,9 +839,16 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     participants = manifest["participants"]
     lanes, prefixes = _owner_index(manifest)
     owned = owned_roots(directory)
+    spares = {
+        str(Path(spare["path"]).resolve()) for spare in pool.spares(directory)
+    }
     rows = []
     for entry in entries:
-        if entry["path"] == base or entry["path"] in lanes:
+        if (
+            entry["path"] == base
+            or entry["path"] in lanes
+            or entry["path"] in spares
+        ):
             continue
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)

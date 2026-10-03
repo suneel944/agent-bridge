@@ -103,7 +103,7 @@ on standard output and export to a file.
 | `problems ack ID` | Record your own acknowledgement of one message a lane left unanswered. It clears that condition and nothing else: no ownership moves, no reservation is released and no lane is woken. |
 | `issue ... --idempotency-key KEY` | Retry a transition safely; the repeat returns the first result. `issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`, `unblock` and `request`, and `report`, accept it; `issue recover`, `resolve` and `assign` do not. |
 | `participant list` | List the project's lanes and their identities. |
-| `participant show NAME` | Show one lane: its branch, worktree, provider, account profile, advisory budget, current claims, reported outcome and last coordination. |
+| `participant show NAME` | Show one lane: its branch, worktree, provider, account profile, advisory budget, current claims, reported outcome, last coordination, and how long its last launch took to reach the native CLI, split into worktree, `init` and CLI start. |
 | `participant add NAME` | Create a lane with an optional provider and credential profile. For a `claude` lane with no bridge tool approval recorded it warns that a service resume would stop at an unseen permission prompt and names `agent-parley approval resume --bridge-tools on` as the opt-in. |
 | `participant restore NAME` | Restore the assigned branch while preserving work. |
 | `participant retire NAME` | Retire a lane that is no longer working while preserving recoverable work. Its issue claims return to the pool, its reservations are released and granted to queued peers, and mail it has not read or acknowledged is marked superseded. A lane holding ready work awaiting integration is refused before anything is removed. Lists the ignored files removing its worktree deletes and asks first; `--yes` skips the question. |
@@ -151,6 +151,9 @@ on standard output and export to a file.
 | `unattended run NAME` | Integrate one eligible lane under the policy on `participant merge` terms, recording the decision or the refusal; `--issue N` names the claim when the lane holds several ready ones. Base checkout only. |
 | `init show` | Show the command every new lane runs before it starts. |
 | `init set COMMAND` | Set that command; an empty string removes it. |
+| `pool show` | Show how many prepared spare worktrees the project keeps and each spare's state; `--json` prints it for scripts. |
+| `pool set N` | Keep N spare worktrees, from 0 to 8, cut from the project base with `init` already run, and start a detached fill; `run` takes a ready spare instead of creating a worktree. Base checkout only. |
+| `pool fill` | Prepare the missing spares now and remove stale ones, in the foreground. |
 | `blueprint list` | List the recorded blueprints, each as its node order. |
 | `blueprint show [NAME]` | Show one blueprint node by node with its success and failure edges and retry limit, or list them all. |
 | `blueprint set NAME FILE` | Record or replace a blueprint from a JSON file (see [Running a claim through a blueprint](lanes.md#running-a-claim-through-a-blueprint)). Base checkout only. |
