@@ -1138,6 +1138,11 @@ def normalize(manifest: dict) -> dict:
             if manifest.get("timeouts")
             else {}
         ),
+        **(
+            {"blueprints": dict(manifest["blueprints"])}
+            if manifest.get("blueprints")
+            else {}
+        ),
         "supervision": project,
         "participants": participants,
     }

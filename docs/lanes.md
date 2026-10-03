@@ -338,6 +338,65 @@ records the base as carrying an unverified integration, and holds every further
 merge until `participant merge --verify-recovery` passes or the repairing lane
 retries, with `--renew-recovery` once its attempts are used.
 
+## Running a claim through a blueprint
+
+`init` and `verify` are the same for every task. A blueprint gives one claim an
+ordered list of required steps, so formatting, focused tests or a push happen
+in order instead of whenever the model remembers them. The harness runs the
+deterministic steps itself, with no model call, and hands the lane only the
+steps that need judgment. Blueprints live in coordination state, not in the
+repository:
+
+```json
+{
+  "nodes": [
+    {"name": "format", "kind": "run", "command": "ruff format ."},
+    {"name": "implement", "kind": "agent", "prompt": "Implement the issue."},
+    {"name": "tests", "kind": "run", "command": ["pytest", "-q"],
+     "on_failure": "fix", "retries": 2, "next": "push"},
+    {"name": "fix", "kind": "agent", "prompt": "Fix the failing tests.",
+     "next": "tests"},
+    {"name": "push", "kind": "push"}
+  ]
+}
+```
+
+```sh
+agent-parley blueprint set feature feature.json      # record it
+agent-parley blueprint show feature                  # nodes and edges
+agent-parley blueprint run codex feature --issue 42  # start the claim on it
+agent-parley blueprint advance --issue 42            # after the lane reports
+agent-parley blueprint progress                      # where every run is
+```
+
+Node kinds:
+
+- `run` runs `command`, a string split like `verify set` or a list of
+  arguments, in the lane's worktree as an argument list, never through a
+  shell, within `timeout` seconds (default and ceiling 1800). It keeps the
+  last 40 lines of output. `AGENT_PARLEY_BASE` names the base checkout.
+- `push` runs `git push --set-upstream origin HEAD` the same way.
+- `agent` writes `prompt` into the lane's inbox, with the last failing step's
+  output attached, and waits. The next `blueprint advance` after the lane
+  files a report passes the node on `ready` and fails it on `blocked`.
+- `report` ends the run with `outcome` `done` (the default) or `blocked` and
+  an optional `message`.
+
+A node moves to `next` when it passes, or to the following node when `next`
+is absent; the last node ends the run as done. It moves to `on_failure` when
+it fails, or retries itself when that is absent. Failures count per node, and
+a node that fails more than its `retries` (default 0) ends the run blocked.
+`blueprint progress` shows the current node and the nodes passed.
+
+Only an operator shell in the base checkout sets, starts or advances a
+blueprint; a lane, or any process holding `AGENT_PARLEY_TOKEN`, is refused, so
+a lane cannot plant commands later lanes run. `run` and `push` nodes inherit
+the operator's environment, which is the lane's minus its coordination token,
+and no node can merge: `participant merge` and its `verify` gate stay the only
+way into the base. A run copies its blueprint when it starts, so a later
+`blueprint set` changes only the next run. A claim never started on a
+blueprint behaves exactly as before.
+
 ## Recovering an unverified integration
 
 While the base carries an unverified integration, `problems` shows one
