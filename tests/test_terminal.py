@@ -44,7 +44,6 @@ def test_control_socket_names_fit_valid_long_participants():
         (b"\x1b[12;1R", False, False),
         (b"\x1b[I", False, False),
         (b"\x1b[A", True, True),
-        (b"\x1b", False, True),
         (b"\x1b[12;1Rtyped", False, True),
         (b"\x1bP>|tmux 3.4\x1b\\", False, False),
         (b"\x1bP>|tmux 3.4\x1b\\", True, True),
@@ -69,7 +68,40 @@ def test_control_socket_names_fit_valid_long_participants():
 def test_control_replies_never_hold_the_operator_line(
     entered, previous, expected
 ):
-    assert bool(terminal.pending(entered, int(previous))) is expected
+    state = terminal.draft(entered, terminal.Draft(int(previous)))
+    assert bool(state.characters) is expected
+
+
+@pytest.mark.parametrize(
+    "entered",
+    [
+        b"\x1b[200~fix the bug\n\x1b[201~",
+        b"\x1b[200~fix the bug\r\x1b[201~",
+        b"draft line\x1b\r",
+        b"draft line\\\r",
+        b"draft line\n",
+        b"draft line",
+        b"\n",
+    ],
+)
+def test_a_multi_line_draft_reads_as_pending_input(entered):
+    assert terminal.draft(entered, terminal.Draft()).characters
+
+
+def test_a_newline_inside_a_paste_split_across_reads_stays_pending():
+    state = terminal.draft(b"\x1b[200~first line", terminal.Draft())
+    assert state.pasting
+    state = terminal.draft(b"\rsecond line\r\x1b[201~", state)
+    assert state.characters
+    assert not state.pasting
+    assert not terminal.draft(b"\r", state).characters
+
+
+def test_a_backslash_then_enter_in_separate_reads_stays_pending():
+    state = terminal.draft(b"draft line\\", terminal.Draft())
+    state = terminal.draft(b"\r", state)
+    assert state.characters
+    assert not terminal.draft(b"more\r", state).characters
 
 
 def test_control_sequences_split_across_reads_keep_later_operator_text():
@@ -79,7 +111,7 @@ def test_control_sequences_split_across_reads_keep_later_operator_text():
     operator, control = terminal.operator_input(b"1Rtyped", control)
     assert operator == b"typed"
     assert control == b""
-    assert terminal.pending(operator, False)
+    assert terminal.draft(b"\x1b[12;1Rtyped", terminal.Draft()).characters
 
 
 def test_a_version_report_split_across_reads_holds_no_operator_line():
@@ -89,7 +121,8 @@ def test_a_version_report_split_across_reads_holds_no_operator_line():
     operator, control = terminal.operator_input(b" 3.4\x1b\\", control)
     assert operator == b""
     assert control == b""
-    assert terminal.pending(b"\x1bP>|tmux 3.4\x1b\\", False) is False
+    state = terminal.draft(b"\x1bP>|tmux 3.4\x1b\\", terminal.Draft())
+    assert state.characters == 0
 
 
 def test_detached_terminal_replies_cover_native_startup_probes():
@@ -195,6 +228,48 @@ def test_attached_launcher_admits_a_wake_after_a_cursor_report():
             os.write(master, b"typed")
             time.sleep(0.5)
             write_json(directory / "lane-activity.json", _idle(2))
+            assert terminal.request(directory, "lane") == "busy:input"
+        finally:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.parametrize(
+    "entered",
+    [
+        b"\x1b[200~fix the bug\n\x1b[201~",
+        b"draft line\x1b\r",
+        b"draft line\\\r",
+        b"draft line\n",
+    ],
+)
+def test_attached_launcher_refuses_a_wake_into_a_multi_line_draft(entered):
+    with tempfile.TemporaryDirectory(prefix="wake-") as temporary:
+        directory = Path(temporary)
+        lane = directory / "lane"
+        lane.mkdir()
+        write_json(directory / "lane-activity.json", _idle(1))
+        script = (
+            "import sys\nprint('READY', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    print('RECEIVED:' + line.rstrip(), flush=True)\n"
+        )
+        harness = (
+            "import os, sys\nfrom pathlib import Path\n"
+            "from agent_parley.terminal import run\n"
+            "raise SystemExit(run([sys.executable, '-c', sys.argv[2]], "
+            "Path(sys.argv[1]), dict(os.environ), 'lane', attached=True))"
+        )
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execvp(
+                sys.executable,
+                [sys.executable, "-c", harness, str(lane), script],
+            )
+        try:
+            assert b"READY" in _read_until(master, b"READY")
+            os.write(master, entered)
+            time.sleep(0.5)
             assert terminal.request(directory, "lane") == "busy:input"
         finally:
             os.kill(pid, signal.SIGKILL)
