@@ -2110,8 +2110,20 @@ one supervisor message, and so a wake, when the checks finish green or red on
 a head commit not yet reported, when a review is submitted, or when the merge
 state moves between mergeable and conflicting. The message names the pull
 request, the full head SHA and the new state; a red run lists every failing
-check by name. The verdict waits until every check finished, so a run is
-reported once rather than job by job. A pull request first seen with finished
+check by name. A message reporting a new review also quotes each new review's
+body and up to 20 inline comments (`MAX_REVIEW_COMMENTS`) as path, line and
+text, newest review first, read with `gh api repos/OWNER/NAME/pulls/N/reviews`
+and `.../comments`. A message reporting failed checks quotes the tail of the
+failed-step log, `gh run view RUN --job JOB --log-failed`, of each check that
+ran and failed; a cancelled, timed-out or never-started check has none. The
+quoted text is marked untrusted, prefixed `> ` line by line, stripped of
+terminal escapes and control characters, and held to one 3000-byte budget
+(`PULL_REQUEST_FEEDBACK_BYTES`) that never takes the message past its
+4096-byte limit; room for every cut note is reserved first, and a cut section
+is followed by the `gh` command that returns it whole. A log keeps its tail, a
+review its head. Only what the message reports as new is read, so a review or
+log already delivered is never sent again. The verdict waits until every check
+finished, so a run is reported once rather than job by job. A pull request first seen with finished
 checks or reviews is reported once too. Nothing is merged, rerun or answered
 for the lane. Only the GitHub forge is read; `beads` and `null` read nothing,
 and a forge that is missing, offline or unreadable keeps the last reading and

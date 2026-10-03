@@ -712,6 +712,85 @@ def rerun_job(repo: Path, run: str, job: str) -> tuple[str, bool]:
     return shown, _run(command, 15) is not None
 
 
+def review_feedback(repo: Path, number: int) -> tuple[str, list[dict] | None]:
+    """Reads the bodies and inline comments of a pull request's reviews.
+
+    Two bounded requests read at most one page each of the reviews and of
+    the inline review comments, through the operator's own `gh`
+    authentication. The text is the reviewers' own and is returned as data;
+    the caller decides how much of it to quote. Only the GitHub forge has
+    pull request reviews.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Pull request number.
+
+    Returns:
+        The exact commands that return the same reviews and comments, and
+        one entry per review with its author, state, submission time, body
+        and inline comments, each comment as path, line and body. None in
+        place of the reviews when the forge is unavailable or the response
+        cannot be read.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    base = f"repos/{project or 'OWNER/NAME'}/pulls/{number}"
+    shown = f"gh api {base}/reviews; gh api {base}/comments"
+    if not project:
+        return shown, None
+    reviews = _run(["gh", "api", f"{base}/reviews?per_page=100"], 15)
+    comments = _run(["gh", "api", f"{base}/comments?per_page=100"], 15)
+    try:
+        records = json.loads(reviews or "null")
+        notes = json.loads(comments or "null")
+        if not isinstance(records, list) or not isinstance(notes, list):
+            return shown, None
+        inline: dict[int, list[dict]] = {}
+        for note in notes:
+            owner = int(note.get("pull_request_review_id") or 0)
+            inline.setdefault(owner, []).append(
+                {
+                    "path": str(note.get("path") or ""),
+                    "line": note.get("line") or note.get("original_line"),
+                    "body": str(note.get("body") or ""),
+                }
+            )
+        return shown, [
+            {
+                "author": str((record.get("user") or {}).get("login") or ""),
+                "state": str(record.get("state") or ""),
+                "at": str(record.get("submitted_at") or ""),
+                "body": str(record.get("body") or ""),
+                "comments": inline.get(int(record.get("id") or 0), []),
+            }
+            for record in records
+        ]
+    except (ValueError, TypeError, AttributeError):
+        return shown, None
+
+
+def failed_log(repo: Path, run: str, job: str) -> tuple[str, str | None]:
+    """Reads the log of one Actions job's failed steps.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        run: Actions run identifier.
+        job: Actions job identifier within that run.
+
+    Returns:
+        The exact command that returns the same log, and the log text, or
+        None in its place when the identifiers are not numeric, no GitHub
+        project is reachable or the forge returns nothing.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    command = ["gh", "run", "view", run, "--job", job, "--log-failed"]
+    if project:
+        command += ["--repo", project]
+    shown = " ".join(command)
+    if not (project and run.isdigit() and job.isdigit()):
+        return shown, None
+    return shown, _run(command, 30) or None
+
+
 JOB_TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*(\d+)\s*$", re.MULTILINE)
 
 
@@ -811,6 +890,90 @@ def _beads_title(number: str) -> str | None:
     if not _beads_reachable():
         return None
     return _title_of(_run(["bd", "show", number, "--json"], 15))
+
+
+MAX_LINKED = 5
+MENTION = re.compile(r"(?<![\w/&])#(\d+)\b")
+
+
+def issue_details(repo: Path, number: str) -> dict | None:
+    """Reads one issue's text for a launch to quote, when a forge answers.
+
+    The read is best effort and read only, like `issue_title`: a missing
+    client, a refusal or unusable output reports absence. On GitHub it
+    returns the title, body and comments from one `gh issue view`, plus the
+    titles of up to `MAX_LINKED` issues the body mentions by number; on
+    Beads only the title. Callers bound the text before using it.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        A dict with ``title``, ``body``, ``comments`` (dicts with ``author``
+        and ``body``, oldest first), ``linked`` (number to title) and
+        ``command``, the client command that prints the full issue, or None
+        when no forge returns a usable reading.
+    """
+    chosen = _implementation(repo)
+    if chosen == "beads":
+        title = _beads_title(number)
+        command = f"bd show {number}"
+        return (
+            None
+            if title is None
+            else {
+                "title": title,
+                "body": "",
+                "comments": [],
+                "linked": {},
+                "command": command,
+            }
+        )
+    project = _reachable(repo) if chosen == "github" else None
+    if project is None or not number.isdigit():
+        return None
+    output = _run(
+        [
+            "gh",
+            "issue",
+            "view",
+            number,
+            "--repo",
+            project,
+            "--json",
+            "title,body,comments",
+        ],
+        15,
+    )
+    try:
+        record = json.loads(output or "")
+        title, body = record["title"], record.get("body") or ""
+        comments = [
+            {
+                "author": str((entry.get("author") or {}).get("login") or ""),
+                "body": str(entry.get("body") or ""),
+            }
+            for entry in record.get("comments") or []
+        ]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(title, str) or not isinstance(body, str):
+        return None
+    linked: dict[str, str] = {}
+    for mention in MENTION.findall(body):
+        if mention == number or mention in linked:
+            continue
+        if len(linked) == MAX_LINKED:
+            break
+        linked[mention] = issue_title(repo, mention) or ""
+    return {
+        "title": title[:MAX_TITLE],
+        "body": body,
+        "comments": comments,
+        "linked": linked,
+        "command": f"gh issue view {number} --repo {project} --comments",
+    }
 
 
 def issue_pull_request_paths(repo: Path, number: str) -> list[str]:

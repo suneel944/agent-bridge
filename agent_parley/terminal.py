@@ -17,6 +17,7 @@ import termios
 import time
 import tty
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_parley import dialogs
 from agent_parley.state import BridgeError, lock
@@ -30,10 +31,14 @@ ANSWERING = re.compile(rb"[\r\n0-9]")
 DETACHED_ROWS = 24
 DETACHED_COLUMNS = 80
 STRING_SEQUENCES = frozenset({ord("]"), ord("P"), ord("X"), ord("^"), ord("_")})
+PASTE_START = b"\x1b[200~"
+PASTE_END = b"\x1b[201~"
+PASTE_MARKER = re.compile(rb"(\x1b\[20[01]~)")
 LOG_LIMIT = 1 << 20
 TITLE_LIMIT = 96
 TITLE_CARRY = 4096
 EXEC_FAILED = 127
+SOCKET_GRACE = 60
 DRAIN_READS = 64
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 TITLE_SAVE = b"\x1b[22;0t"
@@ -174,7 +179,10 @@ def sweep_sockets(home: Path) -> list[str]:
     the kernel answers for a path no process listens on. A listening
     launcher accepts the probe, reads an empty request and answers it as
     unavailable, so probing wakes nobody; any other failure leaves the file
-    in place.
+    in place. A launcher binds its socket before it listens, and a socket in
+    that gap refuses connections too, so a refused socket younger than
+    SOCKET_GRACE seconds is kept; a crashed launcher's file is left for a
+    later sweep instead of racing a live launcher's startup.
 
     Args:
         home: Private bridge state root holding the wake sockets.
@@ -189,6 +197,12 @@ def sweep_sockets(home: Path) -> list[str]:
             try:
                 probe.connect(str(path))
             except ConnectionRefusedError:
+                try:
+                    age = time.time() - path.stat().st_mtime
+                except OSError:
+                    continue
+                if age < SOCKET_GRACE:
+                    continue
                 path.unlink(missing_ok=True)
                 removed.append(path.name)
             except OSError:
@@ -289,38 +303,72 @@ def operator_input(entered: bytes, control: bytes = b"") -> tuple[bytes, bytes]:
     return bytes(operator), b""
 
 
-def pending(entered: bytes, previous: int) -> int:
-    """Counts the characters the operator holds in a partially entered line.
+class Draft(NamedTuple):
+    """Describes the operator's unsubmitted composer draft.
+
+    Attributes:
+        characters: Characters typed without submitting them; zero means no
+            pending draft.
+        pasting: Whether a bracketed paste is still open.
+        escaped: Whether the last operator byte was ESC or a backslash, so a
+            following carriage return inserts a newline instead of
+            submitting.
+    """
+
+    characters: int = 0
+    pasting: bool = False
+    escaped: bool = False
+
+
+def draft(entered: bytes, previous: Draft) -> Draft:
+    """Follows the operator's partially entered composer draft.
 
     Terminal control traffic shares the operator's input descriptor. Complete
     recognized control sequences are removed, but bytes after them and unknown
-    escape-prefixed input are still inspected. Line submission, interruption
-    and line clearing reset the count in byte order, so later text in the same
-    read can establish a new pending line. Backspace and delete erase one
-    character, so a line typed and then erased reads as empty. Other control
-    bytes and UTF-8 continuation bytes add no character; a control byte that
-    edits the line in a way the count cannot follow leaves it pending.
+    escape-prefixed input are still inspected. Only a bare carriage return
+    submits: native composers insert a newline into the draft for line feed
+    (Ctrl-J), ESC followed by carriage return (Option- or Alt-Enter), a
+    backslash followed by carriage return, and any line break inside a
+    bracketed paste, so those count as draft characters. Submission,
+    interruption and line clearing reset the count in byte order, so later
+    text in the same read can establish a new draft. Backspace and delete
+    erase one character, so a line typed and then erased reads as empty.
+    Other control bytes and UTF-8 continuation bytes add no character; a
+    control byte that edits the line in a way the count cannot follow leaves
+    it pending. An incomplete control suffix is left to the caller, which
+    carries it into the next read.
 
     Args:
-        entered: Bytes read from the operator's terminal in one call.
-        previous: Characters pending before this read.
+        entered: Raw bytes read from the operator's terminal, prefixed by any
+            control suffix carried from the previous read.
+        previous: Draft state before this read.
 
     Returns:
-        The characters typed without submitting them; zero means no pending
-        line. An incomplete recognized control prefix counts as pending.
+        The draft state after this read.
     """
-    entered, control = operator_input(entered)
-    result = previous
-    for value in entered:
-        if value in (0x03, 0x0A, 0x0D, 0x15):
-            result = 0
-        elif value in ERASE:
-            result = max(0, result - 1)
-        elif value == 0x09 or (value >= 0x20 and not 0x80 <= value <= 0xBF):
-            result += 1
-    if control:
-        return max(result, 1)
-    return result
+    characters, pasting, escaped = previous
+    for part in PASTE_MARKER.split(entered):
+        if part in (PASTE_START, PASTE_END):
+            pasting = part == PASTE_START
+            escaped = False
+            continue
+        for value in operator_input(part)[0]:
+            printable = value == 0x09 or (
+                value >= 0x20 and not 0x80 <= value <= 0xBF
+            )
+            if pasting:
+                if printable or value in (0x0A, 0x0D):
+                    characters += 1
+            elif value == 0x0D and not escaped:
+                characters = 0
+            elif value in (0x03, 0x15):
+                characters = 0
+            elif value in ERASE:
+                characters = max(0, characters - 1)
+            elif printable or value in (0x0A, 0x0D):
+                characters += 1
+            escaped = not pasting and value in (0x1B, 0x5C)
+    return Draft(characters, pasting, escaped)
 
 
 def detached_terminal_replies(
@@ -865,7 +913,7 @@ def _session(
     signal.signal(signal.SIGWINCH, resize)
     if attached:
         resize()
-    pending_input = 0
+    pending_input = Draft()
     pending_control = b""
     control_at = 0.0
     detached_control = b""
@@ -936,11 +984,12 @@ def _session(
                 entered = os.read(0, 4096)
                 if not entered:
                     break
+                carried = pending_control
                 operator, pending_control = operator_input(
                     entered, pending_control
                 )
                 control_at = time.monotonic()
-                pending_input = pending(operator, pending_input)
+                pending_input = draft(carried + entered, pending_input)
                 os.write(master, entered)
                 if watch.holding and ANSWERING.search(operator):
                     watch.answered()
@@ -968,7 +1017,7 @@ def _session(
             answer = watch.advance(
                 screen,
                 time.monotonic(),
-                bool(pending_input or pending_control),
+                bool(pending_input.characters or pending_control),
             )
             if answer:
                 with contextlib.suppress(OSError):
@@ -999,7 +1048,7 @@ def _session(
                             time.monotonic() - output_at if output_at else None,
                         ):
                             result = "busy:turn"
-                        elif pending_input or pending_control:
+                        elif pending_input.characters or pending_control:
                             result = "busy:input"
                         elif checkpoint != wake_checkpoint:
                             accepted = True
@@ -1042,6 +1091,7 @@ def _session(
                     forward(output)
                 break
     finally:
+        watch.close()
         if titling:
             _relay(TITLE_RESTORE, False)
         if saved is not None:

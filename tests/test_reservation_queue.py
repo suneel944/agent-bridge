@@ -503,6 +503,68 @@ def test_a_checkpoint_releases_a_lease_whose_claim_is_closed(
     assert "a claim you no longer hold" in told["body_md"]
 
 
+def claim_two(bridge, paired):
+    """Has claude claim issues 7 and 8 and returns both claim identifiers."""
+    lane = Path(paired["lanes"]["claude"])
+    seven = bridge.issue(lane, "claim", "7")["claim_id"]
+    eight = bridge.issue(lane, "claim", "8")["claim_id"]
+    assert seven and eight and seven != eight
+    return seven, eight
+
+
+def test_a_lease_under_an_older_still_held_claim_is_renewed(
+    bridge, repo, paired
+):
+    holder = actor(bridge, paired["root"], "claude")
+    peer = actor(bridge, paired["root"], "codex")
+    seven, _ = claim_two(bridge, paired)
+    reserve(bridge, holder, "src/engine.py", ttl_seconds=3600)
+    with store.connect(bridge.home, write=True) as db:
+        db.execute(
+            "UPDATE file_reservations SET claim_id=? WHERE agent_id=?",
+            (seven, holder["id"]),
+        )
+    request(bridge, peer, "src/engine.py")
+    expire(bridge, holder, 60)
+    hook(bridge, paired, "claude")
+    assert held(bridge, holder) == {"leases": 1, "expired": 0}
+    assert store.active_reservations(bridge.home, paired["root"]) == {
+        "claude": ["src/engine.py"]
+    }
+
+
+def test_a_handoff_of_one_claim_keeps_a_reservation_made_under_two(
+    bridge, repo, paired
+):
+    holder = actor(bridge, paired["root"], "claude")
+    actor(bridge, paired["root"], "codex")
+    _, eight = claim_two(bridge, paired)
+    reserve(bridge, holder, "src/seven.py")
+    moved = store.transfer_claim_reservations(
+        bridge.home, paired["root"], "claude", "codex", eight, "next"
+    )
+    assert moved == []
+    assert store.active_reservations(bridge.home, paired["root"]) == {
+        "claude": ["src/seven.py"]
+    }
+
+
+def test_an_unreadable_ledger_renews_a_claimed_lease_instead_of_dropping(
+    bridge, repo, paired
+):
+    holder = actor(bridge, paired["root"], "claude")
+    reserve(bridge, holder, "src/engine.py", ttl_seconds=3600)
+    expire(bridge, holder, 60)
+    with store.connect(bridge.home, write=True) as db:
+        db.execute(
+            "UPDATE file_reservations SET claim_id='issue-7' WHERE agent_id=?",
+            (holder["id"],),
+        )
+    (bridge.project(repo)[1] / "issues.json").write_text("{not json")
+    store.renew_reservations(bridge.home, paired["root"], "claude")
+    assert held(bridge, holder) == {"leases": 1, "expired": 0}
+
+
 def test_status_lists_an_expired_lease_apart_from_the_live_ones(
     bridge, repo, paired, capsys
 ):

@@ -204,7 +204,8 @@ native CLI. Prompt it as you always do. Another account or provider is one more
 terminal. Each tab title names its lane, state and progress, such as
 `[codex] idle with claim #412 - 2/5 done`; the supervision key `titles` turns
 this off, and `agent-parley title` prints the same line for a Claude Code
-status line.
+status line. `agent-parley run codex --issue 412` claims issue 412 for the lane
+and opens it with the issue's text already read from the forge.
 
 Then watch the work, and steer a lane without taking over its terminal:
 

@@ -151,6 +151,8 @@ integration, on every repository and with no flag that skips it.
 
 Record outcomes with `agent-parley report --state partial|blocked|ready --summary
 "result"`. Partial/blocked requires `--remaining`; ready requires `--evidence`.
+When the operator tells you to hold a claim until a decision, report it blocked
+with that order as `--remaining`, so no idle peer is pointed at it as stalled.
 `issue claim`, `release`, `offer`, `accept`, `decline`, `cancel`, `block`,
 `unblock` and `request`, and `report`, accept `--idempotency-key KEY`; a script
 that retries with the key it first used records one attempt, not two.

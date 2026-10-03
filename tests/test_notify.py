@@ -382,14 +382,17 @@ def test_an_idle_lane_past_the_grace_period_notifies_once(
         )
         == []
     )
+    notify.drain()
+    assert len(fake) == 1
+    assert "A lane is idle with no claim" in fake[0][0]
+    assert "idle 900s with no claim" in fake[0][1]
     write_json(directory / "codex-activity.json", {"updated": 2000.0})
     assert supervision.announce_idle(
         directory, manifest, ["codex"], {"codex": 900}, 600
     ) == ["codex"]
     notify.drain()
     assert len(fake) == 2
-    assert "A lane is idle with no claim" in fake[0][0]
-    assert "idle 900s with no claim" in fake[0][1]
+    assert "A lane is idle with no claim" in fake[1][0]
 
 
 def test_a_broken_transport_leaves_the_sweep_running(tmp_path, monkeypatch):

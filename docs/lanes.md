@@ -52,6 +52,32 @@ an operator shell in the base checkout: it refuses inside an assigned worktree
 and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
 a command every later lane runs. `init show` stays readable from a lane.
 
+### Starting on an issue
+
+```sh
+agent-parley run claude --issue 42
+```
+
+`--issue N` claims issue N for the lane before its native CLI starts, through
+the same claim `issue claim` makes, so an issue another lane owns refuses the
+launch and the project's claim cap still applies. The launcher then reads the
+issue through the configured forge (`gh` on GitHub, `bd` under Beads) and opens
+the session with a digest instead of `--task`: the issue number, the project's
+`verify` command, the expected outcome (a pull request when
+`pull_request.self_service` is on, otherwise a ready report), and the issue's
+title, body, three newest comments and the titles of up to five issues its body
+mentions by number.
+
+The quoted issue text is held to 6000 bytes. The title and linked titles are
+kept whole, each comment is cut to 600 bytes and the body gets the rest. Anything
+cut or left out is named with the command that prints the full issue, such as
+`gh issue view 42 --repo OWNER/NAME --comments`. The text sits between fixed
+markers and is labelled untrusted input that describes the work; it is not an
+instruction to the lane or the launcher. A forge that is absent, offline or
+refusing never blocks the launch: the claim stays, and the lane starts with the
+issue number and a note that hydration failed, so it reads the issue itself.
+Native authentication and permissions are unchanged.
+
 ## Steering a lane
 
 Steer one lane without taking over its terminal:

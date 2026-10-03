@@ -437,7 +437,15 @@ Two readings wake a lane before they could ever reach this list. A lane
 waiting on its own pull request is sent one supervisor message, and so a wake,
 when that pull request's checks finish, a review lands or its merge state
 changes, and once more when its head stays pending past the checks ceiling,
-which also lists it here as `checks stalled`. A red run lists here as `checks
+which also lists it here as `checks stalled`. A message reporting a new review
+quotes each new review's body and up to 20 inline comments as file, line and
+text, newest review first; one reporting failed checks quotes the tail of the
+failed-step log of each check that ran and failed. That quoted forge text is
+marked untrusted, prefixed with `> ` line by line, stripped of terminal escapes
+and held to one 3000-byte budget, never past the 4096-byte message limit; a cut
+section is followed by the `gh` command that returns it whole. Only what the
+message reports as new is quoted, so a review or log is never sent twice. A red
+run lists here as `checks
 failed`, naming the attempt; a required check the forge never started is
 different, since only you can act on it, so every pull request sharing that
 cause is grouped into one `checks refused` row and one decision instead of a

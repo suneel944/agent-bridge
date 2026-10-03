@@ -1179,6 +1179,15 @@ class Watch:
         self.answered()
         return pressed
 
+    def close(self) -> None:
+        """Retires the open decision when the launcher stops relaying.
+
+        Once the launcher exits, no screen is left to press an answer on, so
+        a later answer is refused instead of being recorded and never
+        carried out.
+        """
+        self._retire()
+
     def _retire(self) -> None:
         """Marks the decision for a screen that is gone as stale.
 
