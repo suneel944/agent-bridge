@@ -5884,6 +5884,22 @@ def pull_request_wakes(
     )
 
 
+def blueprint_runs(home: Path, directory: Path, manifest: dict) -> None:
+    """Moves the project's blueprint runs on, as `blueprints.supervise` does.
+
+    Each run moves on a daemon thread, so a slow node never holds the poll.
+    A ``wait-ci`` node reads the newest pull request record the poll kept.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    from agent_parley import blueprints
+
+    blueprints.supervise(home, directory, manifest)
+
+
 def _past_the_window(
     manifest: dict, ledger: dict, before: dict, readings: list[dict]
 ) -> tuple[list[dict], dict[str, dict]]:
@@ -7108,6 +7124,7 @@ def _poll(home: Path, directory: Path) -> None:
             config["takeover_grace"],
             manifest.get("deadlines") or {},
         )
+    stage("blueprints", blueprint_runs, home, directory, manifest)
     stage(
         "convergence",
         convergence.supervise,

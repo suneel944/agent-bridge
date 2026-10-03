@@ -537,7 +537,31 @@ def _row(
         "prompt": str(
             state.get("last_prompt") or state.get("task", "")
         ).replace("\n", " ")[:MAX_PROMPT],
+        **_blueprint(directory, agent, owned),
     }
+
+
+def _blueprint(directory: Path, agent: str, owned: list) -> dict:
+    """Reads the blueprint runs on a lane's open claims, if any.
+
+    Args:
+        directory: Private state directory for the common repository.
+        agent: Participant that owns the lane.
+        owned: Issue numbers the lane holds.
+
+    Returns:
+        A ``blueprint`` entry naming each run's node and nodes passed, or
+        nothing for a lane without a run, so its row is unchanged.
+    """
+    from agent_parley import blueprints
+
+    runs = blueprints.for_lane(directory, agent)
+    shown = [
+        blueprints.line(str(number), runs[str(number)])
+        for number in owned
+        if str(number) in runs
+    ]
+    return {"blueprint": "; ".join(shown)} if shown else {}
 
 
 def _orphan_remedies(rows: list[dict], root: str) -> None:
@@ -846,8 +870,9 @@ def notes(row: dict) -> list[str]:
 
     Returns:
         The branch drift, rejected call, stall, operator edit, base
-        advance, orphan, budget, fitness, work offer, failed review and
-        escalated dispatch markers the lane holds, in that order. The note
+        advance, orphan, budget, fitness, work offer, failed review,
+        escalated dispatch and blueprint run markers the lane holds, in
+        that order. The note
         row already names the lane, so a fitness reason drops its own copy
         of the name. Drift, rejected calls, offers and failed reviews are
         noted because their columns can be dropped or left out of the
@@ -877,6 +902,7 @@ def notes(row: dict) -> list[str]:
     ]
     if row["work_dispatch"].get("state") == "escalated":
         found.append(row["work_dispatch"]["last_result"])
+    found.append(row.get("blueprint", ""))
     return [str(note) for note in found if note]
 
 

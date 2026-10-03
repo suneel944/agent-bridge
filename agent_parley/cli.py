@@ -982,6 +982,8 @@ def lane_detail(record: dict, data: dict) -> None:
                     else ""
                 )
             )
+        if claim.get("blueprint"):
+            print(f"    Blueprint {claim['blueprint']}")
     print(f"    Reported outcome: {record['outcome']}")
     approval = record["approval"] or {}
     if approval.get("state", approvals.UNREPORTED) != approvals.UNREPORTED:
@@ -2608,15 +2610,37 @@ class Bridge(
         """
         directory, data, participant = self._lane(repo, name)
         if self._self_opened(repo, data, participant):
-            with lock(
-                directory / f"{name}-integration.lock",
-                f"{name} is already opening its own pull request.",
-            ):
-                return self._pull_request(
-                    repo, name, self._authorize(directory, data, name)
-                )
+            return self.self_service_pull_request(repo, name)
         with lock(directory / f"{name}.session.lock"):
             return self._pull_request(repo, name)
+
+    def self_service_pull_request(self, repo: Path, name: str) -> str:
+        """Opens or updates a lane's pull request under its self-service policy.
+
+        The lane's own `pull-request` command and a blueprint's
+        ``pull-request`` node both come here, so either one is admitted only
+        while every condition of `_authorize` holds and only one attempt per
+        lane runs at a time.
+
+        Args:
+            repo: Any checkout of the target repository.
+            name: Participant whose committed work is reviewed.
+
+        Returns:
+            The pushed branch and opened or refreshed pull request.
+
+        Raises:
+            BridgeError: If a condition of the policy does not hold, another
+                attempt is in flight, or integration is refused.
+        """
+        directory, data, _ = self._lane(repo, name)
+        with lock(
+            directory / f"{name}-integration.lock",
+            f"{name} is already opening its own pull request.",
+        ):
+            return self._pull_request(
+                repo, name, self._authorize(directory, data, name)
+            )
 
     def _self_opened(self, repo: Path, data: dict, participant: dict) -> bool:
         """Reports whether a lane is opening the pull request for its own work.
@@ -4077,6 +4101,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "it fetched from the forge; replaces --task."
         ),
     )
+    run.add_argument(
+        "--blueprint",
+        default="",
+        help=(
+            "Run the --issue claim through this recorded blueprint; without "
+            "it, a default mapped to one of the issue's labels applies. "
+            "Base checkout only."
+        ),
+    )
     run.add_argument("--json", action="store_true", help=JSON_HELP)
     report = commands.add_parser(
         "report",
@@ -4993,6 +5026,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "progress", help="Show each run's current node and nodes passed."
     )
     blueprint_progress.add_argument("--issue")
+    blueprint_default = blueprint_actions.add_parser(
+        "default",
+        help="Map an issue label to the blueprint run --issue starts; omit "
+        "BLUEPRINT to clear it. Base checkout only.",
+    )
+    blueprint_default.add_argument("label", metavar="LABEL")
+    blueprint_default.add_argument("blueprint", nargs="?", metavar="BLUEPRINT")
     for blueprint_action in (
         blueprint_list,
         blueprint_show,
@@ -5001,6 +5041,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         blueprint_run,
         blueprint_advance,
         blueprint_progress,
+        blueprint_default,
     ):
         blueprint_action.add_argument("--repo", type=Path, default=Path.cwd())
     preparation = commands.add_parser(
@@ -5644,6 +5685,7 @@ def main() -> int:
                 args.credentials,
                 resume=args.resume,
                 issue=args.issue,
+                blueprint=args.blueprint,
             )
             if args.json:
                 print(
@@ -6289,6 +6331,10 @@ def main() -> int:
                 account = blueprints.advance(bridge, repository, args.issue)
             elif args.action == "progress":
                 account = blueprints.progress(bridge, repository, args.issue)
+            elif args.action == "default":
+                account = blueprints.default(
+                    bridge, repository, args.label, args.blueprint
+                )
             else:
                 account = blueprints.describe(
                     bridge, repository, getattr(args, "name", None)

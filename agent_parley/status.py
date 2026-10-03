@@ -880,6 +880,9 @@ class StatusMixin(BridgeCore):
         budget = budgets.report(
             self.home, directory, data, agent, frame["usage"]
         )
+        from agent_parley import blueprints
+
+        runs = blueprints.for_lane(directory, agent)
         record = {
             "participant": agent,
             "identity": name,
@@ -968,6 +971,11 @@ class StatusMixin(BridgeCore):
                     **issues.unresolved_completion(record),
                     "convergence": convergence.current(
                         accounts, number, record.get("claim_id")
+                    ),
+                    **(
+                        {"blueprint": blueprints.line(number, runs[number])}
+                        if number in runs
+                        else {}
                     ),
                 }
                 for number, record in sorted(
@@ -1395,6 +1403,7 @@ class StatusMixin(BridgeCore):
         work: list[tuple[int, tuple[str, ...]]] = []
         lanes: list[tuple[str, ...]] = []
         notes: list[str] = []
+        runs: list[str] = []
         ended: list[int] = []
         states = {
             record["participant"]: record["lane_state"]
@@ -1414,6 +1423,8 @@ class StatusMixin(BridgeCore):
                 else:
                     live += 1
                     notes.extend(attention(claim, owner, project["root"], peer))
+                    if claim.get("blueprint"):
+                        runs.append(f"Blueprint {claim['blueprint']}")
                 if every_claim or not closed:
                     shown = {
                         **claim,
@@ -1438,6 +1449,8 @@ class StatusMixin(BridgeCore):
         for text in tables.work_table(rows, width) or ["No open claims."]:
             print(text)
         for text in tables.lane_table(lanes, width):
+            print(text)
+        for text in runs:
             print(text)
         if outcome := metrics.outcome_line(
             project.get("pull_request_outcomes") or {},
@@ -1554,4 +1567,8 @@ class StatusMixin(BridgeCore):
             ]
             for row in tables.status_table(rows, width):
                 print(row)
+            for record in reported:
+                for claim in record["claims"]:
+                    if claim.get("blueprint"):
+                        print(f"Blueprint {claim['blueprint']}")
         return matched

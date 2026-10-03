@@ -403,7 +403,16 @@ agent-parley blueprint show feature                  # nodes and edges
 agent-parley blueprint run codex feature --issue 42  # start the claim on it
 agent-parley blueprint advance --issue 42            # after the lane reports
 agent-parley blueprint progress                      # where every run is
+agent-parley run codex --issue 42 --blueprint feature  # claim, launch, start
+agent-parley blueprint default bug bugfix            # label bug runs bugfix
 ```
+
+`run NAME --issue N --blueprint B` claims the issue, starts the run on the
+claim, then launches the lane. Without `--blueprint`, an issue whose label
+`blueprint default` maps starts that blueprint; labels mapping to two
+blueprints are refused until `--blueprint` names one. A label default is
+removed with `blueprint default LABEL`, and a blueprint a label still names
+cannot be removed.
 
 Node kinds:
 
@@ -415,6 +424,17 @@ Node kinds:
 - `agent` writes `prompt` into the lane's inbox, with the last failing step's
   output attached, and waits. The next `blueprint advance` after the lane
   files a report passes the node on `ready` and fails it on `blocked`.
+- `pull-request` opens or updates the lane's pull request through the
+  repository's `pull_request.self_service` policy, with every condition of
+  that path: a ready report, the `verify` gate run before the push, the
+  assigned branch and no overlapping peer reservation. It fails while the
+  policy is off.
+- `wait-ci` reads the pull request reading the supervision poll keeps for the
+  lane's branch at its current head commit. It waits while checks are pending,
+  passes on green, and fails on red with the failing checks and the tails of
+  up to three failed-step logs attached for the next `agent` node. A red
+  verdict is judged once per head commit and re-run. When the pull request
+  used its CI rounds (`ci_rounds`), the run ends blocked for the operator.
 - `report` ends the run with `outcome` `done` (the default) or `blocked` and
   an optional `message`.
 
@@ -422,7 +442,12 @@ A node moves to `next` when it passes, or to the following node when `next`
 is absent; the last node ends the run as done. It moves to `on_failure` when
 it fails, or retries itself when that is absent. Failures count per node, and
 a node that fails more than its `retries` (default 0) ends the run blocked.
-`blueprint progress` shows the current node and the nodes passed.
+`blueprint progress`, `status`, `top` and `watch` show the current node and
+the nodes passed; a claim without a run shows nothing new.
+
+`supervise` advances runs itself: each poll moves a run whose agent node has a
+new report, or that waits on CI, on a background thread, so a slow node never
+holds the poll. `blueprint advance` stays available to move a run at once.
 
 Only an operator shell in the base checkout sets, starts or advances a
 blueprint; a lane, or any process holding `AGENT_PARLEY_TOKEN`, is refused, so

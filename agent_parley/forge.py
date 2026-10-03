@@ -1032,6 +1032,30 @@ def issue_details(repo: Path, number: str) -> dict | None:
     }
 
 
+def issue_labels(repo: Path, number: str) -> list[str] | None:
+    """Reads the label names one GitHub issue carries, best effort.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        The sorted label names, or None when no GitHub project answers.
+    """
+    project = _reachable(repo) if _implementation(repo) == "github" else None
+    if project is None or not number.isdigit():
+        return None
+    output = _run(
+        ["gh", "issue", "view", number, "--repo", project, "--json", "labels"],
+        15,
+    )
+    try:
+        labels = json.loads(output or "")["labels"] or []
+        return sorted({str(label["name"]) for label in labels})
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def issue_pull_request_paths(repo: Path, number: str) -> list[str]:
     """Lists the files the pull requests that closed an issue touched.
 
