@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/suneel944/agent-parley/compare/v0.16.0...v0.17.0) (2026-10-03)
+
+
+### Features
+
+* deliver the 0.17.0 lane autonomy milestone (#975) ([#888](https://github.com/suneel944/agent-parley/issues/888)) ([#894](https://github.com/suneel944/agent-parley/issues/894)) ([#905](https://github.com/suneel944/agent-parley/issues/905)) ([#906](https://github.com/suneel944/agent-parley/issues/906)) ([#907](https://github.com/suneel944/agent-parley/issues/907)) ([#908](https://github.com/suneel944/agent-parley/issues/908)) ([#909](https://github.com/suneel944/agent-parley/issues/909)) ([#910](https://github.com/suneel944/agent-parley/issues/910)) ([#923](https://github.com/suneel944/agent-parley/issues/923)) ([#924](https://github.com/suneel944/agent-parley/issues/924)) ([#925](https://github.com/suneel944/agent-parley/issues/925)) ([#926](https://github.com/suneel944/agent-parley/issues/926)) ([#927](https://github.com/suneel944/agent-parley/issues/927)) ([#928](https://github.com/suneel944/agent-parley/issues/928)) ([#935](https://github.com/suneel944/agent-parley/issues/935)) ([#936](https://github.com/suneel944/agent-parley/issues/936)) ([#937](https://github.com/suneel944/agent-parley/issues/937)) ([#938](https://github.com/suneel944/agent-parley/issues/938)) ([#939](https://github.com/suneel944/agent-parley/issues/939)) ([#940](https://github.com/suneel944/agent-parley/issues/940)) ([#941](https://github.com/suneel944/agent-parley/issues/941)) ([#942](https://github.com/suneel944/agent-parley/issues/942)) ([#964](https://github.com/suneel944/agent-parley/issues/964)) ([#968](https://github.com/suneel944/agent-parley/issues/968)) ([#969](https://github.com/suneel944/agent-parley/issues/969)) ([#973](https://github.com/suneel944/agent-parley/issues/973))
+
 ## [0.16.0](https://github.com/suneel944/agent-parley/compare/v0.15.2...v0.16.0) (2026-10-02)
 
 
