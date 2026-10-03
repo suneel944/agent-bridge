@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS messages (
  created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, dedup_key TEXT,
  ack_deadline_ts TEXT, claim_id TEXT, decision INTEGER NOT NULL DEFAULT 0,
  topic TEXT NOT NULL DEFAULT '', feed INTEGER NOT NULL DEFAULT 0,
- UNIQUE(sender_id,dedup_key));
+ ack_retired_ts TEXT, UNIQUE(sender_id,dedup_key));
 CREATE INDEX IF NOT EXISTS threads ON messages(project_id,thread_id,id);
 CREATE TABLE IF NOT EXISTS message_recipients (
  message_id INTEGER NOT NULL REFERENCES messages(id),
@@ -398,6 +398,7 @@ def initialize(home: Path) -> None:
             with db:
                 db.execute("BEGIN IMMEDIATE")
                 _add_ack_deadline(db)
+                _add_ack_retirement(db)
                 _add_decision_flag(db)
                 _add_reservation_created(db)
                 _rebuild_reservations(db)
@@ -433,6 +434,22 @@ def _add_ack_deadline(db: sqlite3.Connection) -> None:
     columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
     if "ack_deadline_ts" not in columns:
         db.execute("ALTER TABLE messages ADD COLUMN ack_deadline_ts TEXT")
+
+
+def _add_ack_retirement(db: sqlite3.Connection) -> None:
+    """Adds the time an acknowledgement expectation was retired.
+
+    Retiring clears the outstanding expectation but keeps the fact that the
+    message was sent asking for one, so a retry of the same send still
+    matches the original request. The column is additive and nullable: a
+    message stored before the upgrade reads as never retired.
+
+    Args:
+        db: Open upgrade transaction owned by the caller.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+    if "ack_retired_ts" not in columns:
+        db.execute("ALTER TABLE messages ADD COLUMN ack_retired_ts TEXT")
 
 
 def _add_decision_flag(db: sqlite3.Connection) -> None:
@@ -1372,7 +1389,8 @@ def _send(
             existing["subject"],
             existing["body_md"],
             existing["thread_id"],
-            existing["ack_required"],
+            bool(existing["ack_required"])
+            or existing["ack_retired_ts"] is not None,
             bool(existing["decision"]),
         ) != (subject, stored, thread, ack, decision) or (
             not previous <= set(ids)
@@ -4326,8 +4344,10 @@ def retire_acknowledgement(home: Path, root: str, identifier: int) -> bool:
     The expectation is cleared on the message instead of being recorded as an
     answer: a recipient that never acknowledged keeps no acknowledgement time,
     so what happened stays readable while the message stops being reported as
-    outstanding. Retiring acknowledges nothing for any lane, moves no
-    ownership and deletes no mail.
+    outstanding. The retirement time is recorded beside it, so a retry of
+    the original send still matches the message it already created.
+    Retiring acknowledges nothing for any lane, moves no ownership and
+    deletes no mail.
 
     Args:
         home: Private bridge state root.
@@ -4341,7 +4361,8 @@ def retire_acknowledgement(home: Path, root: str, identifier: int) -> bool:
         return False
     with connect(home, write=True) as db:
         cursor = db.execute(
-            "UPDATE messages SET ack_required=0 WHERE id=? AND ack_required=1 "
+            "UPDATE messages SET ack_required=0,"
+            "ack_retired_ts=CURRENT_TIMESTAMP WHERE id=? AND ack_required=1 "
             "AND project_id=(SELECT id FROM projects WHERE human_key=?)",
             (identifier, root),
         )
