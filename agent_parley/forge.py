@@ -26,6 +26,10 @@ MAX_TITLE = 200
 MAX_PATHS = 200
 MAX_OPEN_ISSUES = 100
 MAX_PULL_REQUESTS = 30
+PULL_REQUEST_FIELDS = (
+    "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
+    "latestReviews,closingIssuesReferences,files"
+)
 MAX_LANDINGS = 100
 CLOSING = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE
@@ -480,12 +484,15 @@ def integration_landings(repo: Path, base: str) -> dict[str, dict] | None:
 def open_pull_requests(repo: Path) -> list[dict] | None:
     """Reports the check, review and merge state of open pull requests.
 
-    One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests
-    with their head commit, the checks reported on it, the latest review of
-    each reviewer, whether the forge can merge it, the issues it closes and
-    the files it changes. The caller decides which lane a pull request
-    belongs to and what changed since its last reading. Only the GitHub forge
-    opens pull requests, so every other forge reports None.
+    One bounded request reads at most `MAX_PULL_REQUESTS` open pull requests,
+    newest first, with their head commit, the checks reported on it, the
+    latest review of each reviewer, whether the forge can merge it, the
+    issues it closes and the files it changes. A reading of exactly
+    `MAX_PULL_REQUESTS` may be truncated, so the caller must not treat a pull
+    request missing from it as closed; `pull_request` reads one by number.
+    The caller decides which lane a pull request belongs to and what changed
+    since its last reading. Only the GitHub forge opens pull requests, so
+    every other forge reports None.
 
     Args:
         repo: Repository or assigned worktree that selects the forge project.
@@ -518,8 +525,7 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
             "--limit",
             str(MAX_PULL_REQUESTS),
             "--json",
-            "number,url,headRefName,headRefOid,mergeable,statusCheckRollup,"
-            "latestReviews,closingIssuesReferences,files",
+            PULL_REQUEST_FIELDS,
         ],
         15,
     )
@@ -527,47 +533,97 @@ def open_pull_requests(repo: Path) -> list[dict] | None:
         records = json.loads(output or "null")
         if not isinstance(records, list):
             return None
-        readings: list[dict] = []
-        for record in records:
-            checks, failing = _checks(record.get("statusCheckRollup"))
-            readings.append(
-                {
-                    "number": int(record["number"]),
-                    "url": str(record.get("url") or ""),
-                    "branch": str(record.get("headRefName") or ""),
-                    "sha": str(record.get("headRefOid") or ""),
-                    "checks": checks,
-                    "failing": failing,
-                    "pending": _pending(record.get("statusCheckRollup")),
-                    "failed": _failed(record.get("statusCheckRollup")),
-                    "reviews": [
-                        {
-                            "author": str(
-                                (review.get("author") or {}).get("login") or ""
-                            ),
-                            "state": str(review.get("state") or ""),
-                            "at": str(review.get("submittedAt") or ""),
-                        }
-                        for review in record.get("latestReviews") or []
-                    ],
-                    "mergeable": str(record.get("mergeable") or "UNKNOWN"),
-                    "issues": [
-                        str(entry["number"])
-                        for entry in record.get("closingIssuesReferences") or []
-                        if entry.get("number")
-                    ],
-                    "files": sorted(
-                        {
-                            str(entry["path"])
-                            for entry in record.get("files") or []
-                            if entry.get("path")
-                        }
-                    ),
-                }
-            )
+        return [_pull_request_reading(record) for record in records]
     except (ValueError, TypeError, AttributeError, KeyError):
         return None
-    return readings
+
+
+def pull_request(repo: Path, number: int) -> dict | None:
+    """Reads one pull request by number in the shape of `open_pull_requests`.
+
+    A truncated `open_pull_requests` reading omits the oldest open pull
+    requests, so the caller re-reads one it already tracks here instead of
+    treating its absence as closed.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Pull request number.
+
+    Returns:
+        The reading `open_pull_requests` would give while it is open, an
+        empty mapping once the forge reports it merged or closed, and None
+        when the forge is unavailable or the response cannot be read.
+    """
+    if _implementation(repo) != "github":
+        return None
+    project = _reachable(repo)
+    if not project:
+        return None
+    output = _run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            project,
+            "--json",
+            f"state,{PULL_REQUEST_FIELDS}",
+        ],
+        15,
+    )
+    try:
+        record = json.loads(output or "null")
+        if not isinstance(record, dict):
+            return None
+        if record.get("state") != "OPEN":
+            return {} if record.get("state") else None
+        return _pull_request_reading(record)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
+def _pull_request_reading(record: dict) -> dict:
+    """Shapes one forge pull request record into an open reading.
+
+    Args:
+        record: One pull request object the GitHub client printed.
+
+    Returns:
+        The reading described by `open_pull_requests`.
+    """
+    checks, failing = _checks(record.get("statusCheckRollup"))
+    return {
+        "number": int(record["number"]),
+        "url": str(record.get("url") or ""),
+        "branch": str(record.get("headRefName") or ""),
+        "sha": str(record.get("headRefOid") or ""),
+        "checks": checks,
+        "failing": failing,
+        "pending": _pending(record.get("statusCheckRollup")),
+        "failed": _failed(record.get("statusCheckRollup")),
+        "reviews": [
+            {
+                "author": str((review.get("author") or {}).get("login") or ""),
+                "state": str(review.get("state") or ""),
+                "at": str(review.get("submittedAt") or ""),
+            }
+            for review in record.get("latestReviews") or []
+        ],
+        "mergeable": str(record.get("mergeable") or "UNKNOWN"),
+        "issues": [
+            str(entry["number"])
+            for entry in record.get("closingIssuesReferences") or []
+            if entry.get("number")
+        ],
+        "files": sorted(
+            {
+                str(entry["path"])
+                for entry in record.get("files") or []
+                if entry.get("path")
+            }
+        ),
+    }
 
 
 def _checks(rollup: list | None) -> tuple[str, list[str]]:
