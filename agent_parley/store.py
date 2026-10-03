@@ -3421,15 +3421,8 @@ def cochange_history(home: Path, root: str) -> list[list[str]]:
     return forecast.history(root, directory)
 
 
-def held_claim(home: Path, root: str, display: str) -> str:
-    """Returns the claim identifier a lane currently works under.
-
-    Every record a lane makes while it holds a claim carries that claim's
-    identifier, so a later reading can follow one piece of work from the claim
-    through its reservations, messages and reports to the pull request that
-    ended it. A lane holding several claims is correlated to its most recent
-    one, and a lane holding none records no correlation at all rather than a
-    guessed one.
+def owned_claims(home: Path, root: str, display: str) -> set[str] | None:
+    """Returns every claim identifier a lane currently owns.
 
     Args:
         home: Private bridge state root.
@@ -3437,39 +3430,54 @@ def held_claim(home: Path, root: str, display: str) -> str:
         display: Registered identity behind the served call.
 
     Returns:
-        The claim identifier, or an empty string when the lane holds no claim
-        or the project state cannot be read.
+        The owned claim identifiers, empty when the lane owns none, or None
+        when the project state cannot be read, so a caller can tell an
+        unknown answer from a lane that holds nothing.
     """
     directory = roster.locate(home, root) if root else None
     if directory is None:
-        return ""
+        return None
     try:
         manifest = roster.read(directory)
         ledger = issues.snapshot(directory)
     except (BridgeError, OSError, ValueError):
-        return ""
+        return None
     names = [
         name
         for name, participant in manifest["participants"].items()
         if participant["display"] == display
     ]
-    if not names:
+    return {
+        str(record["claim_id"])
+        for record in ledger["issues"].values()
+        if record.get("owner") in names and record.get("claim_id")
+    }
+
+
+def held_claim(home: Path, root: str, display: str) -> str:
+    """Returns the claim identifier a lane currently works under.
+
+    Every record a lane makes while it holds a claim carries that claim's
+    identifier, so a later reading can follow one piece of work from the claim
+    through its reservations, messages and reports to the pull request that
+    ended it. A lane holding several claims leaves a new record untagged:
+    nothing says which of them the record serves, and tagging it with the
+    wrong one would let a handoff of that claim carry it to another lane. A
+    lane holding none records no correlation at all rather than a guessed one.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key registered with the store.
+        display: Registered identity behind the served call.
+
+    Returns:
+        The claim identifier, or an empty string when the lane holds no claim,
+        holds more than one, or the project state cannot be read.
+    """
+    claims = owned_claims(home, root, display)
+    if not claims or len(claims) > 1:
         return ""
-    latest = (0.0, "")
-    for record in ledger["issues"].values():
-        if record.get("owner") not in names or not record.get("claim_id"):
-            continue
-        started = max(
-            (
-                float(entry.get("at", 0) or 0)
-                for entry in record.get("history", [])
-                if entry.get("claim_id") == record["claim_id"]
-            ),
-            default=0.0,
-        )
-        if started >= latest[0]:
-            latest = (started, str(record["claim_id"]))
-    return latest[1]
+    return next(iter(claims))
 
 
 def supersede_claim(home: Path, root: str, claim: str, reason: str) -> int:
@@ -5395,7 +5403,9 @@ def renew_reservations(home: Path, root: str, name: str) -> dict:
     so an expired lease belonging to live work is never reclaimed from it. A
     lease correlated with a claim that lane no longer holds describes nobody's
     work, so it is released instead, its queue is granted, and the lane is
-    told which keys it lost and why.
+    told which keys it lost and why. Every claim the lane owns keeps its
+    leases, not only the newest, and when the issue ledger cannot be read no
+    lease is released on its claim, since nothing then proves the claim gone.
 
     Args:
         home: Private bridge state root.
@@ -5410,7 +5420,7 @@ def renew_reservations(home: Path, root: str, name: str) -> dict:
     """
     if not (home / DATABASE).exists():
         raise missing()
-    claim = held_claim(home, root, name)
+    claims = owned_claims(home, root, name)
     with connect(home, write=True) as db:
         holder = _identify(db, root, name)
         expired = db.execute(
@@ -5423,7 +5433,11 @@ def renew_reservations(home: Path, root: str, name: str) -> dict:
         renewed: list[str] = []
         dropped: list[sqlite3.Row] = []
         for lease in expired:
-            if lease["claim_id"] and lease["claim_id"] != claim:
+            if (
+                claims is not None
+                and lease["claim_id"]
+                and lease["claim_id"] not in claims
+            ):
                 dropped.append(lease)
                 continue
             window = lease["ttl_seconds"] or RESERVATION_GRACE
