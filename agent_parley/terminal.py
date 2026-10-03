@@ -34,6 +34,7 @@ LOG_LIMIT = 1 << 20
 TITLE_LIMIT = 96
 TITLE_CARRY = 4096
 EXEC_FAILED = 127
+SOCKET_GRACE = 60
 DRAIN_READS = 64
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 TITLE_SAVE = b"\x1b[22;0t"
@@ -174,7 +175,10 @@ def sweep_sockets(home: Path) -> list[str]:
     the kernel answers for a path no process listens on. A listening
     launcher accepts the probe, reads an empty request and answers it as
     unavailable, so probing wakes nobody; any other failure leaves the file
-    in place.
+    in place. A launcher binds its socket before it listens, and a socket in
+    that gap refuses connections too, so a refused socket younger than
+    SOCKET_GRACE seconds is kept; a crashed launcher's file is left for a
+    later sweep instead of racing a live launcher's startup.
 
     Args:
         home: Private bridge state root holding the wake sockets.
@@ -189,6 +193,12 @@ def sweep_sockets(home: Path) -> list[str]:
             try:
                 probe.connect(str(path))
             except ConnectionRefusedError:
+                try:
+                    age = time.time() - path.stat().st_mtime
+                except OSError:
+                    continue
+                if age < SOCKET_GRACE:
+                    continue
                 path.unlink(missing_ok=True)
                 removed.append(path.name)
             except OSError:
