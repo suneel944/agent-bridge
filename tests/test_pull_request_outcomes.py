@@ -201,7 +201,7 @@ def test_a_full_reading_archives_nothing(bridge, project, monkeypatch):
     monkeypatch.setattr(forge, "MAX_PULL_REQUESTS", 1)
     observe(bridge, project, monkeypatch, opened(7))
     after = observe(bridge, project, monkeypatch, opened(8))
-    assert list(after["pull_requests"]) == ["8"]
+    assert sorted(after["pull_requests"]) == ["7", "8"]
     assert after["history"] == []
 
 
