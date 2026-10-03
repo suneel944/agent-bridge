@@ -892,6 +892,90 @@ def _beads_title(number: str) -> str | None:
     return _title_of(_run(["bd", "show", number, "--json"], 15))
 
 
+MAX_LINKED = 5
+MENTION = re.compile(r"(?<![\w/&])#(\d+)\b")
+
+
+def issue_details(repo: Path, number: str) -> dict | None:
+    """Reads one issue's text for a launch to quote, when a forge answers.
+
+    The read is best effort and read only, like `issue_title`: a missing
+    client, a refusal or unusable output reports absence. On GitHub it
+    returns the title, body and comments from one `gh issue view`, plus the
+    titles of up to `MAX_LINKED` issues the body mentions by number; on
+    Beads only the title. Callers bound the text before using it.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        number: Bare repository issue number.
+
+    Returns:
+        A dict with ``title``, ``body``, ``comments`` (dicts with ``author``
+        and ``body``, oldest first), ``linked`` (number to title) and
+        ``command``, the client command that prints the full issue, or None
+        when no forge returns a usable reading.
+    """
+    chosen = _implementation(repo)
+    if chosen == "beads":
+        title = _beads_title(number)
+        command = f"bd show {number}"
+        return (
+            None
+            if title is None
+            else {
+                "title": title,
+                "body": "",
+                "comments": [],
+                "linked": {},
+                "command": command,
+            }
+        )
+    project = _reachable(repo) if chosen == "github" else None
+    if project is None or not number.isdigit():
+        return None
+    output = _run(
+        [
+            "gh",
+            "issue",
+            "view",
+            number,
+            "--repo",
+            project,
+            "--json",
+            "title,body,comments",
+        ],
+        15,
+    )
+    try:
+        record = json.loads(output or "")
+        title, body = record["title"], record.get("body") or ""
+        comments = [
+            {
+                "author": str((entry.get("author") or {}).get("login") or ""),
+                "body": str(entry.get("body") or ""),
+            }
+            for entry in record.get("comments") or []
+        ]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(title, str) or not isinstance(body, str):
+        return None
+    linked: dict[str, str] = {}
+    for mention in MENTION.findall(body):
+        if mention == number or mention in linked:
+            continue
+        if len(linked) == MAX_LINKED:
+            break
+        linked[mention] = issue_title(repo, mention) or ""
+    return {
+        "title": title[:MAX_TITLE],
+        "body": body,
+        "comments": comments,
+        "linked": linked,
+        "command": f"gh issue view {number} --repo {project} --comments",
+    }
+
+
 def issue_pull_request_paths(repo: Path, number: str) -> list[str]:
     """Lists the files the pull requests that closed an issue touched.
 

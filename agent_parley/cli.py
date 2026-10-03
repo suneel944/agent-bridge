@@ -4048,6 +4048,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     run.add_argument(
         "--task", default="Check shared coordination state and await my task."
     )
+    run.add_argument(
+        "--issue",
+        default="",
+        help=(
+            "Claim this issue for the lane and open with a bounded digest of "
+            "it fetched from the forge; replaces --task."
+        ),
+    )
     run.add_argument("--json", action="store_true", help=JSON_HELP)
     report = commands.add_parser(
         "report",
@@ -5539,6 +5547,7 @@ def main() -> int:
                 args.provider,
                 args.credentials,
                 resume=args.resume,
+                issue=args.issue,
             )
             if args.json:
                 print(
