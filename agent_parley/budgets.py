@@ -34,6 +34,7 @@ import json
 import math
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -53,6 +54,8 @@ LEDGER = "run-budget.json"
 RUN = "run"
 LOCK_SECONDS = 10.0
 RESUME = "an operator resumes it with agent-parley budget resume"
+READINGS: dict = {}
+READING = threading.Lock()
 
 
 def limits(home: Path, manifest: dict, name: str) -> dict:
@@ -100,6 +103,7 @@ def consumption(
     usage: dict,
     cache: dict,
     wanted: set[str],
+    whole: bool = False,
 ) -> dict:
     """Reads what one lane has consumed, from records that already exist.
 
@@ -113,6 +117,8 @@ def consumption(
         cache: Caller-owned session-record reading cache.
         wanted: Fields a limit applies to; the others are not read, so a
             lane without a token budget never has its transcript parsed.
+        whole: Read each transcript to its current end in this call, rather
+            than at most ``records.MAX_READ`` bytes of it.
 
     Returns:
         Tokens the lane's client recorded, including sessions its own shell
@@ -132,10 +138,10 @@ def consumption(
             hours = max(0.0, time.time() - float(started)) / 3600
     tokens = None
     if "tokens" in wanted:
-        tokens = records.reported_tokens(home, participant, cache)
+        tokens = records.reported_tokens(home, participant, cache, whole)
         for child in reclaim.child_worktrees(directory, manifest, name):
             added = records.reported_tokens(
-                home, {**participant, "lane": str(child)}, cache
+                home, {**participant, "lane": str(child)}, cache, whole
             )
             if added is not None:
                 tokens = (tokens or 0) + added
@@ -162,7 +168,11 @@ def report(
         manifest: Project manifest holding this participant.
         name: Participant that owns the lane.
         usage: Served-call statistics per registered identity.
-        cache: Session-record reading cache; a fresh one when None.
+        cache: Session-record reading cache a refreshing view owns and
+            lets catch up over later refreshes. When None, the process-wide
+            ``READINGS`` is used and each transcript is read to its end, so
+            a one-shot comparison counts every recorded token and a later
+            one in the same process reads only the bytes appended since.
 
     Returns:
         The effective limits, the readings, the share consumed per limited
@@ -171,15 +181,22 @@ def report(
         unreadable token count never crosses a token limit.
     """
     applied = limits(home, manifest, name)
-    used = consumption(
-        home,
-        directory,
-        manifest,
-        name,
-        usage,
-        {} if cache is None else cache,
-        set(applied),
-    )
+    if cache is None:
+        with READING:
+            used = consumption(
+                home,
+                directory,
+                manifest,
+                name,
+                usage,
+                READINGS,
+                set(applied),
+                whole=True,
+            )
+    else:
+        used = consumption(
+            home, directory, manifest, name, usage, cache, set(applied)
+        )
     share = {}
     crossed = []
     for field in roster.BUDGET_FIELDS:
