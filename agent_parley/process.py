@@ -39,6 +39,11 @@ PsReader = Callable[[str, int], str]
 def read_ps_field(field: str, pid: int) -> str:
     """Reads one ``ps`` output field for a process.
 
+    ``ps`` runs under the C locale and UTC so a time field such as
+    ``lstart`` prints the same text for the same process whatever the
+    caller's ``TZ`` or locale; process identity built from it must
+    compare equal across the service, hooks and every operator shell.
+
     Args:
         field: A ``ps`` field specifier ending in ``=`` so no header is
             printed, such as ``lstart=`` or ``args=``.
@@ -51,6 +56,7 @@ def read_ps_field(field: str, pid: int) -> str:
     try:
         result = subprocess.run(
             ["ps", "-ww", "-o", field, "-p", str(pid)],
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
             capture_output=True,
             text=True,
             check=False,
@@ -303,7 +309,9 @@ def darwin_start_ticks(reader: PsReader, pid: int) -> str:
     process ID would compare equal to the session it replaced. Both
     fields are rendered from the creation timestamp stored with the
     process, so a later change to the system clock does not rewrite the
-    recorded value.
+    recorded value. The reader renders that instant in UTC under the C
+    locale, so callers with different ``TZ`` or locale settings read
+    the same value.
 
     Args:
         reader: Reads one ``ps`` field for a process ID.

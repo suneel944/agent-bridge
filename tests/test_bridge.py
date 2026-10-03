@@ -277,6 +277,18 @@ def test_ps_reader_reports_a_live_process_through_the_real_command():
     assert process.read_ps_field("args=", os.getpid()) != ""
 
 
+def test_ps_reader_prints_one_start_time_whatever_the_caller_timezone(
+    monkeypatch,
+):
+    readings = set()
+    for zone, locale in (("UTC0", "C"), ("IST-5:30", "en_US.UTF-8")):
+        monkeypatch.setenv("TZ", zone)
+        monkeypatch.setenv("LC_ALL", locale)
+        readings.add(process.read_ps_field("lstart=", os.getpid()))
+    assert len(readings) == 1
+    assert "" not in readings
+
+
 def test_process_platform_is_chosen_once_for_the_running_system():
     linux = process.platform_for("linux")
     assert linux.start_ticks is process.linux_start_ticks
