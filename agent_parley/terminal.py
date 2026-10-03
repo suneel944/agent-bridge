@@ -1042,6 +1042,7 @@ def _session(
                     forward(output)
                 break
     finally:
+        watch.close()
         if titling:
             _relay(TITLE_RESTORE, False)
         if saved is not None:
