@@ -36,7 +36,9 @@ BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 PsReader = Callable[[str, int], str]
 
 
-def read_ps_field(field: str, pid: int) -> str:
+def read_ps_field(
+    field: str, pid: int, overrides: dict[str, str] | None = None
+) -> str:
     """Reads one ``ps`` output field for a process.
 
     ``ps`` runs under the C locale and UTC so a time field such as
@@ -48,15 +50,19 @@ def read_ps_field(field: str, pid: int) -> str:
         field: A ``ps`` field specifier ending in ``=`` so no header is
             printed, such as ``lstart=`` or ``args=``.
         pid: Process ID to inspect.
+        overrides: Environment values set for ``ps`` over the caller's
+            own; None selects the C locale and UTC.
 
     Returns:
         The field value without surrounding whitespace, or an empty
         string when ``ps`` reports no such process or cannot be run.
     """
+    if overrides is None:
+        overrides = {"LC_ALL": "C", "TZ": "UTC"}
     try:
         result = subprocess.run(
             ["ps", "-ww", "-o", field, "-p", str(pid)],
-            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            env={**os.environ, **overrides},
             capture_output=True,
             text=True,
             check=False,
@@ -69,6 +75,23 @@ def read_ps_field(field: str, pid: int) -> str:
     return result.stdout.strip()
 
 
+def read_local_ps_field(field: str, pid: int) -> str:
+    """Reads one ``ps`` output field in the caller's own TZ and locale.
+
+    Earlier releases recorded ``lstart`` this way, so a process that
+    one of them recorded is recognized again only in this form.
+
+    Args:
+        field: A ``ps`` field specifier ending in ``=``.
+        pid: Process ID to inspect.
+
+    Returns:
+        The field value, or an empty string when ``ps`` reports no such
+        process or cannot be run.
+    """
+    return read_ps_field(field, pid, {})
+
+
 def linux_start_ticks(pid: int) -> str:
     """Reads Linux process creation ticks, independent of wall-clock changes.
 
@@ -79,6 +102,19 @@ def linux_start_ticks(pid: int) -> str:
         Creation ticks since boot, which no later clock change rewrites.
     """
     return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+
+
+def linux_same_start(pid: int, ticks: str) -> bool:
+    """Reports whether a Linux process carries recorded creation ticks.
+
+    Args:
+        pid: Process ID to inspect.
+        ticks: Creation ticks recorded beside that process ID.
+
+    Returns:
+        Whether the process's creation ticks equal the recorded ones.
+    """
+    return linux_start_ticks(pid) == ticks
 
 
 def linux_running(pid: int) -> bool:
@@ -332,6 +368,35 @@ def darwin_start_ticks(reader: PsReader, pid: int) -> str:
     return started
 
 
+def darwin_same_start(
+    reader: PsReader, local_reader: PsReader, pid: int, ticks: str
+) -> bool:
+    """Reports whether a macOS process carries a recorded creation time.
+
+    A record written before ``ps`` ran in UTC and the C locale holds
+    ``lstart`` in the recorder's own ``TZ`` and locale. When the UTC
+    reading differs, the caller's own reading is accepted too, so a
+    live lane recorded before an upgrade is not taken for a dead one.
+
+    Args:
+        reader: Reads one ``ps`` field in UTC and the C locale.
+        local_reader: Reads one ``ps`` field in the caller's own ``TZ``
+            and locale.
+        pid: Process ID to inspect.
+        ticks: Creation time recorded beside that process ID.
+
+    Returns:
+        Whether either reading equals the recorded creation time.
+
+    Raises:
+        ProcessLookupError: If no such process exists or ``ps`` reports
+            no creation time for it.
+    """
+    if darwin_start_ticks(reader, pid) == ticks:
+        return True
+    return local_reader("lstart=", pid) == ticks
+
+
 def darwin_foreground_pid(reader: PsReader, pid: int) -> int:
     """Reads the foreground terminal process group of a macOS hook.
 
@@ -395,7 +460,9 @@ def darwin_matches_command(reader: PsReader, pid: int, home: Path) -> bool:
     return bool(command) and command.endswith(expected)
 
 
-def darwin_terminate(reader: PsReader, pid: int, ticks: str) -> None:
+def darwin_terminate(
+    reader: PsReader, local_reader: PsReader, pid: int, ticks: str
+) -> None:
     """Rechecks the creation time, then signals and waits for exit.
 
     macOS offers no pidfd, so the process cannot be pinned for the
@@ -410,6 +477,8 @@ def darwin_terminate(reader: PsReader, pid: int, ticks: str) -> None:
 
     Args:
         reader: Reads one ``ps`` field for a process ID.
+        local_reader: Reads one ``ps`` field in the caller's own ``TZ``
+            and locale, for a creation time recorded in that form.
         pid: Process ID recorded for the process.
         ticks: Creation time recorded beside that process ID.
 
@@ -422,7 +491,7 @@ def darwin_terminate(reader: PsReader, pid: int, ticks: str) -> None:
         (signal.SIGKILL, KILL_TIMEOUT),
     ):
         try:
-            if darwin_start_ticks(reader, pid) != ticks:
+            if not darwin_same_start(reader, local_reader, pid, ticks):
                 raise BridgeError("Server PID changed; refusing to signal it.")
             os.kill(pid, number)
         except ProcessLookupError:
@@ -452,6 +521,8 @@ class Platform(NamedTuple):
 
     Attributes:
         start_ticks: Returns a process's recorded creation identity.
+        same_start: Reports whether a process carries a recorded
+            creation identity, in any form a release has recorded.
         foreground_pid: Returns a hook's foreground terminal process group.
         parent_pid: Returns a process's parent, for walking a hook's
             ancestry when it has no controlling terminal.
@@ -468,6 +539,7 @@ class Platform(NamedTuple):
     """
 
     start_ticks: Callable[[int], str]
+    same_start: Callable[[int, str], bool]
     foreground_pid: Callable[[int], int]
     parent_pid: Callable[[int], int]
     running: Callable[[int], bool]
@@ -514,6 +586,7 @@ def linux_platform() -> Platform:
     """
     return Platform(
         start_ticks=linux_start_ticks,
+        same_start=linux_same_start,
         foreground_pid=linux_foreground_pid,
         parent_pid=linux_parent_pid,
         running=linux_running,
@@ -524,24 +597,30 @@ def linux_platform() -> Platform:
     )
 
 
-def darwin_platform(reader: PsReader = read_ps_field) -> Platform:
-    """Builds the macOS primitives around one ``ps`` reader.
+def darwin_platform(
+    reader: PsReader = read_ps_field,
+    local_reader: PsReader = read_local_ps_field,
+) -> Platform:
+    """Builds the macOS primitives around ``ps`` readers.
 
     Args:
         reader: Reads one ``ps`` field for a process ID. Tests supply a
             reader of their own so the macOS path runs on any host.
+        local_reader: Reads one ``ps`` field in the caller's own ``TZ``
+            and locale, to recognize a creation time recorded that way.
 
     Returns:
         The process primitives used on macOS.
     """
     return Platform(
         start_ticks=functools.partial(darwin_start_ticks, reader),
+        same_start=functools.partial(darwin_same_start, reader, local_reader),
         foreground_pid=functools.partial(darwin_foreground_pid, reader),
         parent_pid=functools.partial(darwin_parent_pid, reader),
         running=darwin_running,
         zombie=functools.partial(darwin_zombie, reader),
         matches_command=functools.partial(darwin_matches_command, reader),
-        terminate=functools.partial(darwin_terminate, reader),
+        terminate=functools.partial(darwin_terminate, reader, local_reader),
         boot_id=darwin_boot_id,
     )
 
@@ -732,7 +811,8 @@ def alive(pid: int | None, ticks: str | None) -> bool:
     try:
         return (
             pid is not None
-            and start_ticks(pid) == ticks
+            and ticks is not None
+            and PLATFORM.same_start(pid, ticks)
             and not PLATFORM.zombie(pid)
         )
     except (OSError, IndexError, ValueError, TypeError):
@@ -814,7 +894,9 @@ def launched_process(
     if type(launcher_pid) is not int or launcher_pid <= 1:
         return None
     try:
-        if PLATFORM.start_ticks(launcher_pid) != launcher_ticks:
+        if not isinstance(launcher_ticks, str) or not PLATFORM.same_start(
+            launcher_pid, launcher_ticks
+        ):
             return None
         pid = hook_pid
         for _ in range(ANCESTRY_LIMIT):
@@ -898,8 +980,12 @@ def identify(record: dict, home: Path) -> ServerProcess | None:
     try:
         pid = record["pid"]
         ticks = PLATFORM.start_ticks(pid)
-        matched = PLATFORM.matches_command(pid, home)
-        if matched and ticks == record.get("start_ticks"):
+        recorded = record.get("start_ticks")
+        if (
+            PLATFORM.matches_command(pid, home)
+            and isinstance(recorded, str)
+            and PLATFORM.same_start(pid, recorded)
+        ):
             return ServerProcess(pid, ticks)
     except (OSError, KeyError, IndexError):
         pass
