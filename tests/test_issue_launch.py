@@ -5,7 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import cli, forge, issues, launch, store, terminal
+from agent_parley import (
+    blueprints,
+    cli,
+    forge,
+    issues,
+    launch,
+    store,
+    terminal,
+    unattended,
+)
 from agent_parley.state import BridgeError
 
 BODY = "Parser drops the last token. See #7 and #8.\n" + "x" * 20000
@@ -176,3 +185,117 @@ def test_issue_details_reports_absence_on_a_failed_read(monkeypatch):
     assert forge.issue_details(Path("."), "9") is None
     monkeypatch.setattr(forge, "_implementation", lambda repo: "null")
     assert forge.issue_details(Path("."), "9") is None
+
+
+def implement(bridge, repo, tmp_path, monkeypatch):
+    """Records a one-node blueprint that hands the lane its prompt."""
+    monkeypatch.delenv(unattended.LANE_TOKEN, raising=False)
+    path = tmp_path / "implement.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "name": "implement",
+                        "kind": "agent",
+                        "prompt": "Implement it.",
+                    }
+                ]
+            }
+        )
+    )
+    blueprints.define(bridge, repo, "implement", path)
+    return bridge.project(repo)[1]
+
+
+def test_run_issue_with_a_blueprint_claims_then_starts_the_run(
+    bridge, repo, launched, tmp_path, monkeypatch
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+
+    assert (
+        bridge.launch("claude", repo, "", issue="42", blueprint="implement")
+        == 0
+    )
+
+    assert owner(bridge, repo) == "claude"
+    run = blueprints.for_lane(directory, "claude")["42"]
+    assert (run["node"], run["status"]) == ("implement", "waiting")
+
+
+def test_a_label_default_starts_its_blueprint_without_the_flag(
+    bridge, repo, launched, tmp_path, monkeypatch
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+    monkeypatch.setattr(forge, "issue_labels", lambda root, number: ["bug"])
+    blueprints.default(bridge, repo, "bug", "implement")
+
+    assert bridge.launch("claude", repo, "", issue="42") == 0
+
+    assert blueprints.for_lane(directory, "claude")["42"]["node"] == (
+        "implement"
+    )
+
+
+def test_a_relaunch_on_the_same_issue_keeps_the_run_in_progress(
+    bridge, repo, launched, tmp_path, monkeypatch, capsys
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+    bridge.launch("claude", repo, "", issue="42", blueprint="implement")
+    first = blueprints.for_lane(directory, "claude")["42"]
+
+    assert (
+        bridge.launch("claude", repo, "", issue="42", blueprint="implement")
+        == 0
+    )
+
+    assert len(launched) == 2
+    assert blueprints.for_lane(directory, "claude")["42"] == first
+    assert "Kept blueprint run" in capsys.readouterr().err
+
+
+def test_unread_labels_with_label_defaults_refuse_the_launch(
+    bridge, repo, launched, tmp_path, monkeypatch
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+    blueprints.default(bridge, repo, "bug", "implement")
+    monkeypatch.setattr(forge, "issue_labels", lambda root, number: None)
+
+    with pytest.raises(BridgeError, match="could not be read.*--blueprint"):
+        bridge.launch("claude", repo, "", issue="42")
+
+    assert launched == []
+    assert blueprints.for_lane(directory, "claude") == {}
+
+
+def test_a_blueprint_launch_keeps_the_refusal_rules(
+    bridge, repo, launched, tmp_path, monkeypatch
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+
+    with pytest.raises(BridgeError, match="--issue N"):
+        bridge.launch("claude", repo, "", blueprint="implement")
+    with pytest.raises(BridgeError, match="No blueprint named"):
+        bridge.launch("claude", repo, "", issue="42", blueprint="missing")
+    monkeypatch.setenv(unattended.LANE_TOKEN, "lane-token")
+    with pytest.raises(BridgeError, match="operator shell"):
+        bridge.launch("claude", repo, "", issue="42", blueprint="implement")
+
+    assert launched == []
+    assert "42" not in issues.snapshot(directory)["issues"]
+    assert blueprints.for_lane(directory, "claude") == {}
+
+
+def test_run_without_a_blueprint_or_label_default_is_unchanged(
+    bridge, repo, launched, tmp_path, monkeypatch
+):
+    directory = implement(bridge, repo, tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        forge,
+        "issue_labels",
+        lambda root, number: pytest.fail("labels read without a default"),
+    )
+
+    assert bridge.launch("claude", repo, "", issue="42") == 0
+
+    assert blueprints.for_lane(directory, "claude") == {}

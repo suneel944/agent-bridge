@@ -14,10 +14,13 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from agent_parley import BridgeError
 from agent_parley.core import BridgeCore
+
+if TYPE_CHECKING:
+    from agent_parley.cli import Bridge
 
 ISSUE_BUDGET = 6000
 ISSUE_COMMENTS = 3
@@ -306,6 +309,7 @@ reported.
         *,
         resume: bool = False,
         issue: str = "",
+        blueprint: str = "",
     ) -> int:
         """Runs one participant's native CLI in its persistent lane.
 
@@ -314,7 +318,11 @@ reported.
         another lane owns, then reads it through the configured forge and
         replaces ``task`` with `issue_task`'s bounded digest. A forge that
         does not answer leaves the claim in force and the lane starts with
-        a note that hydration failed.
+        a note that hydration failed. The claim then starts ``blueprint``,
+        or the default `blueprints.chosen` maps to one of the issue's
+        labels, before the native client starts; with neither, the launch
+        is unchanged. A relaunch keeps the lane's run in progress on the
+        issue instead of starting another.
 
         When the native process exits, its last process generation remains in
         the stopped activity record. Orphan recovery needs that PID together
@@ -353,6 +361,8 @@ reported.
             credential: Credential profile selecting one account.
             resume: Resume this lane's recorded native session interactively.
             issue: Issue number to claim and hydrate before the first turn.
+            blueprint: Recorded blueprint the claim runs through; needs
+                ``issue``.
 
         Returns:
             The native process exit code.
@@ -365,7 +375,9 @@ reported.
                 project's enforced run budget is exhausted, or the lane
                 retired while the launch waited for that lock, since a
                 retirement removes the worktree under the same lock, or
-                ``issue`` is not an issue number or its claim is refused.
+                ``issue`` is not an issue number or its claim is refused,
+                or a blueprint is named without ``issue``, from a lane, or
+                is unknown.
         """
         from agent_parley.cli import (
             COPILOT_EVENTS,
@@ -394,6 +406,10 @@ reported.
 
         began = time.monotonic()
         number = parse_issue(issue) if issue else ""
+        if blueprint and not number:
+            raise BridgeError(
+                "A blueprint runs on a claim; name the issue with --issue N."
+            )
         process.check_repository_host(repo)
         directory = self.project(repo, create=False)[1]
         stopped = (
@@ -411,6 +427,12 @@ reported.
         if supervision.opt_in_missing(self.home, data, agent):
             print(
                 supervision.OPT_IN_WARNING.format(name=agent), file=sys.stderr
+            )
+        if number:
+            from agent_parley import blueprints
+
+            blueprint = blueprints.chosen(
+                cast("Bridge", self), repo, number, blueprint
             )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
@@ -463,6 +485,22 @@ reported.
                 task = issue_task(
                     number, forge.issue_details(lane, number), data
                 )
+                if blueprint:
+                    from agent_parley import blueprints
+
+                    current = blueprints.for_lane(lane.parent, agent).get(
+                        number
+                    )
+                    print(
+                        f"Kept blueprint run {blueprints.line(number, current)}"
+                        if current
+                        and current["status"]
+                        in (blueprints.RUNNING, blueprints.WAITING)
+                        else blueprints.start(
+                            cast("Bridge", self), repo, agent, blueprint, number
+                        ),
+                        file=sys.stderr,
+                    )
             prompt = self.protocol(agent, data)
             hooks = self.hooks(agent, lane.parent)
             env = {

@@ -6,10 +6,23 @@ repository. A run walks one claim through a blueprint. The harness runs the
 deterministic nodes itself, with no model call, so a required step always
 happens and in the recorded order: a ``run`` node executes an argument list
 in the lane's worktree without a shell, a ``push`` node pushes the lane's
-branch, and a ``report`` node ends the run as done or blocked. An ``agent``
-node writes its prompt into the lane's inbox, with the last failing step's
-output attached, and ends when the lane next files a report: ready follows
-the success edge and blocked the failure edge.
+branch, a ``pull-request`` node opens or updates the lane's pull request
+through the repository's ``pull_request.self_service`` policy, and a
+``report`` node ends the run as done or blocked. An ``agent`` node writes its
+prompt into the lane's inbox, with the last failing step's output attached,
+and ends when the lane next files a report: ready follows the success edge
+and blocked the failure edge. A ``wait-ci`` node reads the pull request
+record the supervision poll keeps: checks green on the branch's head follow
+the success edge, red ones the failure edge with the failed-step logs
+attached, and a head past the ``ci_rounds`` limit ends the run blocked.
+
+The supervision poll moves every run on through `supervise`, so an agent
+node passes once its lane reports and a ``wait-ci`` node once its verdict is
+known, without the operator running `blueprint advance`. Nothing waits by
+sleeping: a node with no outcome yet leaves the run waiting for the next
+poll. A run starts from `blueprint run`, or from `run NAME --issue N` with
+``--blueprint``, or with the default blueprint the operator mapped to one
+of the issue's labels.
 
 Each node names the node that follows on success and on failure. A node with
 no ``next`` falls through to the following node, and the last one ends the
@@ -33,23 +46,26 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_parley import issues, roster, unattended
-from agent_parley.state import BridgeError, lock, write_json
-from agent_parley.worktrees import VERIFY_TIMEOUT
+from agent_parley import forge, issues, roster, supervision, unattended
+from agent_parley.state import BridgeError, LockBusy, lock, write_json
+from agent_parley.worktrees import VERIFY_TIMEOUT, git
 
 if TYPE_CHECKING:
     from agent_parley.cli import Bridge
 
-KINDS = ("run", "agent", "push", "report")
+KINDS = ("run", "agent", "push", "pull-request", "wait-ci", "report")
 """Node kinds a blueprint may hold; none of them merges."""
 
-FIELDS = {
+FIELDS: dict[str, set[str]] = {
     "run": {"command", "timeout"},
     "push": {"timeout"},
+    "pull-request": set(),
+    "wait-ci": set(),
     "agent": {"prompt"},
     "report": {"outcome", "message"},
 }
@@ -65,6 +81,9 @@ MAX_VISITS = 200
 
 TAIL_LINES = 40
 TAIL_CHARS = 2000
+MAX_LOGS = 3
+"""Failed checks whose step logs a red ``wait-ci`` verdict quotes."""
+
 RUNS = "blueprint-runs.json"
 RUNNING = "running"
 WAITING = "waiting"
@@ -230,6 +249,18 @@ def define(bridge: Bridge, repo: Path, name: str, path: Path | None) -> str:
     with lock(directory / "setup.lock"):
         data = roster.read(directory)
         stored = dict(data.get("blueprints") or {})
+        labels = sorted(
+            label
+            for label, target in (data.get("blueprint_defaults") or {}).items()
+            if target == name
+        )
+        if nodes is None and labels:
+            raise BridgeError(
+                f"Blueprint {name} is the default for label "
+                + ", ".join(labels)
+                + "; clear that first with agent-parley blueprint default "
+                "LABEL."
+            )
         if nodes is None:
             if stored.pop(name, None) is None:
                 raise BridgeError(
@@ -262,15 +293,26 @@ def describe(bridge: Bridge, repo: Path, name: str | None = None) -> str:
         BridgeError: If the project or the named blueprint does not exist.
     """
     root, directory = bridge.project(repo, create=False)
-    stored = roster.read(directory).get("blueprints") or {}
+    data = roster.read(directory)
+    stored = data.get("blueprints") or {}
     if name is None:
         if not stored:
             return (
                 f"{root} has no blueprints; a claim runs as the lane decides."
             )
         return "\n".join(
-            f"{key}: " + " -> ".join(node["name"] for node in nodes)
-            for key, nodes in sorted(stored.items())
+            [
+                *(
+                    f"{key}: " + " -> ".join(node["name"] for node in nodes)
+                    for key, nodes in sorted(stored.items())
+                ),
+                *(
+                    f"label {label} defaults to {target}"
+                    for label, target in sorted(
+                        (data.get("blueprint_defaults") or {}).items()
+                    )
+                ),
+            ]
         )
     if name not in stored:
         raise BridgeError(
@@ -288,6 +330,10 @@ def describe(bridge: Bridge, repo: Path, name: str | None = None) -> str:
             detail = shlex.join(node["command"])
         elif node["kind"] == "push":
             detail = shlex.join(PUSH)
+        elif node["kind"] == "pull-request":
+            detail = "pull_request.self_service"
+        elif node["kind"] == "wait-ci":
+            detail = "required checks"
         else:
             detail = node["prompt"].splitlines()[0][:60]
         edges = (
@@ -301,6 +347,130 @@ def describe(bridge: Bridge, repo: Path, name: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def default(
+    bridge: Bridge, repo: Path, label: str, blueprint: str | None
+) -> str:
+    """Maps an issue label to the blueprint a launch on it runs by default.
+
+    `run NAME --issue N` without ``--blueprint`` starts the blueprint mapped
+    to one of the issue's labels. The mapping lives in the project manifest
+    beside the blueprints, so only an operator shell changes it.
+
+    Args:
+        bridge: Coordination runtime owning the project state.
+        repo: Any checkout of the target repository, outside every lane.
+        label: Issue label, matched exactly.
+        blueprint: Recorded blueprint the label selects, or None to clear
+            the label's mapping.
+
+    Returns:
+        An account of the change.
+
+    Raises:
+        BridgeError: If the command runs from a lane, the label is empty or
+            too long, the blueprint is unknown, or a cleared label had no
+            mapping.
+    """
+    root, directory = bridge.project(repo, create=False)
+    data = roster.read(directory)
+    unattended.operator_only(repo, root, data, "A default blueprint is set")
+    label = label.strip()
+    if not 1 <= len(label) <= 64:
+        raise BridgeError("A label names 1-64 characters.")
+    with lock(directory / "setup.lock"):
+        data = roster.read(directory)
+        defaults = dict(data.get("blueprint_defaults") or {})
+        if blueprint is None:
+            if defaults.pop(label, None) is None:
+                raise BridgeError(f"Label {label!r} selects no blueprint.")
+        elif blueprint not in (data.get("blueprints") or {}):
+            raise BridgeError(
+                f"No blueprint named {blueprint!r}; run agent-parley "
+                "blueprint list."
+            )
+        else:
+            defaults[label] = blueprint
+        data["blueprint_defaults"] = defaults
+        write_json(directory / "project.json", data)
+    if blueprint is None:
+        return f"Label {label} no longer selects a blueprint."
+    return (
+        f"run --issue on an issue labelled {label} starts blueprint "
+        f"{blueprint} unless --blueprint names another."
+    )
+
+
+def chosen(bridge: Bridge, repo: Path, number: str, blueprint: str) -> str:
+    """Names the blueprint a launch on one issue starts, if any.
+
+    An explicit name wins. Otherwise the issue's labels are read from the
+    forge, and only when the operator mapped at least one label, so a
+    project without defaults launches exactly as before.
+
+    Args:
+        bridge: Coordination runtime owning the project state.
+        repo: Checkout the launch names.
+        number: Bare issue number the launch claims.
+        blueprint: Blueprint the launch named, or an empty string.
+
+    Returns:
+        The blueprint to start, or an empty string for none.
+
+    Raises:
+        BridgeError: If a blueprint applies and the launch runs from a lane,
+            the blueprint is unknown, or the issue's labels select more than
+            one blueprint or cannot be read while label defaults exist.
+    """
+    root, directory = bridge.project(repo, create=False)
+    data = roster.read(directory)
+    defaults = data.get("blueprint_defaults") or {}
+    if not blueprint and defaults:
+        labels = forge.issue_labels(root, number)
+        if labels is None:
+            raise BridgeError(
+                f"The labels of issue #{number} could not be read, so its "
+                "default blueprint is unknown; name one with --blueprint or "
+                "retry."
+            )
+        matched = sorted(
+            {defaults[label] for label in labels if label in defaults}
+        )
+        if len(matched) > 1:
+            raise BridgeError(
+                f"Issue #{number} carries labels selecting blueprints "
+                + ", ".join(matched)
+                + "; name one with --blueprint."
+            )
+        blueprint = matched[0] if matched else ""
+    if not blueprint:
+        return ""
+    unattended.operator_only(repo, root, data, "A blueprint run is started")
+    if blueprint not in (data.get("blueprints") or {}):
+        raise BridgeError(
+            f"No blueprint named {blueprint!r}; run agent-parley "
+            "blueprint list."
+        )
+    return blueprint
+
+
+def for_lane(directory: Path, lane: str) -> dict[str, dict]:
+    """Reads the recorded blueprint runs one lane's claims went through.
+
+    Args:
+        directory: Project coordination directory.
+        lane: Participant whose runs are read.
+
+    Returns:
+        The lane's runs keyed by issue number; empty for a lane that never
+        ran a blueprint, so its views print exactly as before.
+    """
+    return {
+        number: run
+        for number, run in _runs(directory).items()
+        if isinstance(run, dict) and run.get("lane") == lane
+    }
+
+
 def _runs(directory: Path) -> dict:
     """Reads every recorded blueprint run, keyed by issue number."""
     try:
@@ -312,6 +482,7 @@ def _runs(directory: Path) -> dict:
 
 def _save(directory: Path, issue: str, run: dict) -> None:
     """Records one issue's run beside every other recorded run."""
+    run["updated"] = time.time()
     with lock(directory / f"{RUNS}.lock", timeout=5):
         runs = _runs(directory)
         runs[issue] = run
@@ -338,8 +509,9 @@ def start(
 
     Raises:
         BridgeError: If the command runs from a lane, the participant does
-            not hold the issue, the blueprint is unknown, or a run on the
-            issue is still in progress.
+            not hold the issue, the blueprint is unknown, or the
+            participant's own run on the issue is still in progress. A run
+            an earlier owner left in progress is replaced.
     """
     root, directory = bridge.project(repo, create=False)
     data = roster.read(directory)
@@ -364,7 +536,11 @@ def start(
         )
     with lock(directory / f"blueprint-{number}.lock", _busy(number)):
         current = _runs(directory).get(number)
-        if current and current["status"] in (RUNNING, WAITING):
+        if (
+            current
+            and current["status"] in (RUNNING, WAITING)
+            and current["lane"] == name
+        ):
             raise BridgeError(
                 f"Issue #{number} is already at blueprint node "
                 f"{current['node']!r}; run agent-parley blueprint advance "
@@ -417,6 +593,88 @@ def advance(bridge: Bridge, repo: Path, issue: str) -> str:
         return _walk(bridge, repo, root, directory, data, number, run)
 
 
+def supervise(
+    home: Path, directory: Path, manifest: dict
+) -> list[threading.Thread]:
+    """Moves every blueprint run in progress on from the supervision poll.
+
+    A run waiting on an agent node moves only once its lane has reported
+    since the prompt, and every other run in progress moves each poll. Each
+    move runs in its own daemon thread under the run's lock, so a
+    deterministic node that takes minutes never holds up the poll, and a
+    run another command is moving is left for the next poll. A run whose
+    lane left the roster is left as it was, and a run whose lane no longer
+    holds the issue open moves once, to end blocked.
+
+    Args:
+        home: Private bridge state root.
+        directory: Project coordination directory.
+        manifest: Current participant manifest.
+
+    Returns:
+        The threads started, so a caller may wait for them.
+    """
+    from agent_parley.cli import Bridge
+
+    ledger = issues.snapshot(directory)["issues"]
+    started = []
+    for number, run in _runs(directory).items():
+        if (
+            not isinstance(run, dict)
+            or run.get("status") not in (RUNNING, WAITING)
+            or run.get("lane") not in manifest["participants"]
+            or (
+                _held(ledger.get(number) or {}, run)
+                and not _due(directory, run)
+            )
+        ):
+            continue
+        thread = threading.Thread(
+            target=_moved,
+            args=(Bridge(home), directory, number),
+            name=f"agent-parley-blueprint-{number}",
+            daemon=True,
+        )
+        thread.start()
+        started.append(thread)
+    return started
+
+
+def _due(directory: Path, run: dict) -> bool:
+    """Reports whether a run in progress has anything new to act on."""
+    nodes = {node["name"]: node for node in run["nodes"]}
+    if run["status"] != WAITING or nodes[run["node"]]["kind"] != "agent":
+        return True
+    return _reported(directory, run) is not None
+
+
+def _held(record: dict, run: dict) -> bool:
+    """Reports whether the run's lane still holds its issue open."""
+    return record.get("owner") == run["lane"] and not issues.ended(record)
+
+
+def _moved(bridge: Bridge, directory: Path, number: str) -> None:
+    """Moves one run on, leaving a busy one for the next poll.
+
+    Any other failure is recorded as the project's supervision error, where
+    `status` names it, and the run is retried on the next poll from the
+    last node it passed.
+    """
+    try:
+        data = roster.read(directory)
+        root = Path(data["root"])
+        with lock(directory / f"blueprint-{number}.lock", _busy(number)):
+            run = _runs(directory).get(number)
+            if run and run["status"] in (RUNNING, WAITING):
+                _walk(bridge, root, root, directory, data, number, run)
+    except LockBusy:
+        return
+    except Exception as exc:
+        issues.note_supervision_error(
+            directory, supervision.failure(f"blueprint #{number}", exc)
+        )
+
+
 def progress(bridge: Bridge, repo: Path, issue: str | None = None) -> str:
     """Reports the recorded blueprint runs: current node and nodes passed.
 
@@ -438,7 +696,7 @@ def progress(bridge: Bridge, repo: Path, issue: str | None = None) -> str:
         runs = {number: runs[number]} if number in runs else {}
     if not runs:
         return "No blueprint runs are recorded."
-    return "\n".join(_line(number, run) for number, run in sorted(runs.items()))
+    return "\n".join(line(number, run) for number, run in sorted(runs.items()))
 
 
 def _busy(number: str) -> str:
@@ -449,8 +707,16 @@ def _busy(number: str) -> str:
     )
 
 
-def _line(number: str, run: dict) -> str:
-    """Formats one run as its issue, lane, status, node and nodes passed."""
+def line(number: str, run: dict) -> str:
+    """Formats one run as its issue, lane, status, node and nodes passed.
+
+    Args:
+        number: Issue the run belongs to.
+        run: The run's recorded state.
+
+    Returns:
+        The line `blueprint progress`, `status`, `top` and `watch` print.
+    """
     passed = ", ".join(run["passed"]) or "none"
     line = (
         f"#{number} {run['lane']} {run['blueprint']}: {run['status']} at "
@@ -485,6 +751,12 @@ def _walk(
     nodes = {node["name"]: node for node in run["nodes"]}
     order = [node["name"] for node in run["nodes"]]
     lane = Path(data["participants"][run["lane"]]["lane"])
+    if not _held(issues.snapshot(directory)["issues"].get(number) or {}, run):
+        run["status"] = BLOCKED
+        run["message"] = (
+            f"{run['lane']} no longer holds issue #{number} open, so the run "
+            "stopped."
+        )
     while run["status"] in (RUNNING, WAITING):
         node = nodes[run["node"]]
         if node["kind"] == "report":
@@ -499,10 +771,16 @@ def _walk(
                 "the blueprint's edges."
             )
             break
-        if node["kind"] == "agent":
-            passed = _agent(bridge, repo, directory, number, run, node)
+        if node["kind"] in ("agent", "wait-ci"):
+            passed = (
+                _agent(bridge, repo, directory, number, run, node)
+                if node["kind"] == "agent"
+                else _wait_ci(root, directory, data, run)
+            )
             if passed is None:
                 break
+        elif node["kind"] == "pull-request":
+            passed = _pull_request(bridge, root, data, run)
         else:
             command = PUSH if node["kind"] == "push" else node["command"]
             passed = _execute(command, lane, root, node["timeout"], run)
@@ -517,6 +795,7 @@ def _walk(
                 run["status"] = DONE
                 break
             run["node"] = following
+            _save(directory, number, run)
             continue
         failures = run["failures"].get(node["name"], 0) + 1
         run["failures"][node["name"]] = failures
@@ -529,7 +808,7 @@ def _walk(
             break
         run["node"] = node.get("on_failure", node["name"])
     _save(directory, number, run)
-    return _line(number, run)
+    return line(number, run)
 
 
 def _execute(
@@ -605,18 +884,12 @@ def _agent(
         and None while the run waits on the lane.
     """
     if run["status"] == WAITING:
-        try:
-            activity = json.loads(
-                (directory / f"{run['lane']}-activity.json").read_text()
-            )
-        except (OSError, ValueError):
-            activity = {}
-        if float(activity.get("reported_at") or 0) > run["since"]:
-            if activity.get("outcome") in ("ready", "blocked"):
-                run["status"] = RUNNING
-                run["output"] = str(activity.get("summary") or "")
-                return activity["outcome"] == "ready"
-        return None
+        activity = _reported(directory, run)
+        if activity is None:
+            return None
+        run["status"] = RUNNING
+        run["output"] = str(activity.get("summary") or "")
+        return activity["outcome"] == "ready"
     text = node["prompt"]
     if run["output"] and run["failures"]:
         text = f"{text}\n\nLast failing step output:\n{run['output']}"
@@ -631,3 +904,199 @@ def _agent(
     )
     run["status"] = WAITING
     return None
+
+
+def _reported(directory: Path, run: dict) -> dict | None:
+    """Reads the ready or blocked report a lane filed since its prompt.
+
+    Args:
+        directory: Project coordination directory.
+        run: The run's recorded state, naming the lane and when the prompt
+            was handed over.
+
+    Returns:
+        The lane's activity record, or None while no such report exists.
+    """
+    try:
+        activity = json.loads(
+            (directory / f"{run['lane']}-activity.json").read_text()
+        )
+    except (OSError, ValueError):
+        return None
+    if (
+        isinstance(activity, dict)
+        and float(activity.get("reported_at") or 0) > run["since"]
+        and activity.get("outcome") in ("ready", "blocked")
+    ):
+        return activity
+    return None
+
+
+def _pull_request(bridge: Bridge, root: Path, data: dict, run: dict) -> bool:
+    """Opens or updates the lane's pull request under the self-service policy.
+
+    The node goes through `Bridge.self_service_pull_request`, so every
+    condition of the repository's ``pull_request.self_service`` policy still
+    applies: a ready report, a configured verification gate that runs before
+    the push, the assigned branch and no overlapping peer reservation. Its
+    Git and forge calls carry that path's own time limits.
+
+    Args:
+        bridge: Coordination runtime owning the project state.
+        root: Base checkout of the repository.
+        data: Project manifest.
+        run: Run state whose ``output`` receives the bounded account.
+
+    Returns:
+        Whether the pull request was opened or updated.
+    """
+    if not (data.get("pull_request") or {}).get("self_service"):
+        run["output"] = (
+            "This repository's pull_request.self_service policy is off, so "
+            "the harness opens no pull request for the lane."
+        )
+        return False
+    try:
+        account = bridge.self_service_pull_request(root, run["lane"])
+    except (BridgeError, OSError, subprocess.SubprocessError) as exc:
+        run["output"] = f"The pull request was not opened: {exc}"[:TAIL_CHARS]
+        return False
+    run["output"] = account[:TAIL_CHARS]
+    return True
+
+
+def _wait_ci(root: Path, directory: Path, data: dict, run: dict) -> bool | None:
+    """Reads the verdict of the lane's pull request checks, if it is known.
+
+    The supervision poll keeps one reading per open pull request, with its
+    head commit, check verdict and CI round count. Only a reading of the
+    lane's branch at the branch's current head commit counts, so a verdict
+    on an earlier push never passes or fails the node. A red verdict is
+    judged once per head commit and re-run, so a run that fails over to an
+    agent node waits for a new push or a re-run before judging again. A red
+    head supervision is re-running automatically keeps the node waiting, and
+    a pull request that closes after the node saw it ends the run blocked.
+
+    Args:
+        root: Base checkout of the repository.
+        directory: Project coordination directory.
+        data: Project manifest.
+        run: Run state; ``output`` receives the verdict and, on red, the
+            failing checks with their failed-step logs.
+
+    Returns:
+        True on green checks, False on red ones, and None while the checks
+        are pending, unread or being re-run, or once the run ends blocked
+        because the pull request closed or used up its CI rounds.
+    """
+    branch = data["participants"][run["lane"]]["branch"]
+    try:
+        head = git(root, "rev-parse", "--verify", "--quiet", branch)
+    except (BridgeError, subprocess.SubprocessError):
+        head = ""
+    try:
+        record = json.loads(
+            (directory / supervision.PULL_REQUEST_RECORD).read_text()
+        )
+    except (OSError, ValueError):
+        record = {}
+    readings = record.get("pull_requests") if isinstance(record, dict) else {}
+    open_requests = [
+        entry
+        for entry in (readings or {}).values()
+        if isinstance(entry, dict) and entry.get("branch") == branch
+    ]
+    reading = next(
+        (entry for entry in open_requests if entry.get("sha") == head), None
+    )
+    run["status"] = WAITING
+    if open_requests:
+        run["pull_request"] = open_requests[0].get("number")
+    elif isinstance(readings, dict) and run.get("pull_request"):
+        run["status"] = BLOCKED
+        run["message"] = (
+            f"Pull request #{run['pull_request']} for {branch} is no longer "
+            "open, so no check verdict will come; the operator decides."
+        )
+        return None
+    if (
+        not head
+        or not reading
+        or reading.get("checks") not in ("green", "red")
+        or _rerunning(reading)
+    ):
+        return None
+    if reading["checks"] == "green":
+        run["status"] = RUNNING
+        run["output"] = (
+            f"Pull request #{reading['number']} checks are green at {head}."
+        )
+        return True
+    judged = f"{head}:{reading.get('red_attempts') or 1}"
+    if run.get("judged") == judged:
+        return None
+    run["judged"] = judged
+    run["status"] = RUNNING
+    run["output"] = _red(root, reading)
+    if reading.get("exhausted"):
+        run["status"] = BLOCKED
+        run["message"] = (
+            f"Pull request #{reading['number']} used {reading['exhausted']} "
+            "CI rounds and its checks are still red; the operator decides "
+            "whether to grant one more round or take over."
+        )
+        return None
+    return False
+
+
+def _rerunning(reading: dict) -> bool:
+    """Reports whether supervision's automatic re-run decides a red head.
+
+    Supervision re-runs a head that is red only through cancelled or
+    timed-out jobs once per red attempt. Until that re-run reports, the red
+    reading is not a verdict on the lane's change.
+    """
+    rerun = reading.get("rerun") or {}
+    failed = reading.get("failed") or []
+    return (
+        reading.get("checks") == "red"
+        and bool(rerun.get("accepted"))
+        and rerun.get("attempt") == int(reading.get("red_attempts") or 1)
+        and bool(failed)
+        and all(
+            check.get("conclusion") in supervision.RERUN_CONCLUSIONS
+            for check in failed
+        )
+    )
+
+
+def _red(root: Path, reading: dict) -> str:
+    """Describes red checks with the tails of their failed-step logs.
+
+    Args:
+        root: Base checkout that selects the forge project.
+        reading: The pull request reading the supervision poll kept.
+
+    Returns:
+        The failing check names and up to `MAX_LOGS` failed-step log tails,
+        within `MAX_TEXT` characters. A cancelled, timed-out or never
+        started check has no failing step and contributes only its name.
+    """
+    parts = [
+        f"Pull request #{reading['number']} checks are red at "
+        f"{reading['sha']}: " + ", ".join(reading.get("failing") or [])
+    ]
+    for check in (reading.get("failed") or [])[:MAX_LOGS]:
+        if (
+            check.get("conclusion") in supervision.RERUN_CONCLUSIONS
+            or check.get("not_started")
+            or not check.get("run")
+            or not check.get("job")
+        ):
+            continue
+        command, log = forge.failed_log(
+            root, str(check["run"]), str(check["job"])
+        )
+        tail = "\n".join((log or "").splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
+        parts.append(f"{check['name']} failed-step log (`{command}`):\n{tail}")
+    return "\n".join(parts)[:MAX_TEXT]
