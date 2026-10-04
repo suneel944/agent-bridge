@@ -83,6 +83,13 @@ def edit(bridge, repo, number, change):
     return directory
 
 
+def older_than_reading(record):
+    """Moves a claim's start two hours back, before any stale reading."""
+    for entry in record.get("history", []):
+        if entry.get("action") == "claim":
+            entry["at"] = time.time() - 7200
+
+
 def ended(record):
     """Records the reminder a forge-observed completion writes its holder."""
     record["handoff_prompt"] = {
@@ -492,6 +499,7 @@ def test_a_failed_refresh_falls_back_to_the_stale_reading_once(
     bridge, repo, paired, monkeypatch, capsys, offline
 ):
     cache = claimed(bridge, repo, paired, monkeypatch)
+    edit(bridge, repo, "42", older_than_reading)
     write_json(
         cache,
         {
