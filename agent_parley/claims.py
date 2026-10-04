@@ -522,7 +522,10 @@ class ClaimsMixin(ReportsMixin):
         declared for this lane's provider. It is advice and nothing else. No
         ledger entry is written, no offer is made and no reservation is taken,
         so the lane still claims the issue it chooses through `issue claim`
-        and still races any peer that chose the same one.
+        and still races any peer that chose the same one. To make that race
+        rare, an issue another lane's published work names as its next lead
+        or first pull pick, through `supervision.named_leads`, ranks below
+        the issues no lane was pointed at.
 
         Args:
             repo: Assigned worktree, which names the lane doing the reading.
@@ -537,7 +540,7 @@ class ClaimsMixin(ReportsMixin):
         """
         import sqlite3
 
-        from agent_parley.cli import forge, git, roster, store
+        from agent_parley.cli import forge, git, roster, store, supervision
 
         _, directory = self.project(repo)
         data = roster.read(directory)
@@ -560,6 +563,7 @@ class ClaimsMixin(ReportsMixin):
                 held,
                 store.overlapping,
                 limit,
+                supervision.named_leads(directory, data, agent),
             ),
         }
 
