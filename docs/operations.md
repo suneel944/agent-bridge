@@ -149,7 +149,9 @@ its live claims, and `TASK` from the lane's own last report or registered task,
 never the operator's last prompt. A claim whose issue is no longer open on the
 forge, or whose pull request ended, while still owned is left out of the table
 and named on one line with `agent-parley issue resolve N`; `--all` lists those
-rows too.
+rows too. A claim that progressed after the cached reading was taken stays in
+the table even when the reading lacks its number, because an issue opened and
+claimed inside the poll interval is not closed, only newer than the reading.
 
 Titles and open state come from one bounded read of the project's open GitHub
 issues, the same list `issue list` reads, with a 5-second timeout. The service's

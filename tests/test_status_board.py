@@ -83,6 +83,13 @@ def edit(bridge, repo, number, change):
     return directory
 
 
+def older_than_reading(record):
+    """Moves a claim's start two hours back, before any stale reading."""
+    for entry in record.get("history", []):
+        if entry.get("action") == "claim":
+            entry["at"] = time.time() - 7200
+
+
 def ended(record):
     """Records the reminder a forge-observed completion writes its holder."""
     record["handoff_prompt"] = {
@@ -416,6 +423,32 @@ def test_status_never_reads_the_forge_or_writes_its_cache(
     assert any("refresh failed (service not refreshing)" in x for x in lines)
 
 
+def test_a_claim_newer_than_the_forge_reading_is_not_called_closed(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    directory = bridge.project(repo)[1]
+    write_json(
+        directory / FORGE_ISSUES,
+        {
+            "read_at": time.time() - 60,
+            "limit": 1000,
+            "issues": {"42": {"title": "Wire the forge"}},
+        },
+    )
+    cache = claimed(bridge, repo, paired, monkeypatch)
+    lines = board(monkeypatch, bridge, capsys)
+    assert rows(lines) == ["#42", "#43"]
+    assert not any(line.startswith("Closed or ended") for line in lines)
+    reading = json.loads(cache.read_text())
+    write_json(cache, {**reading, "read_at": time.time()})
+    lines = board(monkeypatch, bridge, capsys)
+    assert rows(lines) == ["#42"]
+    assert any(
+        line.startswith("Closed or ended on the forge, still owned: #43;")
+        for line in lines
+    )
+
+
 def test_a_fresh_forge_reading_hides_closed_issues_and_titles_the_rest(
     bridge, repo, paired, monkeypatch, capsys, offline
 ):
@@ -466,6 +499,7 @@ def test_a_failed_refresh_falls_back_to_the_stale_reading_once(
     bridge, repo, paired, monkeypatch, capsys, offline
 ):
     cache = claimed(bridge, repo, paired, monkeypatch)
+    edit(bridge, repo, "42", older_than_reading)
     write_json(
         cache,
         {
