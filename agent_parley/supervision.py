@@ -110,6 +110,17 @@ WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 WAKE_ATTENTION = "manual attention required"
 SESSION_HELD = "busy:session"
+WAKE_UNAVAILABLE = "unavailable"
+UNDELIVERED_WAKES = {
+    WAKE_UNAVAILABLE: (
+        "no launcher answered the lane's wake socket, so a client started "
+        "outside agent-parley run cannot be woken"
+    ),
+    SESSION_HELD: (
+        "a running launcher holds the session lock and its wake socket did "
+        "not answer"
+    ),
+}
 OPT_IN_MISSING = "setup gap: bridge tool approval not recorded"
 OPT_IN_COMMAND = "agent-parley approval resume --bridge-tools on"
 OPT_IN_REMEDY = (
@@ -430,6 +441,87 @@ def settle_reboot(home: Path, directory: Path, manifest: dict) -> list[str]:
                 marked.append(name)
     write_json(record, {"boot_id": current, "recorded": time.time()})
     return marked
+
+
+def rebind_sessions(home: Path, directory: Path, manifest: dict) -> list[str]:
+    """Binds a lane whose recorded session is gone to its live client.
+
+    A session continued with `--fork-session --resume` or started by hand
+    in the lane's worktree runs under a new session identifier in a process
+    the lane never recorded. While the recorded process lived, its hooks
+    were discarded as a second session; once that process ended, the lane
+    read as stopped, aged into `dead` and had its claims orphaned while the
+    operator was still working in it. Before presence is read, a lane whose
+    recorded session process is gone is bound to the live client its hooks
+    last came from, or failing that to the newest native client of the
+    lane's provider whose working directory is the lane worktree. The next
+    hook from that process is then the lane's own session and is adopted
+    under its new identifier, and the lane is never declared dead while a
+    client runs there. A retired lane, a lane recorded stopped by a host
+    restart, a lane whose checkpoint lock is busy and a platform that
+    cannot read working directories are left as they are.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+
+    Returns:
+        Participants whose record was bound to a live client.
+    """
+    from agent_parley import checkpoints
+
+    rebound = []
+    for name, participant in manifest["participants"].items():
+        if roster.retired(participant):
+            continue
+        try:
+            command = roster.provider(home, participant["provider"])["command"]
+        except (BridgeError, KeyError):
+            continue
+        with contextlib.suppress(LockBusy, OSError):
+            with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+                state = checkpoints.activity(directory, name)
+                if (
+                    not state
+                    or rebooted(state)
+                    or lane_state(state)["process_alive"] is True
+                ):
+                    continue
+                foreign = state.get("foreign_session") or {}
+                client = None
+                session = str(state.get("session_id") or "")
+                if type(foreign.get("pid")) is int and process.alive(
+                    foreign["pid"], foreign.get("ticks")
+                ):
+                    client = process.ServerProcess(
+                        foreign["pid"], str(foreign["ticks"])
+                    )
+                    session = str(foreign.get("session_id") or session)
+                else:
+                    client = process.worktree_client(
+                        Path(participant["lane"]), command
+                    )
+                if client is None:
+                    continue
+                state.pop("foreign_session", None)
+                state.update(
+                    session_id=session,
+                    session_pid=client.pid,
+                    session_ticks=client.ticks,
+                    session_boot=process.boot_id(),
+                    activity=IDLE,
+                    rebound={
+                        "pid": client.pid,
+                        "session_id": session,
+                        "at": time.time(),
+                    },
+                )
+                if session:
+                    state["resumable_session"] = session
+                write_json(directory / f"{name}-activity.json", state)
+                rebound.append(name)
+    return rebound
 
 
 def presence(directory: Path, name: str, inactive_after: float = 300) -> dict:
@@ -7088,6 +7180,11 @@ def poll(home: Path, directory: Path) -> None:
     A host restart since the previous poll is settled before anything else,
     so no part of this poll reads a session the restart ended as alive.
 
+    A lane whose recorded session process is gone is bound to a live client
+    still running in its worktree before presence is read, as
+    `rebind_sessions` describes, so a forked or resumed session is never
+    read as a dead lane.
+
     Launches are judged against their start deadline first, so a lane whose
     client never reported a native hook is published as not started before this
     same poll reads presence, publishes fitness and considers a wake.
@@ -7154,6 +7251,7 @@ def _poll(home: Path, directory: Path) -> None:
     stage("launches", launches, directory, manifest, config)
     stage("readings", refresh_readings, home, manifest, 2 * config["interval"])
     stage("lane evidence", settle_evidence, home, directory, manifest)
+    stage("sessions", rebind_sessions, home, directory, manifest)
     read_at = time.time()
     observations = {
         name: presence(directory, name, config["inactive_after"])
@@ -7577,6 +7675,31 @@ def wake_record(
                 lanes.write_wake(db, root, name, published)
             return lanes.read_wake(db, root, name)
     return {}
+
+
+def undelivered_wake(record: dict) -> str:
+    """States a wake that was attempted but never reached the lane.
+
+    A wake the launcher socket did not answer used to be stored as a bare
+    result that nothing reported, so a lane continued in a client the
+    launcher did not start was never told it had been asked for a turn and
+    the operator never learned why it stayed idle. The statement is shown
+    in `problems` and in the lane's next hook context.
+
+    Args:
+        record: Wake fields as `wake_record` returns them.
+
+    Returns:
+        One sentence naming when the wake was attempted and why it was not
+        delivered, or an empty string when the last wake was delivered,
+        refused for a reason reported elsewhere, or never attempted.
+    """
+    reason = UNDELIVERED_WAKES.get(str(record.get("result") or ""))
+    at = record.get("at")
+    if reason is None or not isinstance(at, (int, float)) or not at:
+        return ""
+    moment = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(at))
+    return f"wake attempted at {moment}, not delivered: {reason}"
 
 
 def store_wake(
@@ -8770,7 +8893,7 @@ def wake(
             result = terminal.request(directory, name)
         elif session_held(directory, name):
             result = terminal.request(directory, name)
-            if result == "unavailable":
+            if result == WAKE_UNAVAILABLE:
                 result = SESSION_HELD
         elif (
             (observed["process_alive"] is False or stopped)

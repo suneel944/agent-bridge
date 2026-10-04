@@ -166,7 +166,10 @@ A lane left dead past `orphan_retire_after` is the one exception: the service
 returns its claims and reservations to its peers, as
 [Coordination](coordination.md#a-dead-lanes-claims-are-offered-then-returned)
 describes, but keeps the lane and its worktree, so `restart` or
-`agent-parley run NAME --resume` still brings it back.
+`agent-parley run NAME --resume` still brings it back. A lane is never read as
+dead while a native client of its provider still runs in its worktree: a
+session forked or resumed there under a new session ID is bound to the lane
+instead, as [Monitoring](monitoring.md#a-second-session-in-a-lane) describes.
 
 A lane whose work has landed does not need removing by hand. The service sweeps
 merged lanes that hold no work, and the worktrees lanes made, at most every 900

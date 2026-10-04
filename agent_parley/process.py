@@ -199,6 +199,40 @@ def linux_matches_command(pid: int, home: Path) -> bool:
     return command[1:5] == expected
 
 
+def linux_worktree_clients(lane: Path, command: str) -> list[int]:
+    """Lists Linux processes running a native client inside a worktree.
+
+    A client counts when its working directory is the worktree or lies
+    inside it, and the base name of its first or second argument is the
+    client command, so both a native binary and a script run by an
+    interpreter such as `node` are recognized. A process that exits or
+    denies access while it is read is skipped.
+
+    Args:
+        lane: Lane worktree the client runs in.
+        command: Native client command, such as `claude`.
+
+    Returns:
+        Process IDs of every matching process, in `/proc` order.
+    """
+    found = []
+    target = lane.resolve()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            words = (entry / "cmdline").read_bytes().split(b"\x00")[:2]
+            if command.encode() not in (
+                os.path.basename(word) for word in words
+            ):
+                continue
+            if Path(os.readlink(entry / "cwd")).is_relative_to(target):
+                found.append(int(entry.name))
+        except OSError:
+            continue
+    return found
+
+
 def libc_pidfd(name: str, *arguments: int | None) -> int:
     """Calls the host's pidfd API when Python was built without its wrappers.
 
@@ -460,6 +494,23 @@ def darwin_matches_command(reader: PsReader, pid: int, home: Path) -> bool:
     return bool(command) and command.endswith(expected)
 
 
+def darwin_worktree_clients(lane: Path, command: str) -> list[int]:
+    """Lists macOS native clients inside a worktree, which is none.
+
+    `ps` does not report a process's working directory, and this module
+    reaches macOS through `ps` alone, so no client is ever found there and
+    a lane's liveness stays with its recorded session process.
+
+    Args:
+        lane: Lane worktree the client would run in.
+        command: Native client command.
+
+    Returns:
+        An empty list.
+    """
+    return []
+
+
 def darwin_terminate(
     reader: PsReader, local_reader: PsReader, pid: int, ticks: str
 ) -> None:
@@ -536,6 +587,8 @@ class Platform(NamedTuple):
             it to exit.
         boot_id: Names the current boot of the host, so a process record
             written before a restart is known to be from an earlier boot.
+        worktree_clients: Lists processes running a named native client
+            with a lane worktree as their working directory.
     """
 
     start_ticks: Callable[[int], str]
@@ -547,6 +600,7 @@ class Platform(NamedTuple):
     matches_command: Callable[[int, Path], bool]
     terminate: Callable[[int, str], None]
     boot_id: Callable[[], str]
+    worktree_clients: Callable[[Path, str], list[int]]
 
 
 def linux_boot_id() -> str:
@@ -594,6 +648,7 @@ def linux_platform() -> Platform:
         matches_command=linux_matches_command,
         terminate=linux_terminate,
         boot_id=linux_boot_id,
+        worktree_clients=linux_worktree_clients,
     )
 
 
@@ -622,6 +677,7 @@ def darwin_platform(
         matches_command=functools.partial(darwin_matches_command, reader),
         terminate=functools.partial(darwin_terminate, reader, local_reader),
         boot_id=darwin_boot_id,
+        worktree_clients=darwin_worktree_clients,
     )
 
 
@@ -963,6 +1019,41 @@ def recorded_process(
     except (OSError, IndexError, ValueError, TypeError):
         pass
     return None
+
+
+def worktree_client(lane: Path, command: str) -> ServerProcess | None:
+    """Names the native client running in a lane worktree, if one does.
+
+    A session forked or resumed outside the launcher keeps the lane's
+    worktree but runs in a process the lane never recorded. Its working
+    directory still names the lane, so it is found here and the lane is
+    not read as gone while it runs. When several clients run there, the
+    most recently started one is named, because a fork is started after
+    the session it continues.
+
+    Args:
+        lane: Lane worktree the client runs in.
+        command: Native client command, such as `claude`.
+
+    Returns:
+        Verified identity of the newest live client, or None when no live
+        client runs there or the platform cannot tell.
+    """
+    found = []
+    try:
+        candidates = PLATFORM.worktree_clients(lane, command)
+    except OSError:
+        return None
+    for pid in candidates:
+        try:
+            ticks = PLATFORM.start_ticks(pid)
+        except (OSError, IndexError, ValueError):
+            continue
+        if alive(pid, ticks):
+            found.append(ServerProcess(pid, ticks))
+    if not found:
+        return None
+    return max(found, key=lambda client: (len(client.ticks), client.ticks))
 
 
 def identify(record: dict, home: Path) -> ServerProcess | None:
