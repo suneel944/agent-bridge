@@ -203,6 +203,7 @@ class Reason(StrEnum):
     OPERATOR_STOPPED = "operator_stopped"
     OPERATOR_RESTARTED = "operator_restarted"
     PAUSED = "paused"
+    RETIRED = "retired"
     POLLED_DELIVERY = "polled_delivery"
     SERVICE_FALLBACK = "service_fallback"
     NOTIFICATION_FAILED = "notification_failed"
@@ -2936,6 +2937,34 @@ def paused_output(event: str) -> dict | None:
     return None
 
 
+def retired_output(event: str, agent: str) -> dict | None:
+    """Builds the native output a retired lane's session receives.
+
+    Retirement removes the lane's identity and credential, so no decision
+    can be served and no context exists to inject. The session itself is
+    still the operator's: every tool call is allowed and decides nothing,
+    and the turn boundaries that can carry text are told once, with the
+    re-admit command, so the agent reports the state instead of reading an
+    identity error as a lockout.
+
+    Args:
+        event: Native lifecycle event name.
+        agent: Retired participant.
+
+    Returns:
+        Native hook output carrying the notice, or None for an event that
+        has no context channel and is simply allowed.
+    """
+    if event in ("SessionStart", "UserPromptSubmit"):
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": roster.retired_reason(agent),
+            }
+        }
+    return None
+
+
 def outside_lane_output(event: str, cwd: Path, lane: Path) -> dict | None:
     """Builds the native output for an event whose cwd left the lane.
 
@@ -3226,6 +3255,10 @@ def checkpoint(
     participant = manifest["participants"].get(agent)
     if participant is None:
         raise BridgeError(f"{agent} is not a participant in this project.")
+    if roster.retired(participant):
+        told = retired_output(event, agent)
+        record(directory, agent, payload, Reason.RETIRED, told, "retired")
+        return told or {}
     lane = Path(participant["lane"]).resolve()
     cwd = Path(payload.get("cwd", str(lane))).resolve()
     if event == "PreToolUse" and not cwd.is_relative_to(lane):

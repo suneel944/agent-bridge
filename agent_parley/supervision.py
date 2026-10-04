@@ -2520,16 +2520,18 @@ def _continue_text(
         return (
             f"No held claim can move now.{said} Next work, in order: {listed}."
         )
+    records = [ledger["issues"].get(number) or {} for number in held or []]
     if any(
-        lifecycle.state(ledger["issues"].get(number) or {})["state"]
-        == lifecycle.READY
-        for number in held or []
+        lifecycle.state(record)["state"] == lifecycle.READY
+        or lifecycle.operator_blocked(record)
+        for record in records
     ):
         return (
             f"No held claim can move now.{said} Nothing else needs this lane, "
-            "but ready work stays claimed through verified integration, so "
-            "retire would be refused. End the turn; a change to that work "
-            "wakes this lane again."
+            "but ready work stays claimed through verified integration and "
+            "work blocked on an operator action stays with the lane that "
+            "recorded it, so retire would be refused. End the turn; a change "
+            "to that work wakes this lane again."
         )
     return (
         f"No held claim can move now.{said} Nothing else needs this lane: "

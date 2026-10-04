@@ -376,6 +376,32 @@ def actionable(ledger: dict, owner: str | None = None) -> list[str]:
     return sorted(found, key=int)
 
 
+def operator_blocked(record: dict) -> bool:
+    """Reports whether a claim waits on a condition only an operator meets.
+
+    A blocked claim that names no resuming issue recorded an external
+    condition, which is an operator action in practice; an older record
+    with no condition at all is read the same way. Releasing it on
+    retirement would hand the next lane the same block with the context
+    stripped, so dispatch and retirement treat it like ready work: it stays
+    with the lane that recorded it until that lane resolves, hands on or
+    releases it on purpose. A claim waiting on another issue is not kept:
+    that issue's completion resumes it for whichever lane holds it then.
+
+    Args:
+        record: Published issue ledger record.
+
+    Returns:
+        Whether the claim is blocked on anything but another issue.
+    """
+    execution = state(record)
+    if execution["state"] != BLOCKED:
+        return False
+    condition = execution.get("resume_when") or {}
+    kind = condition.get("kind") if isinstance(condition, dict) else condition
+    return kind != "issue"
+
+
 def describe_action(record: dict) -> str:
     """Returns the durable next action for one issue record.
 

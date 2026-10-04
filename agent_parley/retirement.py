@@ -172,20 +172,28 @@ def return_work(directory: Path, manifest: dict, name: str) -> dict:
 
     Raises:
         BridgeError: If the lane holds ready work, which must stay claimed
-            until verified integration completes. Every held issue is checked
+            until verified integration completes, or a claim blocked on an
+            operator action, which `lifecycle.operator_blocked` keeps with
+            the lane that recorded the block. Every held issue is checked
             before any is released, so a refusal leaves the lane's claims as
             they were rather than half returned.
     """
     ledger = issues.snapshot(directory)
     held = issues.holders(ledger).get(name, [])
-    ready = [number for number in held if _awaits(ledger["issues"][number])]
-    if ready:
-        listed = ", ".join(f"#{number}" for number in ready)
+    kept = [
+        number
+        for number in held
+        if _awaits(ledger["issues"][number])
+        or lifecycle.operator_blocked(ledger["issues"][number])
+    ]
+    if kept:
+        listed = ", ".join(f"#{number}" for number in kept)
         raise BridgeError(
-            f"{name} holds ready work ({listed}) that must stay claimed "
-            "until verified integration completes; land it with "
-            f"agent-parley participant merge {name}, or hand it on with "
-            "agent-parley issue offer, before retiring."
+            f"{name} holds ready or operator-blocked work ({listed}) that "
+            "must stay claimed; land ready work with agent-parley "
+            f"participant merge {name}, hand it on with agent-parley issue "
+            "offer, or release blocked work on purpose with agent-parley "
+            "issue release, before retiring."
         )
     participants = set(manifest["participants"])
     released: list[str] = []
