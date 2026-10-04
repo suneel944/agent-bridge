@@ -648,3 +648,83 @@ def test_a_held_blocked_report_followed_by_mail_on_its_issue_is_labelled(
         "#42 (reported 58m ago, 2 newer messages on it): "
         "Kit drafted; none posted"
     )
+
+
+def long_dead(bridge, monkeypatch, age=3 * 86400):
+    """Reads claude as a dead lane whose report and activity are `age` old."""
+    real = bridge.status_snapshot
+
+    def reading():
+        report = real()
+        for project in report["projects"]:
+            for record in project["participants"]:
+                if record["participant"] == "claude":
+                    record.update(lane_state="dead", report_age_seconds=age)
+                    record["availability"].update(
+                        process_alive=False, age_seconds=age
+                    )
+        return report
+
+    monkeypatch.setattr(bridge, "status_snapshot", reading)
+
+
+def lane_rows(output):
+    """Returns the LANE table rows of one board, keyed by lane name."""
+    return {
+        line.split()[0]: line
+        for line in output.splitlines()
+        if line.split()[:1] in (["claude"], ["codex"])
+    }
+
+
+def test_a_dead_lane_without_claims_past_retention_is_folded(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    long_dead(bridge, monkeypatch)
+    bridge.board(cli.Selection(project=str(repo)), width=None)
+    output = capsys.readouterr().out
+    assert "claude" not in lane_rows(output)
+    assert "codex" in lane_rows(output)
+    assert "1 dead lane older than 24h hidden; --all shows them" in output
+
+
+def test_a_dead_lane_inside_retention_stays_listed(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    long_dead(bridge, monkeypatch, age=3600)
+    bridge.board(cli.Selection(project=str(repo)), width=None)
+    output = capsys.readouterr().out
+    assert lane_rows(output)["claude"].split()[1] == "dead"
+    assert "hidden; --all shows them" not in output
+
+
+def test_a_dead_lane_still_holding_a_claim_stays_listed(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    bridge.issue(paired["lanes"]["claude"], "claim", "42")
+    long_dead(bridge, monkeypatch)
+    bridge.board(cli.Selection(project=str(repo)), width=None)
+    output = capsys.readouterr().out
+    assert lane_rows(output)["claude"].split()[1:3] == ["dead", "1"]
+    assert "dead lane older than" not in output
+
+
+def test_status_all_lists_a_folded_lane(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    long_dead(bridge, monkeypatch)
+    bridge.board(cli.Selection(project=str(repo)), width=None, every_claim=True)
+    output = capsys.readouterr().out
+    assert lane_rows(output)["claude"].split()[1] == "dead"
+    assert "hidden; --all shows them" not in output
+
+
+def test_status_reading_carries_the_project_retention(bridge, repo, paired):
+    [project] = bridge.status_snapshot()["projects"]
+    assert project["fold_after"] == supervision.DEFAULTS["fold_after"]
+
+
+def test_fold_after_is_bounded_like_every_other_interval():
+    assert supervision.settings({})["fold_after"] == 86400
+    with pytest.raises(cli.BridgeError, match="fold_after"):
+        supervision.settings({"fold_after": 0})

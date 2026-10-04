@@ -406,7 +406,8 @@ its lane history.
 
 One screen says what needs you now. `agent-parley problems` lists, longest-held
 first, with rows older than a day moved under an `Older than a day:` heading at
-the end, every condition an operator should act on: a lane stalled or inactive
+the end and the rows of lanes dead past the project's `fold_after` counted on
+one closing line that `--all` expands, every condition an operator should act on: a lane stalled or inactive
 past its supervision threshold, a claim past its deadline, a handoff offer with
 no answer, a message awaiting acknowledgement past `--ack-after`, a lane whose
 branch drifted, a lane whose session process is no longer confirmed running and

@@ -44,6 +44,7 @@ from agent_parley import (
     tables,
 )
 from agent_parley.state import BridgeError
+from agent_parley.status import fold_line, folded
 
 STORE = "store"
 SERVICE = "service"
@@ -1904,7 +1905,10 @@ def derive(
         leads the list, because no other row can be acted on until the store is
         usable and the service is up. Each row names its actor: the rows the
         coordination service already handles report what its wake loop has
-        attempted, and the rest carry what the operator can run. A row reports;
+        attempted, and the rest carry what the operator can run. A row of a
+        lane `folded` out as long dead that is itself older than the
+        project's `fold_after` carries that interval as `folded`, so `lines`
+        and `rendered` can count it instead of listing it. A row reports;
         nothing here revokes, releases or wakes.
     """
     stamp = now or time.time()
@@ -1938,6 +1942,7 @@ def derive(
         config = supervision.configuration(home, data)
         after = ack_after or config["stalled_after"]
         repo = f"--repo {shlex.quote(str(project['root']))}"
+        start = len(aged)
         found: list[dict] = []
         states = {
             record["participant"]: record.get("lane_state")
@@ -1983,6 +1988,7 @@ def derive(
         aged.extend(_checks_failed_rows(directory, project["root"], stamp))
         aged.extend(_checks_refused_rows(directory, project["root"], stamp))
         aged.extend(_crossing_rows(project, stamp))
+        _fold(aged[start:], project, config["fold_after"])
     aged.sort(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )
@@ -2002,21 +2008,64 @@ def _stale(row: dict) -> bool:
     return (row["seconds"] or 0) > STALE_AFTER
 
 
-def lines(rows: list[dict]) -> list[str]:
+def _fold(rows: list[dict], project: dict, after: float) -> None:
+    """Marks the old rows of one project's long-dead lanes as folded.
+
+    Args:
+        rows: The rows `derive` produced for the project, marked in place.
+        project: The project record from the status reading.
+        after: The project's retention interval, `fold_after`, in seconds.
+    """
+    gone = {
+        record["participant"]
+        for record in project["participants"]
+        if folded(record, after)
+    }
+    for row in rows:
+        if row["participant"] in gone and (row["seconds"] or 0) > after:
+            row["folded"] = after
+
+
+def shown(rows: list[dict], everything: bool = False) -> list[dict]:
+    """Keeps the rows a default view lists.
+
+    Args:
+        rows: Rows `derive` produced.
+        everything: Keep the folded rows too, as `--all` asks.
+
+    Returns:
+        Every row when `everything` is set, else the rows not folded.
+    """
+    if everything:
+        return rows
+    return [row for row in rows if not row.get("folded")]
+
+
+def lines(rows: list[dict], everything: bool = False) -> list[str]:
     """Renders the rows as one line each, or one line saying there are none.
 
     Args:
         rows: Rows `derive` produced.
+        everything: List the folded rows too instead of counting them.
 
     Returns:
         One line per row, with `STALE_HEADING` above the trailing rows
         older than a day, closed by a line counting what needs an operator
         against what the coordination service is handling whenever any row
         belongs to the service, so a screen of rows still says how much of it
-        is someone's work.
+        is someone's work. Folded rows are left out and counted on one last
+        line naming `--all`, unless `everything` lists them.
     """
+    hidden = [row["folded"] for row in rows if row.get("folded")]
+    rows = shown(rows, everything)
+    if everything or not hidden:
+        closing = []
+    else:
+        closing = [fold_line(len(hidden), max(hidden), "dead-lane problem")]
     if not rows:
-        return ["No problems: every lane, claim and store reading is clear."]
+        return closing or [
+            "No problems: every lane, claim and store reading is clear."
+        ]
     width = max(len(row["condition"]) for row in rows)
     named = max(len(row["participant"] or "-") for row in rows)
     listed = [
@@ -2036,23 +2085,27 @@ def lines(rows: list[dict]) -> list[str]:
             f"{len(rows) - handled} need an operator; {handled} the "
             "coordination service is handling."
         )
-    return listed
+    return listed + closing
 
 
-def rendered(rows: list[dict]) -> dict:
+def rendered(rows: list[dict], everything: bool = False) -> dict:
     """Shapes the rows for the machine-readable document.
 
     Args:
         rows: Rows `derive` produced.
+        everything: Keep the folded rows in the document too.
 
     Returns:
-        Every row, the row count, and the split between the rows an operator
-        owns and the rows the coordination service is already handling.
+        The rows `shown` keeps, their count, the split between the rows an
+        operator owns and the rows the coordination service is already
+        handling, and how many folded rows were left out.
     """
-    handled = sum(row["actor"] == BY_SERVICE for row in rows)
+    kept = shown(rows, everything)
+    handled = sum(row["actor"] == BY_SERVICE for row in kept)
     return {
-        "problems": rows,
-        "count": len(rows),
-        "operator": len(rows) - handled,
+        "problems": kept,
+        "count": len(kept),
+        "operator": len(kept) - handled,
         "service": handled,
+        "folded": len(rows) - len(kept),
     }

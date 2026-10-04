@@ -69,6 +69,7 @@ DEFAULTS = {
     "titles": True,
     "rerun_cancelled": True,
     "ci_rounds": 2,
+    "fold_after": 86400,
 }
 
 MAX_COMPLETION_REMINDERS = 100
@@ -185,6 +186,7 @@ def settings(value: dict) -> dict:
         "claim_idle_after",
         "takeover_grace",
         "convergence_after",
+        "fold_after",
     ):
         if (
             type(result[field]) not in (int, float)

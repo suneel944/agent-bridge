@@ -3717,7 +3717,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     health.add_argument(
         "--all",
         action="store_true",
-        help="Also list claims whose issue or pull request ended on the forge.",
+        help=(
+            "Also list claims whose issue or pull request ended on the forge, "
+            "and lanes dead past the project's fold_after with no claim."
+        ),
     )
     health.add_argument(
         "--all-projects",
@@ -4446,6 +4449,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help=(
             "Seconds a message may await acknowledgement before it is "
             "listed; the project's stalled_after when omitted."
+        ),
+    )
+    triaging.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Also list the rows of lanes dead past the project's fold_after "
+            "that are older than it, which one line otherwise counts."
         ),
     )
     triage = triaging.add_subparsers(dest="action")
@@ -5859,11 +5870,11 @@ def main() -> int:
         elif args.command == "problems":
             found = bridge.problems(args.ack_after)
             print(
-                views.render("problems", problems.rendered(found))
+                views.render("problems", problems.rendered(found, args.all))
                 if args.json
-                else "\n".join(problems.lines(found))
+                else "\n".join(problems.lines(found, args.all))
             )
-            return 1 if found else 0
+            return 1 if problems.shown(found, args.all) else 0
         elif args.command in ("gc", "reclaim"):
             if args.force and not args.apply:
                 parser.error("--force needs --apply.")
