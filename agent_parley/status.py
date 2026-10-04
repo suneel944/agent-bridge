@@ -306,6 +306,27 @@ def since(instant: float) -> int | None:
     return max(int(time.time() - instant), 0) if instant else None
 
 
+def moved_after(claim: dict, known: dict) -> bool:
+    """Reports whether a claim progressed after the forge reading was taken.
+
+    A number missing from the cached open-issue reading is evidence that
+    the issue closed only when the reading is newer than the claim. A lane
+    that opens an issue and claims it inside the poll interval is otherwise
+    told to resolve work it picked up minutes ago, as
+    `supervision.end_closed_issues` already guards for unowned issues.
+
+    Args:
+        claim: One claim record from the status reading.
+        known: Answer of `StatusMixin.forge_issues`.
+
+    Returns:
+        True when the claim's last progress is more recent than the reading.
+    """
+    touched = claim.get("last_event_seconds")
+    age = known.get("age_seconds")
+    return touched is not None and age is not None and touched < age
+
+
 def reported_since(record: dict) -> bool:
     """Reports whether a claim's holder reported on it since claiming it.
 
@@ -1416,7 +1437,9 @@ class StatusMixin(BridgeCore):
             for claim in record["claims"]:
                 entry = (opened or {}).get(str(claim["issue"])) or {}
                 closed = claim["ended"] or (
-                    opened is not None and str(claim["issue"]) not in opened
+                    opened is not None
+                    and str(claim["issue"]) not in opened
+                    and not moved_after(claim, known)
                 )
                 if closed:
                     ended.append(claim["issue"])
