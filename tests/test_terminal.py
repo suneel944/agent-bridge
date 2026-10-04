@@ -28,6 +28,23 @@ def _idle(updated: float) -> dict:
     }
 
 
+def _answered(directory: Path, name: str, timeout: float = 10) -> str:
+    """Repeats a wake request until the launcher answers or the timeout.
+
+    `terminal.request` reports unavailable for any socket error, including
+    its one-second receive timeout, so a launcher that is listening but
+    slow on a loaded runner reads the same as one that is gone. The tests
+    here start the launcher themselves, so unavailable is never the
+    expected answer and only means the launcher has not answered yet.
+    """
+    deadline = time.monotonic() + timeout
+    answer = terminal.request(directory, name)
+    while answer == "unavailable" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        answer = terminal.request(directory, name)
+    return answer
+
+
 def test_control_socket_names_fit_valid_long_participants():
     directory = Path(
         "/home/operator/.local/state/agent-parley/projects/0123456789abcdef"
@@ -222,7 +239,7 @@ def test_attached_launcher_admits_a_wake_after_a_cursor_report():
             assert b"READY" in _read_until(master, b"READY")
             os.write(master, b"\x1b[12;1R")
             time.sleep(0.5)
-            assert terminal.request(directory, "lane") == "accepted"
+            assert _answered(directory, "lane") == "accepted"
             received = _read_until(master, b"RECEIVED:")
             assert terminal.PROMPT.encode() in received.split(b"RECEIVED:")[1]
             os.write(master, b"typed")
@@ -306,7 +323,7 @@ def test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line(
             assert b"READY" in _read_until(master, b"READY")
             os.write(master, entered)
             time.sleep(terminal.ESCAPE_TIMEOUT + 0.5)
-            assert terminal.request(directory, "lane") == "accepted"
+            assert _answered(directory, "lane") == "accepted"
             received = _read_until(master, b"RECEIVED:")
             assert terminal.PROMPT.encode() in received.split(b"RECEIVED:")[1]
         finally:
