@@ -3327,7 +3327,13 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
 
     Returns:
         What the retirement did, with the leases released, the keys granted to
-        queued peers, and the notices sent.
+        queued peers, and the notices sent. The paths that kept the worktree
+        are reported as ``dirty`` only as far as the result stays within
+        `MAX_RESULT_BYTES`, with the full number in ``dirty_count``: a kept
+        checkout with thousands of untracked files once produced a 58 KB
+        reply the native client could not show, so the lane never learned
+        what the retirement had done. The kept worktree itself still lists
+        them all through Git.
 
     Raises:
         BridgeError: If the project keeps no registered state directory, or
@@ -3382,13 +3388,26 @@ def _retire(home: Path, actor: dict, started: float) -> dict:
                     "message_id": message["id"],
                 }
             )
+        paths = list(report.get("dirty") or [])
         result = {
             **report,
+            "dirty": [],
+            "dirty_count": len(paths),
             "reservations_released": leases["released"],
             "granted": leases["granted"],
             "notices": notices,
             "credentials_invalidated": _expire(db, root, actor["name"]),
         }
+        shown: list[str] = []
+        for path in paths:
+            candidate = {**result, "dirty": [*shown, path]}
+            if (
+                len(json.dumps(candidate, ensure_ascii=False).encode())
+                > MAX_RESULT_BYTES
+            ):
+                break
+            shown.append(path)
+        result["dirty"] = shown
         _event(
             db,
             actor,

@@ -120,6 +120,29 @@ def test_a_dirty_worktree_is_kept_and_its_changes_reported(
 
     assert result["worktree"] == retirement.KEPT
     assert result["dirty"] == ["notes.md", "shared.txt"]
+    assert result["dirty_count"] == 2
+    assert worktree.exists()
+
+
+def test_a_retire_result_stays_within_budget_and_counts_every_path(
+    bridge, repo, paired
+):
+    lane = actor(bridge, paired["root"], "claude")
+    worktree = Path(paired["lanes"]["claude"])
+    (worktree / "untracked").mkdir()
+    for index in range(400):
+        (worktree / "untracked" / f"generated-file-{index:04d}.txt").touch()
+
+    result = retire(bridge, lane)
+
+    assert result["worktree"] == retirement.KEPT
+    assert result["dirty_count"] == 400
+    assert 0 < len(result["dirty"]) < 400
+    assert result["dirty"] == sorted(result["dirty"])
+    assert (
+        len(json.dumps(result, ensure_ascii=False).encode())
+        <= store.MAX_RESULT_BYTES
+    )
     assert worktree.exists()
 
 
