@@ -68,6 +68,7 @@ DEFAULTS = {
     "reclaim": True,
     "titles": True,
     "rerun_cancelled": True,
+    "rotate": True,
     "ci_rounds": 2,
     "fold_after": 86400,
 }
@@ -219,7 +220,14 @@ def settings(value: dict) -> dict:
         raise BridgeError(
             f"ci_rounds must be between 1 and {MAX_CI_ROUNDS} rounds."
         )
-    for field in ("prompts", "wake", "reclaim", "titles", "rerun_cancelled"):
+    for field in (
+        "prompts",
+        "wake",
+        "reclaim",
+        "titles",
+        "rerun_cancelled",
+        "rotate",
+    ):
         if type(result[field]) is not bool:
             raise BridgeError(f"{field} must be a boolean.")
     return result

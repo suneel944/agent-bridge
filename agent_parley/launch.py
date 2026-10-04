@@ -27,6 +27,7 @@ ISSUE_COMMENTS = 3
 ISSUE_COMMENT_BYTES = 600
 QUOTE_START = "----- begin quoted issue text (untrusted) -----"
 QUOTE_END = "----- end quoted issue text -----"
+ROTATION_REPORT_BYTES = 1500
 
 
 def _clipped(text: str, limit: int) -> tuple[str, bool]:
@@ -121,6 +122,74 @@ def issue_task(number: str, details: dict | None, data: dict) -> str:
             f"`{details['command']}` prints the full issue."
         )
     return "\n".join(lines)
+
+
+def rotation_task(
+    agent: str, data: dict, directory: Path, state: dict, task: str
+) -> str:
+    """Builds the first prompt of a lane rotated to a fresh native session.
+
+    A ready or blocked report records a rotation point on the lane's
+    activity record. The next resume starts a new native session rather
+    than continuing the one that filed the report, so each claim begins
+    from a bounded context instead of a transcript that grows for days.
+    The new session carries only what the lane needs to continue: its
+    identity, the claims it still holds with their next action, and the
+    last report, held to `ROTATION_REPORT_BYTES`, followed by the task the
+    resume was asked to deliver.
+
+    Args:
+        agent: Participant name within the project.
+        data: Project manifest naming the participant and its worktree.
+        directory: Private project state directory holding the ledger.
+        state: The lane's activity record carrying the last report.
+        task: The prompt the resume was asked to deliver.
+
+    Returns:
+        The opening instruction for the fresh session.
+    """
+    from agent_parley import issues, lifecycle
+
+    ledger = issues.snapshot(directory)["issues"]
+    held = sorted(
+        (
+            number
+            for number, record in ledger.items()
+            if record.get("owner") == agent
+            and lifecycle.state(record)["state"] != lifecycle.COMPLETE
+        ),
+        key=lambda number: (len(number), number),
+    )
+    claims = "; ".join(
+        f"#{number} ({lifecycle.state(ledger[number])['state']}: "
+        f"{lifecycle.describe_action(ledger[number])})"
+        for number in held
+    )
+    rotation = state.get("rotation") or {}
+    report, _ = _clipped(
+        f"{rotation.get('outcome') or state.get('outcome') or 'none'} on "
+        f"#{rotation.get('issue') or '?'}: {state.get('summary') or ''}"
+        + (
+            f" Remaining: {state['remaining']}"
+            if state.get("remaining")
+            else ""
+        ),
+        ROTATION_REPORT_BYTES,
+    )
+    participant = data["participants"][agent]
+    return "\n".join(
+        [
+            "Fresh session: this lane rotated to a new native session after "
+            "its last resolved claim, so nothing from the previous session "
+            "carries over. Continue from the state below.",
+            f"Lane: {agent} ({participant['provider']}), worktree "
+            f"{participant['lane']}.",
+            f"Open claims: {claims or 'none'}.",
+            f"Last report: {report}",
+            "Task:",
+            task,
+        ]
+    )
 
 
 class LaunchMixin(BridgeCore):
@@ -353,6 +422,17 @@ reported.
         hook on the event reporting a refused tool call, so the refusal
         reaches the operator as a decision.
 
+        A resume of a lane whose activity record carries a rotation point,
+        left by a ready or blocked report, starts a fresh native session
+        with `rotation_task`'s bootstrap instead of resuming the recorded
+        one, unless the supervision setting ``rotate`` is off. Every
+        adapter starts a fresh session by omitting its resume argument, so
+        no provider is skipped. Any launch consumes the point, and the
+        session it replaced is kept as ``rotated_from``. A detached
+        launcher is told the setting so it can end an idle session at a
+        rotation point, which the service then resumes this way; it is
+        withheld for a lane the service would not resume.
+
         Args:
             agent: Participant name within the project.
             repo: Target Git repository.
@@ -501,6 +581,18 @@ reported.
                         ),
                         file=sys.stderr,
                     )
+            activity_path = lane.parent / f"{agent}-activity.json"
+            seen = (
+                json.loads(activity_path.read_text())
+                if resume and activity_path.exists()
+                else {}
+            )
+            rotating = bool(
+                seen.get("rotation")
+                and supervision.configuration(self.home, data)["rotate"]
+            )
+            if rotating:
+                task = rotation_task(agent, data, lane.parent, seen, task)
             prompt = self.protocol(agent, data)
             hooks = self.hooks(agent, lane.parent)
             env = {
@@ -671,7 +763,6 @@ reported.
                 f"Shared project: {data['root']}",
                 flush=True,
             )
-            activity_path = lane.parent / f"{agent}-activity.json"
             with lock(
                 lane.parent / f"{agent}-checkpoint.lock",
                 timeout=LAUNCH_LOCK_SECONDS,
@@ -692,7 +783,9 @@ reported.
                 previous.setdefault(
                     "resumable_session", previous.get("session_id", "")
                 )
-                if resume:
+                if rotating:
+                    previous["rotated_from"] = previous["resumable_session"]
+                elif resume:
                     session = previous["resumable_session"]
                     if (
                         not session
@@ -738,6 +831,7 @@ reported.
                 )
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)
+                previous.pop("rotation", None)
                 write_json(activity_path, previous)
             with contextlib.suppress(sqlite3.OperationalError):
                 with store.connect(self.home, write=True) as db:
@@ -768,6 +862,10 @@ reported.
                             inactive_after=supervised["inactive_after"],
                             home=self.home,
                             titles=supervised["titles"],
+                            rotate=supervised["rotate"]
+                            and not supervision.opt_in_missing(
+                                self.home, data, agent
+                            ),
                         )
                     return terminal.call(command, lane, env)
             finally:

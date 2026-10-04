@@ -3445,6 +3445,7 @@ def checkpoint(
             state.pop("roster", None)
             state.pop("work_offer", None)
             state.pop("foreign_session", None)
+            state.pop("rotation", None)
         if event == "SessionStart":
             state["issue_revision"] = -1
             state.pop("delivered_items", None)
