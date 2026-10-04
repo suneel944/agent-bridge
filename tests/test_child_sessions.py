@@ -76,6 +76,25 @@ def test_a_worktree_a_lane_made_is_attributed_to_it(bridge, repo, paired):
     manifest = roster.read(directory)
     assert reclaim.child_worktrees(directory, manifest, "claude") == [child]
     assert reclaim.child_worktrees(directory, manifest, "codex") == []
+    assert reclaim.children_by_lane(manifest) == {"claude": [child]}
+
+
+def test_problems_lists_the_registered_worktrees_once_per_project(
+    bridge, repo, paired, served, monkeypatch
+):
+    directory = bridge.project(repo)[1]
+    made(repo, directory, "claude-subtask")
+    listed = []
+    original = reclaim._entries
+
+    def counted(root):
+        listed.append(root)
+        return original(root)
+
+    monkeypatch.setattr(reclaim, "_entries", counted)
+    bridge.problems()
+    assert len(roster.read(directory)["participants"]) == 2
+    assert len(listed) == 1
 
 
 def test_a_session_in_a_worktree_a_lane_made_counts_toward_its_budget(

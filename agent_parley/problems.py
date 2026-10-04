@@ -723,8 +723,8 @@ def _unresolved_rows(
 
 def _child_rows(
     home: Path,
-    directory: Path,
     manifest: dict,
+    children: list[Path],
     record: dict,
     name: str,
     repo: str,
@@ -737,12 +737,15 @@ def _child_rows(
     can start further native sessions in a worktree the lane made for a
     pull request or a sub-task. Agent Parley never sees those sessions
     start and never stops them; this only tells the lane, once its claim
-    has ended, that one is still writing to its session record.
+    has ended, that one is still writing to its session record. The
+    worktrees come from one `reclaim.children_by_lane` reading per project,
+    so a project with hundreds of registrations is listed once, not once
+    per lane.
 
     Args:
         home: Private bridge state root.
-        directory: Private project state directory.
         manifest: Project manifest holding this participant.
+        children: Worktrees Git registers and attributes to this lane.
         record: One participant record from the status reading.
         name: Participant that owns the lane.
         repo: Rendered `--repo` argument naming the project.
@@ -755,10 +758,7 @@ def _child_rows(
         no worktree beyond its own is attributed to it, or none of them
         show activity within `CHILD_RECENT` seconds.
     """
-    if record["claims"]:
-        return []
-    children = reclaim.child_worktrees(directory, manifest, name)
-    if not children:
+    if record["claims"] or not children:
         return []
     participant = manifest["participants"][name]
     count, latest = records.child_activity(home, participant, children)
@@ -1943,6 +1943,7 @@ def derive(
             record["participant"]: record.get("lane_state")
             for record in project["participants"]
         }
+        children = reclaim.children_by_lane(data)
         for record in project["participants"]:
             found.extend(
                 _lane_rows(
@@ -1959,8 +1960,8 @@ def derive(
             aged.extend(
                 _child_rows(
                     home,
-                    directory,
                     data,
+                    children.get(record["participant"], []),
                     record,
                     record["participant"],
                     repo,
