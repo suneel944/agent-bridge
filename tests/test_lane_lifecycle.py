@@ -19,6 +19,7 @@ from agent_parley import (
     cli,
     dashboard,
     process,
+    retirement,
     roster,
     store,
     supervision,
@@ -94,6 +95,37 @@ def test_pause_refuses_tool_use_through_the_hook_with_one_reason(
     assert details["permissionDecision"] == "deny"
     assert details["permissionDecisionReason"] == roster.PAUSED_REASON
     assert "paused" in reasons(directory, "claude")
+
+
+def test_a_retired_lane_keeps_its_tools_and_is_told_the_readmit_command(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    assert retirement.withdraw(directory, "claude")["participant"] == "claude"
+    assert not (directory / "claude-identity.json").exists()
+    event = {
+        "session_id": "s1",
+        "cwd": str(lane),
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+    }
+    allowed = checkpoints.checkpoint(
+        bridge.home,
+        directory,
+        "claude",
+        {"hook_event_name": "PreToolUse", **event},
+    )
+    assert allowed == {}
+    told = checkpoints.checkpoint(
+        bridge.home,
+        directory,
+        "claude",
+        {"hook_event_name": "UserPromptSubmit", "prompt": "go", **event},
+    )
+    context = told["hookSpecificOutput"]["additionalContext"]
+    assert "agent-parley participant add claude" in context
+    assert reasons(directory, "claude")[-2:] == ["retired", "retired"]
 
 
 def test_pause_retains_claims_and_never_releases_them(bridge, repo, paired):

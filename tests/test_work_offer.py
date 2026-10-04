@@ -1959,6 +1959,28 @@ def test_a_lane_holding_ready_work_is_not_told_to_retire():
     assert "retire would be refused" in text
 
 
+def test_a_lane_blocked_on_an_operator_action_is_not_told_to_retire():
+    ledger = {
+        "issues": {
+            "3": {
+                "owner": "claude",
+                "claim_id": "c",
+                "blocked_by": [],
+                "execution": {
+                    "authorized": True,
+                    "state": "blocked",
+                    "claim_id": "c",
+                    "resume_when": {"kind": "external", "detail": "key"},
+                },
+            }
+        }
+    }
+    text = waiting_offer(ledger, NO_LEADS)["text"]
+    assert "retire MCP tool" not in text
+    assert "blocked on an operator action" in text
+    assert "retire would be refused" in text
+
+
 def test_a_waiting_lane_answers_peer_mail_before_new_work():
     leads = {
         "mail": ["#12 from codex"],

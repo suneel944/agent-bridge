@@ -3378,11 +3378,16 @@ the time it retired: `status` and `top` show the lane as `retired AGE ago`, the
 JSON views carry `retired_at`, and the service neither wakes it nor names it in
 a work offer. A lane whose worktree is dirty, or holds files Git ignores such
 as a local `.env`, keeps it, and those paths are reported in the tool result;
-no confirmation is asked, so ignored files are never deleted this way. A lane that holds ready work is refused before
-anything is released, naming those issues: ready work stays claimed until
-`agent-parley participant merge NAME` lands it, or the lane offers it to a
-peer. Return
-that lane to service with the same
+no confirmation is asked, so ignored files are never deleted this way. A lane that holds ready work, or a claim blocked
+on anything but another issue, is refused before anything is released, naming
+those issues: ready work stays claimed until `agent-parley participant merge
+NAME` lands it or the lane offers it to a peer, and an operator-blocked claim
+stays with the lane that recorded it until that lane offers it or releases it
+with `issue release` on purpose. The service's work offer says the same
+instead of telling such a lane to retire. The session that retired keeps its
+native tools: the hook allows every call, decides nothing, and tells the
+session start and each prompt once that the lane retired, naming the
+re-admit command. Return that lane to service with the same
 `participant add NAME` command that created it, which restores its worktree on
 its own branch; the next launch registers a fresh credential.
 

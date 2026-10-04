@@ -568,6 +568,24 @@ def resources(declared: list) -> list[str]:
     return sorted(set(declared))
 
 
+def retired_reason(name: str) -> str:
+    """Names what a retired lane's session can still do and who readmits it.
+
+    Args:
+        name: Participant that retired.
+
+    Returns:
+        One notice: coordination is gone, local tools still run, and the
+        operator's re-admit command.
+    """
+    return (
+        f"{name} retired from this project. Coordination is gone: native "
+        "tools run without it and the agent-parley MCP tools refuse. Only "
+        f"the operator re-admits the lane, with `agent-parley participant "
+        f"add {name}` in the base checkout."
+    )
+
+
 PAUSED_REASON = (
     "This lane is paused by the operator. Coordination calls and tool use "
     "stay refused until `agent-parley participant resume` runs in the base "

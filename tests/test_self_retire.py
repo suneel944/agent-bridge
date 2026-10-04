@@ -352,7 +352,7 @@ def test_a_lane_holding_ready_work_is_refused_before_releasing_any(
     bridge.issue(lane, "claim", "5")
     bridge.report(lane, "ready", "Done.", "", "make check", issue="5")
     for _ in range(2):
-        with pytest.raises(BridgeError, match=r"ready work \(#5\)"):
+        with pytest.raises(BridgeError, match=r"operator-blocked work \(#5\)"):
             retirement.withdraw(directory, "claude")
     ledger = issues.snapshot(directory)["issues"]
     assert [ledger[number]["owner"] for number in ("4", "5")] == [
@@ -360,6 +360,35 @@ def test_a_lane_holding_ready_work_is_refused_before_releasing_any(
         "claude",
     ]
     assert not roster.retired(entry(directory, "claude"))
+
+
+def test_a_lane_blocked_on_an_operator_action_is_refused(bridge, repo, paired):
+    directory = bridge.project(repo)[1]
+    lane = paired["lanes"]["claude"]
+    bridge.issue(lane, "claim", "4")
+    bridge.issue(lane, "claim", "5")
+    bridge.report(
+        lane, "blocked", "Waiting.", "operator rotates the key", "", issue="5"
+    )
+    with pytest.raises(BridgeError, match=r"\(#5\).*issue release"):
+        retirement.withdraw(directory, "claude")
+    ledger = issues.snapshot(directory)["issues"]
+    assert [ledger[number]["owner"] for number in ("4", "5")] == [
+        "claude",
+        "claude",
+    ]
+    assert not roster.retired(entry(directory, "claude"))
+
+
+def test_a_lane_blocked_on_another_issue_retires(bridge, repo, paired):
+    directory = bridge.project(repo)[1]
+    lane = paired["lanes"]["claude"]
+    bridge.issue(paired["lanes"]["codex"], "claim", "4")
+    bridge.issue(lane, "claim", "5")
+    bridge.report(
+        lane, "blocked", "Waiting.", "needs #4", "", issue="5", resume_on="4"
+    )
+    assert retirement.withdraw(directory, "claude")["released"] == ["5"]
 
 
 def test_a_held_lane_lock_refuses_the_retirement_and_changes_nothing(

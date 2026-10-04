@@ -371,9 +371,9 @@ TOOLS = [
     ),
     _tool(
         store.RETIRE,
-        "Retire this lane when nothing is left: releases your claims, "
-        "handoffs and keys, then ends your credential. Only the operator "
-        "re-admits you.",
+        "Retire when nothing is left: releases claims, handoffs and keys. "
+        "Refused over ready or operator-blocked work. Re-admit: agent-parley "
+        "participant add.",
         {},
         [],
     ),
