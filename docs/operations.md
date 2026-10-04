@@ -1443,6 +1443,24 @@ lane to call the `retire` MCP tool rather than answer with a status line. A
 lane that can still resume a claim is told to resume it, and the claims that
 wait are listed after it.
 
+**Lanes woken together are pointed at different work.** One sweep offers
+work to lanes in name order, and each lane's next candidate, or the first
+issue its pull offer lists, skips the issues already named to an earlier lane
+while another candidate remains. The offer records that issue as `lead` in
+the lane's `<lane>-work.json`, and `agent-parley issue next` ranks an issue
+another lane's `lead` names below every issue no lane was pointed at. The
+offer and `issue next` both tell the lane to claim before exploring or
+editing, because the claim is what settles a race. Offers stay advisory:
+nothing is claimed for a lane.
+
+**New forge issues are offered before anyone claims them.** An issue enters
+the ledger only when it is claimed, planned or assigned, so pull offers, next
+leads and `issue next` also read the open issues in the poll's
+`forge-issues.json` cache. An open issue the ledger has no record of counts
+as unclaimed and unblocked, with its forge title. A cache older than twice
+the refresh interval, or a missing one, adds nothing, and the ledger itself is
+never written for this.
+
 **An idle holder offers the split itself.** A claim held by a lane that has
 gone quiet on it is a defect that reads as healthy: the claim is held, the
 remaining work is untouched, and no row says anything is wrong. The runtime
@@ -1752,8 +1770,9 @@ the `participants` the acknowledgement was recorded for.
 `candidates`. Each candidate carries `issue`, the recorded `title`, its plan
 `group` and whether that group is `group_underway`, the owned issues it
 `unblocks`, the `provider` it declares, the peer `overlaps` and forecast
-`collisions` its likely paths run into, and the ordered `reasons` for its
-place.
+`collisions` its likely paths run into, `named_to`, the other lane whose
+published work names it as next work or empty, and the ordered `reasons` for
+its place.
 
 `resources show --json` reports `root`, the declared `resources` array and
 `declared`. `status` reports `server`, `state_directory`, `inbound` as

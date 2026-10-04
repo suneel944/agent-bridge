@@ -2236,6 +2236,53 @@ def published_work(directory: Path, name: str) -> dict:
     return {**unknown, **record} if isinstance(record, dict) else unknown
 
 
+def named_leads(directory: Path, manifest: dict, name: str) -> dict[str, str]:
+    """Maps each issue another lane's published work names to that lane.
+
+    `work` records the issue it pointed each lane at as its offer's
+    ``lead``: the next work of a lane whose held claims all wait, or the
+    first pick of a pull offer. `issue next` ranks those issues last, so a
+    lane does not chase the issue a peer was just told to claim. A retired
+    lane is offered nothing, so a lead left in its last publication is
+    ignored.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant doing the reading, whose own lead is left out.
+
+    Returns:
+        Issue number to the lane named for it, the first lane in name order
+        winning when two publications name one issue.
+    """
+    named: dict[str, str] = {}
+    for peer in sorted(manifest["participants"]):
+        if peer == name or roster.retired(manifest["participants"][peer]):
+            continue
+        offer = published_work(directory, peer).get("offer")
+        lead = offer.get("lead") if isinstance(offer, dict) else None
+        if isinstance(lead, str) and lead:
+            named.setdefault(lead, peer)
+    return named
+
+
+def _first_untaken(available: list[str], taken: set[str]) -> list[str]:
+    """Moves the first issue no earlier lane was pointed at to the front.
+
+    Args:
+        available: Unclaimed and unblocked issues, best first.
+        taken: Issues already named to a lane earlier in this sweep.
+
+    Returns:
+        The same issues with the first untaken one first, or unchanged when
+        every one is taken.
+    """
+    for number in available:
+        if number not in taken:
+            return [number, *(other for other in available if other != number)]
+    return available
+
+
 def _pull_text(available: list[str], busy: list[str]) -> str:
     """Describes the work an idle lane could take from the ledger."""
     parts = ["Work offer. You hold no claim and no fit check found a blocker."]
@@ -2247,8 +2294,9 @@ def _pull_text(available: list[str], busy: list[str]) -> str:
     if busy:
         parts.append(f"Holding more than one claim: {', '.join(busy)}.")
     parts.append(
-        "Claim one yourself with agent-parley issue claim, or ask a holder "
-        "for a handoff. Nothing is claimed for you."
+        "Claim one yourself with agent-parley issue claim before exploring "
+        "or editing, or ask a holder for a handoff. Nothing is claimed for "
+        "you."
     )
     return " ".join(parts)
 
@@ -2322,6 +2370,7 @@ def _idle_leads(
     name: str,
     ledger: dict,
     after: float,
+    taken: set[str] | None = None,
 ) -> dict | None:
     """Gathers the next work for a lane whose held claims cannot move.
 
@@ -2333,6 +2382,12 @@ def _idle_leads(
     that the lane could request. Each reading is best effort, and none
     carries an age, so the wake text stays the same until the work itself
     changes.
+
+    The top candidate skips the issues already named to an earlier lane in
+    the same sweep, so lanes woken together are pointed at different work.
+    When every candidate is taken, the best one is named anyway, since a
+    lane told about contended work still does better than one told to
+    retire while work is open.
 
     The interval is the caller's `claim_idle_after`, never the lane
     `stalled_after`: ten minutes between progress reports is normal for a
@@ -2347,11 +2402,12 @@ def _idle_leads(
         name: Participant the wake is for.
         ledger: Current issue ledger.
         after: Claim idle interval a peer claim must pass without progress.
+        taken: Issues already named to another lane in this sweep.
 
     Returns:
         The mail senders with their message identifiers, the top candidate
-        issue, and the stalled peer claim, or None when the lane holds no
-        claim or one of its claims can still move.
+        issue no other lane was named, and the stalled peer claim, or None
+        when the lane holds no claim or one of its claims can still move.
     """
     from agent_parley import checkpoints, plan, recommend
 
@@ -2369,8 +2425,20 @@ def _idle_leads(
         groups = plan.groups(directory)
     except (BridgeError, OSError, ValueError):
         groups = {}
-    ranked = recommend.rank(
-        ledger, groups, {}, {}, str(participant.get("provider", "")), 1
+    taken = taken or set()
+    ranked = _first_untaken(
+        [
+            record["issue"]
+            for record in recommend.rank(
+                ledger,
+                groups,
+                {},
+                {},
+                str(participant.get("provider", "")),
+                len(taken) + 1,
+            )
+        ],
+        taken,
     )
     now = time.time()
     stalled = sorted(
@@ -2384,7 +2452,7 @@ def _idle_leads(
     )
     return {
         "mail": [f"#{item['id']} from {item['sender']}" for item in mail[:5]],
-        "next": ranked[0]["issue"] if ranked else "",
+        "next": ranked[0] if ranked else "",
         "stalled": (
             {"issue": stalled[0][1], "owner": stalled[0][2]}
             if stalled
@@ -2438,7 +2506,8 @@ def _continue_text(
         number = leads["next"]
         steps.append(
             f"claim #{number}, the top agent-parley issue next candidate, "
-            f"with agent-parley issue claim {number}"
+            f"with agent-parley issue claim {number} before exploring or "
+            "editing it"
         )
     if stalled := leads.get("stalled"):
         steps.append(
@@ -2652,6 +2721,8 @@ def _work_offer(
 
     Returns:
         The actionable offer, or None when no work is currently eligible.
+        A pull offer with unclaimed work, and a continue offer naming next
+        work, also carry that issue as ``lead``, which `named_leads` reads.
     """
     held = owned.get(name, [])
     continuation = lifecycle.actionable(ledger, name)
@@ -2713,6 +2784,8 @@ def _work_offer(
             "text": _continue_text(ledger, continuation, held, leads),
             "progress": _work_progress(ledger, selected),
         }
+        if not continuation and leads and leads.get("next"):
+            offer["lead"] = leads["next"]
     elif results[name]["fit"] and not held and (available or busy):
         selected = available[:5]
         for holder in busy:
@@ -2726,6 +2799,8 @@ def _work_offer(
             "text": _pull_text(available, busy),
             "progress": _work_progress(ledger, selected),
         }
+        if available:
+            offer["lead"] = available[0]
     if offer:
         offer["id"] = hashlib.sha256(
             f"{offer['kind']}\x00{offer['text']}".encode()
@@ -2757,6 +2832,13 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     peer an offer could move work to, so retiring removes a lane from work
     selection rather than leaving it to refuse every offer it is sent.
 
+    Unclaimed work includes the open forge issues the ledger has not yet
+    recorded, through `issues.with_forge`, so a newly opened issue reaches
+    a waiting lane before anybody claims it. Lanes are offered work in name
+    order, and each lane's next lead or first pull pick skips the issues
+    already named to an earlier lane in the sweep while another candidate
+    remains, so lanes woken together do not all chase the same issue.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -2768,7 +2850,8 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     after = config["stalled_after"]
     ledger = issues.snapshot(directory)
     owned = issues.holders(ledger)
-    available = lifecycle.actionable(ledger)
+    pool = issues.with_forge(directory, ledger)
+    available = lifecycle.actionable(pool)
     serving = [
         name
         for name, participant in manifest["participants"].items()
@@ -2802,7 +2885,8 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                     list(marker.get("reservations") or []),
                 )
         owned = issues.holders(ledger)
-        available = lifecycle.actionable(ledger)
+        pool = issues.with_forge(directory, ledger)
+        available = lifecycle.actionable(pool)
         forget_poll_readings()
         results = {
             name: fit(home, directory, manifest, name, after, idle)
@@ -2817,15 +2901,16 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
     recipients = share_recipients(
         home, directory, manifest, results, stretches, owned, ledger, config
     )
-    for name in serving:
+    taken: set[str] = set()
+    for name in sorted(serving):
         result = results[name]
         offer = _work_offer(
             name,
             results,
             stretches,
             owned,
-            available,
-            ledger,
+            _first_untaken(available, taken),
+            pool,
             after,
             recipients,
             _idle_leads(
@@ -2833,10 +2918,13 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                 directory,
                 manifest,
                 name,
-                ledger,
+                pool,
                 config["claim_idle_after"],
+                taken,
             ),
         )
+        if offer and offer.get("lead"):
+            taken.add(offer["lead"])
         with lock(directory / f"{name}-work.lock", timeout=1):
             previous = published_work(directory, name)
             published = {**result, "offer": offer}
@@ -7678,6 +7766,10 @@ def _work_backlog(
     polls that publish no offer, so the same text is never delivered again;
     only a change to the text gives the lane a new offer to answer.
 
+    The offer is derived again the way `work` derived it: the leads the
+    lanes before this one in name order publish are the issues taken
+    earlier in that sweep, so an unchanged sweep reproduces the same offer.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory.
@@ -7695,6 +7787,12 @@ def _work_backlog(
         return None
     ledger = issues.snapshot(directory)
     owned = issues.holders(ledger)
+    pool = issues.with_forge(directory, ledger)
+    taken = {
+        lead
+        for lead, peer in named_leads(directory, manifest, name).items()
+        if peer < name
+    }
     results = {
         peer: fit(
             home,
@@ -7714,8 +7812,8 @@ def _work_backlog(
         results,
         stretches,
         owned,
-        lifecycle.actionable(ledger),
-        ledger,
+        _first_untaken(lifecycle.actionable(pool), taken),
+        pool,
         config["stalled_after"],
         share_recipients(
             home,
@@ -7732,8 +7830,9 @@ def _work_backlog(
             directory,
             manifest,
             name,
-            ledger,
+            pool,
             config["claim_idle_after"],
+            taken,
         ),
     )
     if not current or (

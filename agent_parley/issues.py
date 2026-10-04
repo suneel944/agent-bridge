@@ -533,6 +533,69 @@ def snapshot(directory: Path) -> dict:
     )
 
 
+def with_forge(directory: Path, state: dict) -> dict:
+    """Adds the open forge issues the ledger has never seen, for selection.
+
+    An issue enters the ledger only when somebody claims, plans or assigns
+    it, so a freshly opened issue is invisible to every reading that picks
+    the next work from the ledger. The supervisor's poll keeps the forge's
+    open issues in `status.FORGE_ISSUES`; each number listed there with no
+    ledger record is added as an unowned, authorized record carrying the
+    forge title and ``forge_only``, which `lifecycle.state` reads as
+    queued, so `unclaimed`, `lifecycle.actionable`
+    and `recommend.rank` treat it as free, unblocked work. The opened issue
+    itself is the operator's authorization to work on it.
+
+    The result is a reading for candidate selection only and is never
+    published: claiming the issue still writes its first ledger record. A
+    number the ledger already records keeps its record, so a closed, ended
+    or released issue is never revived. A cached reading older than
+    `status.FORGE_STALE` seconds, or a missing or unreadable one, adds
+    nothing.
+
+    Args:
+        directory: Private project state directory holding the cache.
+        state: Published issue ledger.
+
+    Returns:
+        The ledger itself when the cache adds nothing, otherwise a shallow
+        copy whose ``issues`` mapping also holds the forge-only records.
+    """
+    from agent_parley.status import FORGE_ISSUES, FORGE_STALE
+
+    try:
+        cached = json.loads((directory / FORGE_ISSUES).read_text())
+    except (OSError, ValueError):
+        return state
+    if not isinstance(cached, dict) or not isinstance(
+        listed := cached.get("issues"), dict
+    ):
+        return state
+    try:
+        read_at = float(cached.get("read_at") or 0)
+    except (TypeError, ValueError):
+        return state
+    if time.time() - read_at >= FORGE_STALE:
+        return state
+    recorded = state.get("issues", {})
+    added: dict[str, dict] = {}
+    for number, item in listed.items():
+        if str(number) in recorded or not str(number).isdigit():
+            continue
+        title = item.get("title") if isinstance(item, dict) else item
+        added[str(number)] = {
+            "owner": None,
+            "offer": None,
+            "blocked_by": [],
+            "title": str(title or ""),
+            "forge_only": True,
+            "execution": {"authorized": True},
+        }
+    if not added:
+        return state
+    return {**state, "issues": {**recorded, **added}}
+
+
 def holders(state: dict) -> dict[str, list[str]]:
     """Maps each lane to the issue numbers the ledger records it owning.
 
