@@ -117,7 +117,9 @@ eligible product changes proceed to version preparation and publication.
 Assign an owner, add a change-type label, and reference an existing
 local issue with `Refs #N` or a closing keyword. Match linked issue milestones
 when present. PRs labelled `release` always require a milestone. Bot-generated descriptions
-retain their native format, but ownership and issue rules still apply.
+retain their native format and need no local issue, because Dependabot opens
+its pull requests without one, but the owner and change-type label still apply
+and `.github/dependabot.yml` supplies both.
 
 Contribution text must omit generator credits, assistant attribution, robot
 signatures, and assistant coauthor trailers. This applies to tracked files,
