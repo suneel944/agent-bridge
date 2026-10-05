@@ -50,6 +50,23 @@ named in the lane's `status` detail and as a `second session` row in
 `problems` while its process runs, or for ten minutes when its process cannot
 be told apart from the lane's.
 
+A session continued with `--fork-session --resume`, or started by hand in the
+lane's worktree, keeps running after the lane's recorded process exits. Before
+each poll reads presence, the supervisor binds a lane whose recorded session
+process is gone to the second session its hooks last came from, while that
+process runs, or else to the newest native client of the lane's provider whose
+working directory is the lane worktree. The activity record then names that
+process and carries a `rebound` entry with its process ID, session and time,
+and the next hook from it is adopted under its new session ID. So a lane is
+never read as stopped, aged into `dead` or has its claims orphaned while a
+client still runs in its worktree. On macOS, where `ps` reports no working
+directory, only the recorded second session is found this way.
+
+A client the launcher did not start has no wake socket, so a wake cannot reach
+it. The wake is recorded as `unavailable`, `problems` shows a `wake attention`
+row reading `wake attempted at T, not delivered: ...`, and the lane's next hook
+context carries the same note once, so the lane learns it was asked for a turn.
+
 ## A lane held by a native dialog
 
 A native client sometimes stops on a screen of its own: a usage limit, a tool

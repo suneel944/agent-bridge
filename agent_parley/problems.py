@@ -111,6 +111,10 @@ WAKE_DETAILS = {
         "resume refused because a running launcher holds the session lock "
         "and its wake socket did not answer"
     ),
+    supervision.WAKE_UNAVAILABLE: (
+        "wake not delivered because "
+        + supervision.UNDELIVERED_WAKES[supervision.WAKE_UNAVAILABLE]
+    ),
     supervision.OPT_IN_MISSING: (
         "setup gap: resume withheld because no bridge tool approval is "
         "recorded, so the resumed session would stop at a prompt nobody sees"
@@ -309,6 +313,12 @@ def _remedy(
         return (
             f"take the turn waiting in {name}'s own client; its launcher "
             "still holds the session lock, so a resume would be refused",
+            BY_OPERATOR,
+        )
+    if wake.get("result") == supervision.WAKE_UNAVAILABLE:
+        return (
+            f"take the turn waiting in {name}'s own client, or end it and "
+            f"run agent-parley run {name} --resume {repo} so wakes reach it",
             BY_OPERATOR,
         )
     if wake.get("result") == supervision.OPT_IN_MISSING:
@@ -957,10 +967,16 @@ def _lane_rows(
     wake = record.get("wake") or {}
     if wake.get("result", "") in WAKE_DETAILS:
         command, actor = _remedy(name, repo, record, waking)
+        detail = WAKE_DETAILS[wake["result"]]
+        if wake["result"] in supervision.UNDELIVERED_WAKES and wake.get("at"):
+            detail = (
+                f"wake attempted at {wake['at']}, not delivered: "
+                f"{supervision.UNDELIVERED_WAKES[wake['result']]}"
+            )
         rows.append(
             _row(
                 WAKE,
-                WAKE_DETAILS[wake["result"]],
+                detail,
                 command,
                 wake.get("age_seconds"),
                 name,

@@ -629,6 +629,30 @@ def test_a_wake_refusal_names_its_reason_and_an_actor_who_can_clear_it(
     assert "complete or stop the session" not in row["command"]
 
 
+def test_an_undelivered_wake_names_when_it_was_attempted_and_why(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    alive(directory, "claude")
+    refuse(bridge, directory, "claude", supervision.WAKE_UNAVAILABLE)
+    [record] = [
+        row
+        for row in bridge.status_snapshot()["projects"][0]["participants"]
+        if row["participant"] == "claude"
+    ]
+    [row] = rows(bridge, problems.WAKE)
+    assert row["detail"].startswith(
+        f"wake attempted at {record['wake']['at']}, not delivered: no "
+        "launcher answered the lane's wake socket"
+    )
+    assert row["actor"] == problems.BY_OPERATOR
+    assert row["command"] == (
+        "take the turn waiting in claude's own client, or end it and run "
+        f"agent-parley run claude --resume {at(paired['root'])} so wakes "
+        "reach it"
+    )
+
+
 def test_a_withheld_resume_names_the_missing_approval_opt_in(
     bridge, repo, paired, served
 ):

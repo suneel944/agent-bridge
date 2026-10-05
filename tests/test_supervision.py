@@ -1319,6 +1319,62 @@ def test_a_held_session_lock_is_asked_over_its_socket_never_resumed(
     assert record["attempts"] == attempts
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="only Linux reports a process's working directory",
+)
+def test_a_client_in_the_lane_worktree_withholds_the_dead_verdict(
+    bridge, paired
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    command = roster.provider(
+        bridge.home, paired["participants"]["codex"]["provider"]
+    )["command"]
+    gone = subprocess.Popen([sys.executable, "-c", ""])
+    gone.wait(10)
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "session_id": "s1",
+            "session_pid": gone.pid,
+            "session_ticks": "1",
+            "activity": "stopped",
+            "updated": time.time() - 7200,
+        },
+    )
+    assert supervision.rebind_sessions(bridge.home, directory, paired) == []
+    sampled(bridge, paired, directory, "codex", 300)
+    assert supervision.dead_reason(bridge.home, directory, paired, "codex", 0)
+    client = subprocess.Popen(
+        ["bash", "-c", f"exec -a {command} sleep 120"], cwd=lane
+    )
+    try:
+        deadline = time.monotonic() + 10
+        cmdline = Path(f"/proc/{client.pid}/cmdline")
+        while not cmdline.read_bytes().startswith(command.encode()):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+        assert supervision.rebind_sessions(bridge.home, directory, paired) == [
+            "codex"
+        ]
+
+        published = checkpoints.activity(directory, "codex")
+        assert published["session_pid"] == client.pid
+        assert published["session_id"] == "s1"
+        sampled(bridge, paired, directory, "codex", 300)
+        recorded = supervision.condition(bridge.home, paired["root"], "codex")
+        assert recorded["state"] == lanes.STARTING
+        assert not supervision.dead_reason(
+            bridge.home, directory, paired, "codex", 0
+        )
+    finally:
+        client.kill()
+        client.wait(10)
+
+
 def test_manual_session_without_process_identity_requires_attention(
     bridge, paired, monkeypatch
 ):

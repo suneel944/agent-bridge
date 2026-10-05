@@ -3100,7 +3100,9 @@ def scan(home: Path, directory: Path, manifest: dict, agent: str) -> dict:
     Returns:
         ``issues`` (the ledger snapshot), ``offer`` (the lane's work offer or
         None), ``edited`` and ``advanced`` (the lane's operator edit and base
-        advance paths) and ``standing`` (its budget comparison).
+        advance paths), ``standing`` (its budget comparison) and ``wake``
+        (the statement of its last wake that was not delivered, or empty
+        text).
 
     Raises:
         BridgeError: If the ledger or the store cannot be read.
@@ -3116,6 +3118,9 @@ def scan(home: Path, directory: Path, manifest: dict, agent: str) -> dict:
         "edited": edits.get(agent, []),
         "advanced": advances.get(agent, []),
         "standing": budgets.standing(home, directory, manifest, agent),
+        "wake": supervision.undelivered_wake(
+            supervision.wake_record(home, manifest["root"], agent)
+        ),
     }
 
 
@@ -3562,11 +3567,13 @@ def checkpoint(
                 ]
                 state["budget_notified"] = notified
                 budget_notice = bool(set(standing["crossed"]) - set(notified))
+                missed = str(scanned.get("wake") or "")
                 for kind, stands in (
                     ("offer", offer),
                     ("edits", edited),
                     ("advance", advanced),
                     ("budget", standing["crossed"]),
+                    ("wake", missed),
                 ):
                     if not stands:
                         (state.get("delivered_items") or {}).pop(kind, None)
@@ -3616,6 +3623,7 @@ def checkpoint(
                     or edit_notice
                     or advance_notice
                     or budget_notice
+                    or missed
                     or owed
                     or news["items"]
                     or danger
@@ -3678,6 +3686,14 @@ def checkpoint(
                     if budget_notice:
                         sections.append(
                             ("budget", clip(budgets.notice(standing), 300))
+                        )
+                    if missed:
+                        sections.append(
+                            (
+                                "wake",
+                                f"Note: {missed}. Read your mail and the "
+                                "work it asked for now.",
+                            )
                         )
                     if event in ("SessionStart", "UserPromptSubmit"):
                         sections.append(("owed", owed_notice(owed)))

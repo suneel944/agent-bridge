@@ -26,6 +26,7 @@ from agent_parley import (
     roster,
     server,
     store,
+    supervision,
 )
 from agent_parley.state import lock, write_json
 
@@ -2157,3 +2158,99 @@ def test_a_foreign_process_editing_as_the_lane_is_denied(bridge, repo, paired):
     assert "session s1" in decision["permissionDecisionReason"]
     assert "session s2" in decision["permissionDecisionReason"]
     assert events(directory)[-1]["reason_class"] == "session_mismatch"
+
+
+def test_a_forked_session_is_bound_once_the_recorded_process_exits(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    old, recorded = held_process()
+    fork, forked = held_process()
+    try:
+        write_json(
+            directory / "codex-activity.json",
+            {
+                "session_id": "s1",
+                "session_pid": recorded.pid,
+                "session_ticks": recorded.ticks,
+                "activity": "idle",
+                "updated": time.time() - 60,
+            },
+        )
+        fork_event = {**ALLOW, "session_id": "s2", "cwd": str(lane)}
+        checkpoints.checkpoint(
+            bridge.home, directory, "codex", fork_event, forked
+        )
+        assert events(directory)[-1]["reason_class"] == "session_mismatch"
+        release(old)
+        assert supervision.presence(directory, "codex")["process_alive"] is (
+            False
+        )
+
+        assert supervision.rebind_sessions(bridge.home, directory, paired) == [
+            "codex"
+        ]
+
+        state = checkpoints.activity(directory, "codex")
+        assert state["session_id"] == "s2"
+        assert state["session_pid"] == fork.pid
+        assert state["rebound"]["pid"] == fork.pid
+        assert "foreign_session" not in state
+        assert supervision.presence(directory, "codex")["process_alive"]
+        checkpoints.checkpoint(
+            bridge.home,
+            directory,
+            "codex",
+            fork_event,
+            forked,
+            record_only=True,
+        )
+        assert events(directory)[-1]["reason_class"] == "observed"
+        state = checkpoints.activity(directory, "codex")
+        assert state["activity"] == "working"
+    finally:
+        if old.poll() is None:
+            release(old)
+        release(fork)
+
+
+def test_an_undelivered_wake_is_noted_in_the_next_hook_context(
+    bridge, repo, paired
+):
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    own = process.ServerProcess(os.getpid(), process.start_ticks(os.getpid()))
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "session_id": "s1",
+            "session_pid": own.pid,
+            "session_ticks": own.ticks,
+            "activity": "idle",
+            "updated": time.time() - 60,
+        },
+    )
+    supervision.store_wake(
+        bridge.home,
+        directory,
+        paired["root"],
+        "codex",
+        {
+            "at": time.time(),
+            "attempts": 1,
+            "backlog": ["1"],
+            "result": supervision.WAKE_UNAVAILABLE,
+        },
+    )
+    prompt = {**PROMPT, "session_id": "s1", "cwd": str(lane)}
+
+    output = checkpoints.checkpoint(
+        bridge.home, directory, "codex", prompt, own
+    )
+
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "wake attempted at " in context
+    assert "not delivered: no launcher answered" in context
+    again = checkpoints.checkpoint(bridge.home, directory, "codex", prompt, own)
+    assert "not delivered" not in json.dumps(again)
