@@ -136,6 +136,63 @@ def lane_state(record: dict) -> str:
     return str(record["availability"]["state"])
 
 
+def folded(record: dict, after: float) -> bool:
+    """Tells whether a dead lane has left nothing the default views need.
+
+    A lane is folded out of the default `status` and `problems` views once
+    its session is dead, it owns no claim, no process of it answers, and its
+    newest report and activity are both older than the retention interval.
+    Nothing in such a lane can change until an operator acts on it, so it
+    is counted on one line instead of listed; `--all` lists it again.
+
+    Args:
+        record: One lane record from the status reading.
+        after: Retention interval in seconds, the project's `fold_after`.
+
+    Returns:
+        True when the lane qualifies; False for any lane still holding a
+        claim, still running, active inside the interval, or whose report
+        and activity ages are both unknown.
+    """
+    availability = record.get("availability") or {}
+    if (
+        record.get("lane_state") != "dead"
+        or record.get("claims")
+        or availability.get("process_alive")
+    ):
+        return False
+    ages = [
+        value
+        for value in (
+            record.get("report_age_seconds"),
+            availability.get("age_seconds"),
+        )
+        if value is not None
+    ]
+    return bool(ages) and min(ages) > after
+
+
+def fold_line(count: int, after: float, noun: str) -> str:
+    """Words the one line that stands for the rows a default view hides.
+
+    Args:
+        count: How many rows were hidden.
+        after: Retention interval in seconds that hid them.
+        noun: What one hidden row is, such as ``dead lane``; an ``s`` is
+            added for any count but one.
+
+    Returns:
+        The summary line naming the count, the interval and `--all`.
+    """
+    from agent_parley import tables
+
+    plural = "" if count == 1 else "s"
+    return (
+        f"{count} {noun}{plural} older than {tables.age(after)} hidden; "
+        "--all shows them"
+    )
+
+
 def task_line(record: dict, fallback: str) -> str:
     """Describes the work one lane is on for its status task line.
 
@@ -1204,6 +1261,7 @@ class StatusMixin(BridgeCore):
                             path.parent
                         ),
                         "supervision_poll": supervision.last_poll(path.parent),
+                        "fold_after": context["configuration"]["fold_after"],
                         "pull_request_outcomes": (
                             metrics.pull_request_outcomes(
                                 context.get("pull_request_record"),
@@ -1312,14 +1370,16 @@ class StatusMixin(BridgeCore):
         registration names, and a short list of orphaned or overdue claims
         with the command that resolves each. Claims whose work already ended
         on the forge are summarized on one line unless `every_claim` asks
-        for their rows. Dormant projects are left out unless `every_project`
+        for their rows, and so are the lanes `folded` past the project's
+        `fold_after`. Dormant projects are left out unless `every_project`
         asks for them, or the selection names that project.
 
         Args:
             selection: Filters the operator asked for; its project filter
                 scopes the view to one project.
             width: Columns the tables may use, or None for whole lines.
-            every_claim: Also list claims whose work ended on the forge.
+            every_claim: Also list claims whose work ended on the forge and
+                lanes folded out as long dead.
             every_project: Also list dormant projects, after the others.
 
         Returns:
@@ -1408,7 +1468,8 @@ class StatusMixin(BridgeCore):
         Args:
             project: One project record from the status reading.
             width: Columns the tables may use, or None for whole lines.
-            every_claim: Also list claims whose work ended on the forge.
+            every_claim: Also list claims whose work ended on the forge and
+                lanes folded out as long dead.
         """
         from agent_parley import metrics, supervision
         from agent_parley.cli import supervision_failure, tables
@@ -1426,11 +1487,16 @@ class StatusMixin(BridgeCore):
         notes: list[str] = []
         runs: list[str] = []
         ended: list[int] = []
+        gone = 0
+        after = project.get("fold_after") or supervision.DEFAULTS["fold_after"]
         states = {
             record["participant"]: record["lane_state"]
             for record in project["participants"]
         }
         for record in project["participants"]:
+            if not every_claim and folded(record, after):
+                gone += 1
+                continue
             owner = record["participant"]
             peer = supervision.live_peer(states, owner)
             live = 0
@@ -1473,6 +1539,8 @@ class StatusMixin(BridgeCore):
             print(text)
         for text in tables.lane_table(lanes, width):
             print(text)
+        if gone:
+            print(fold_line(gone, after, "dead lane"))
         for text in runs:
             print(text)
         if outcome := metrics.outcome_line(

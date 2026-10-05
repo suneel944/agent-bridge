@@ -1807,3 +1807,73 @@ def test_only_a_hook_the_client_lacks_is_named_as_the_gap():
         "inferred by dialog watcher"
     )
     assert lanes.provenance(None) is None
+
+
+def aging_record(name, state, age, claims=()):
+    """Shapes the fields of one status lane record that folding reads."""
+    return {
+        "participant": name,
+        "lane_state": state,
+        "claims": list(claims),
+        "report_age_seconds": age,
+        "availability": {"process_alive": False, "age_seconds": age},
+    }
+
+
+def folded_rows():
+    """Derives rows for one long-dead lane and one live lane, then folds."""
+    project = {
+        "participants": [
+            aging_record("claude", "dead", 3 * 86400),
+            aging_record("codex", "working", 30),
+        ]
+    }
+    stale = problems._row(problems.WAKE, "woken", "x y", 300000, "claude")
+    recent = problems._row(problems.DIRTY, "a.txt", "x y", 600, "claude")
+    live = problems._row(problems.CHECKS, "ci", "x y", 200000, "codex")
+    rows = [stale, recent, live]
+    problems._fold(rows, project, 86400)
+    return stale, recent, live
+
+
+def test_old_rows_of_a_long_dead_lane_fold_and_a_live_problem_stays():
+    stale, recent, live = folded_rows()
+    assert stale["folded"] == 86400
+    assert "folded" not in recent and "folded" not in live
+    listed = problems.lines([live, stale, recent])
+    assert not any("woken" in line for line in listed)
+    assert any("ci" in line and "codex" in line for line in listed)
+    assert any("a.txt" in line for line in listed)
+    assert listed[-1] == (
+        "1 dead-lane problem older than 24h hidden; --all shows them"
+    )
+    assert problems.shown([live, stale]) == [live]
+
+
+def test_problems_all_lists_folded_rows_without_the_summary():
+    stale, recent, live = folded_rows()
+    listed = problems.lines([live, stale, recent], everything=True)
+    assert any("woken" in line for line in listed)
+    assert not any("hidden; --all" in line for line in listed)
+    document = problems.rendered([live, stale, recent])
+    assert document["count"] == 2 and document["folded"] == 1
+    assert problems.rendered([live, stale], everything=True)["count"] == 2
+
+
+def test_only_folded_rows_print_the_summary_alone():
+    stale, _, _ = folded_rows()
+    assert problems.lines([stale]) == [
+        "1 dead-lane problem older than 24h hidden; --all shows them"
+    ]
+
+
+def test_a_dead_lane_holding_a_claim_keeps_its_old_rows():
+    project = {
+        "participants": [
+            aging_record("claude", "dead", 3 * 86400, [{"issue": 42}])
+        ]
+    }
+    row = problems._row(problems.WAKE, "woken", "x y", 300000, "claude")
+    problems._fold([row], project, 86400)
+    assert "folded" not in row
+    assert any(line.endswith("woken; x y") for line in problems.lines([row]))

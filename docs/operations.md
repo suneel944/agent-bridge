@@ -1979,8 +1979,11 @@ The private project manifest accepts `"supervision"` with `interval` (default
 (300 seconds), `max_claims_per_lane` (2 claims, 1 to 100),
 `convergence_repeats` (3 failures, 1 to 100), `convergence_after`
 (14400 seconds), `prompts`, `wake`,
-`reclaim`, `titles` and `rerun_cancelled` (all true), and `ci_rounds`
-(2 rounds, 1 to 100). Numeric second values range from 1 to 86400 seconds.
+`reclaim`, `titles` and `rerun_cancelled` (all true), `ci_rounds`
+(2 rounds, 1 to 100), and `fold_after` (86400 seconds), the retention past
+which a dead lane with no claim and no process is folded out of the default
+`status` and `problems` views. Numeric second values range from 1 to 86400
+seconds.
 
 Issue convergence is accounted separately from wakes and liveness.
 `convergence.py` keeps one account per owned issue and claim generation in
