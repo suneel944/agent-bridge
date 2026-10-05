@@ -571,8 +571,14 @@ def size(path: Path) -> int:
 
 
 def _within(path: Path, parent: Path) -> bool:
-    """Reports whether a path lies inside, or is, another directory."""
-    return path == parent or parent in path.parents
+    """Reports whether a path lies inside, or is, another directory.
+
+    Both paths are already resolved, so a string prefix answers without
+    building the parent chain of every registered worktree for every lane.
+    """
+    inside = str(path)
+    outside = str(parent)
+    return inside == outside or inside.startswith(outside + os.sep)
 
 
 def owned_roots(directory: Path) -> list[Path]:
@@ -812,19 +818,38 @@ def child_worktrees(directory: Path, manifest: dict, name: str) -> list[Path]:
         Resolved paths Git registers and attributes to this lane, its own
         lane worktree excluded, empty when Git could not be read.
     """
+    return children_by_lane(manifest).get(name, [])
+
+
+def children_by_lane(manifest: dict) -> dict[str, list[Path]]:
+    """Attributes every registered worktree beyond the lanes in one read.
+
+    `child_worktrees` answers for one lane; a surface that asks for every
+    lane of a project, as `problems` does, would otherwise list the
+    repository's worktrees and attribute each of them once per lane, and
+    a project with hundreds of registrations made that the whole cost of
+    the command. This lists and attributes them once.
+
+    Args:
+        manifest: Project manifest naming the root and participants.
+
+    Returns:
+        Participant name to the resolved worktree paths attributed to it,
+        the base checkout and every lane's own worktree excluded; empty when
+        Git could not be read.
+    """
     entries = _entries(manifest["root"])
     if entries is None:
-        return []
-    base = str(Path(manifest["root"]).resolve())
+        return {}
     lanes, prefixes = _owner_index(manifest)
-    own = str(Path(manifest["participants"][name]["lane"]).resolve())
-    found = []
+    excluded = {str(Path(manifest["root"]).resolve()), *lanes}
+    found: dict[str, list[Path]] = {}
     for entry in entries:
-        if entry["path"] in (base, own):
+        if entry["path"] in excluded:
             continue
         path = Path(entry["path"])
-        if _owner(path, entry["branch"], lanes, prefixes) == name:
-            found.append(path)
+        if owner := _owner(path, entry["branch"], lanes, prefixes):
+            found.setdefault(owner, []).append(path)
     return found
 
 
