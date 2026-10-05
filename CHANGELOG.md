@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.18.0](https://github.com/suneel944/agent-parley/compare/v0.17.0...v0.18.0) (2026-10-05)
+
+
+### Features
+
+* fold dead lanes and stale problems out of the default view (#996) ([#986](https://github.com/suneel944/agent-parley/issues/986))
+* rotate a lane to a fresh native session after each resolved claim (#997) ([#987](https://github.com/suneel944/agent-parley/issues/987))
+
+### Bug fixes
+
+* bound the retire result to the tool budget and count the kept paths (#991) ([#984](https://github.com/suneel944/agent-parley/issues/984))
+* keep a claim newer than the forge reading out of the closed footer (#992) ([#985](https://github.com/suneel944/agent-parley/issues/985))
+* keep operator-blocked claims through retire and let a retired session keep its tools (#990) ([#982](https://github.com/suneel944/agent-parley/issues/982)) ([#983](https://github.com/suneel944/agent-parley/issues/983))
+* offer new forge issues and give each lane a distinct lead (#980) ([#978](https://github.com/suneel944/agent-parley/issues/978)) ([#979](https://github.com/suneel944/agent-parley/issues/979))
+* rebind a lane to its live forked session and report an undelivered wake (#998) ([#977](https://github.com/suneel944/agent-parley/issues/977))
+
+### Performance
+
+* list a project's worktrees once instead of once per lane (#995) ([#989](https://github.com/suneel944/agent-parley/issues/989))
+
 ## [0.17.0](https://github.com/suneel944/agent-parley/compare/v0.16.0...v0.17.0) (2026-10-03)
 
 

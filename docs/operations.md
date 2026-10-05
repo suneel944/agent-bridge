@@ -330,6 +330,7 @@ the only compatible combination.
 <!-- compatibility:start -->
 | Launcher | Wire protocol | Store schema |
 | --- | --- | --- |
+| 0.18.0 | 1 | 12 |
 | 0.17.0 | 1 | 12 |
 | 0.16.0 | 1 | 12 |
 | 0.15.2 | 1 | 12 |
