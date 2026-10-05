@@ -22,6 +22,8 @@ from agent_parley.core import BridgeCore
 if TYPE_CHECKING:
     import argparse
 
+ROTATION_OUTCOMES = ("ready", "blocked")
+
 
 class ReportsMixin(BridgeCore):
     """Lane reports, peer review, hook event export, archive and history."""
@@ -57,6 +59,11 @@ class ReportsMixin(BridgeCore):
         show it as waiting on that reason with its next-check time rather
         than a bare idle lane, and the supervisor defers waking it until that
         time, capped by the project's `deadlines.wait` ceiling.
+
+        A ready or blocked report on a claim ends the lane's work on that
+        claim, so it records a rotation point on the activity record: the
+        next resume of the lane starts a fresh native session instead of
+        continuing this one, as `launch.rotation_task` describes.
 
         Args:
             repo: Assigned agent worktree.
@@ -181,6 +188,13 @@ class ReportsMixin(BridgeCore):
                     evidence=evidence,
                     reported_at=time.time(),
                 )
+                if outcome in ROTATION_OUTCOMES and claim["issue"] is not None:
+                    state["rotation"] = {
+                        "at": time.time(),
+                        "issue": str(claim["issue"]),
+                        "outcome": outcome,
+                        "session": str(state.get("session_id") or ""),
+                    }
                 if key:
                     retries.remember(
                         state,

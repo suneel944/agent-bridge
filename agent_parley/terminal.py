@@ -23,6 +23,7 @@ from agent_parley import dialogs
 from agent_parley.state import BridgeError, lock
 
 PROMPT = "Review pending coordination messages and handoff reminders."
+ROTATING = "busy:rotating"
 MAX_WORK_PROMPT = 2_000
 SUBMIT_DELAY = 0.2
 ESCAPE_TIMEOUT = 0.5
@@ -769,6 +770,7 @@ def run(
     inactive_after: float = 300,
     home: Path | None = None,
     titles: bool = True,
+    rotate: bool = False,
 ) -> int:
     """Runs the native CLI with its own controlling terminal and permissions.
 
@@ -803,6 +805,14 @@ def run(
     client. A client that cannot be started exits the forked child with
     status 127 and never unwinds the launcher's own stack.
 
+    With ``rotate``, a detached launcher whose lane recorded a rotation
+    point, a ready or blocked report since the session began, answers an
+    admitted wake with `ROTATING` and ends the session the way ``SIGTERM``
+    does instead of typing the prompt. The service then resumes the
+    stopped lane on its ordinary wake path, and that resume starts a fresh
+    native session. An attached launcher never ends its operator's session
+    this way; it rotates on its next resume.
+
     An attached launcher owns the tab title: the lane name, its state and
     its claim progress lead, and the client's own title follows as a suffix.
     The title is refreshed when the lane's activity record, the issue ledger
@@ -819,6 +829,8 @@ def run(
         inactive_after: Seconds without a new checkpoint before one retry.
         home: Private bridge state root for admission-time wake validation.
         titles: Whether an attached launcher sets the lane tab title.
+        rotate: Whether a detached launcher ends an idle session at a
+            rotation point instead of typing an admitted wake.
 
     Returns:
         Native process exit status.
@@ -880,6 +892,7 @@ def run(
                 bounded=bounded,
                 inactive_after=inactive_after,
                 home=home,
+                rotate=rotate,
             )
             path.unlink(missing_ok=True)
             if status is None:
@@ -910,6 +923,7 @@ def _session(
     bounded: bool,
     inactive_after: float,
     home: Path | None,
+    rotate: bool = False,
 ) -> int | None:
     """Relays one native session until the client exits or is stopped.
 
@@ -932,6 +946,8 @@ def _session(
         bounded: Whether standard output is a wake log to keep bounded.
         inactive_after: Seconds without a new checkpoint before one retry.
         home: Private bridge state root for admission-time wake validation.
+        rotate: Whether a detached session at a rotation point ends on an
+            admitted wake instead of receiving it.
 
     Returns:
         The client's wait status when it was reaped here, else None.
@@ -1101,6 +1117,13 @@ def _session(
                             prompt = selected_prompt(lane.parent, name, home)
                             if prompt is None:
                                 result = "busy:stale"
+                            elif (
+                                rotate
+                                and not attached
+                                and state.get("rotation")
+                            ):
+                                result = ROTATING
+                                stopping.append(signal.SIGTERM)
                             else:
                                 result = "unavailable"
                                 os.write(master, prompt.encode())

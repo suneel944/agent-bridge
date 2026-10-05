@@ -298,6 +298,22 @@ and report blocked, `problems` lists `ci rounds exhausted`, and one decision
 asks you to grant one more round or take over. The cap is advisory: nothing
 refuses a push. Details are in [Operations](operations.md).
 
+A lane does not carry one native session from claim to claim. A ready or
+blocked report on a claim records a rotation point on the lane, and the next
+resume, `agent-parley run NAME --resume` or the service's own, starts a fresh
+native session instead of continuing the old one. Its first prompt names the
+lane, the claims it still holds with their next action and the last report,
+followed by the task the resume carries, so each claim starts from a bounded
+context. A lane the service resumed without a terminal ends its idle session
+at the next wake after the rotation point, which reads `busy:rotating` in the
+wake result, and the service resumes it fresh on its ordinary wake backoff. A
+lane in your own terminal is never ended this way; it rotates on its next
+resume, and a launch without `--resume` is always a fresh session. Every
+provider starts a fresh session by leaving out its resume argument, so none is
+skipped. The activity record keeps the replaced session as `rotated_from`, and
+a session change by any other route, such as `/clear`, clears the point. Set
+the supervision key `rotate` to false to resume the recorded session instead.
+
 ## Revising the plan
 
 A lane that finds a missing prerequisite or an obsolete edge in the applied

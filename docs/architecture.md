@@ -1243,6 +1243,7 @@ signal, so macOS shutdown carries that narrow residual race and Linux does not.
 | Attachment page | Up to 2,048 characters |
 | Inbox page | Up to 5 messages; bodies omitted by default |
 | Thread page | Up to 10 messages; 240-character body previews |
+| Native session per lane | One per resolved claim: a ready or blocked report marks a rotation point and the next resume starts a fresh session whose first prompt carries the lane, its open claims and the last report, held to 1,500 bytes (`rotate` setting) |
 | Search hits | Up to 5 messages; 240-character body previews |
 | Search query | 160 UTF-8 bytes |
 | Thread identifier | 80 UTF-8 bytes |
